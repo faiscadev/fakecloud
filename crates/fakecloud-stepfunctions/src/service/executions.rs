@@ -162,10 +162,17 @@ impl StepFunctionsService {
 
         // As recorded, stopping an execution that has already ended changes
         // nothing and reports when it stopped.
-        if let (true, Some(stopped)) = (exec.status != ExecutionStatus::Running, exec.stop_date) {
-            return Ok(AwsResponse::ok_json(json!({
-                "stopDate": stopped.timestamp_millis() as f64 / 1000.0,
-            })));
+        if exec.status != ExecutionStatus::Running {
+            return match exec.stop_date {
+                Some(stopped) => Ok(AwsResponse::ok_json(json!({
+                    "stopDate": stopped.timestamp_millis() as f64 / 1000.0,
+                }))),
+                None => Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ExecutionNotRunning",
+                    format!("Execution is not running: '{exec_arn}'"),
+                )),
+            };
         }
 
         let now = Utc::now();
@@ -173,6 +180,7 @@ impl StepFunctionsService {
         exec.stop_date = Some(now);
         exec.error = error;
         exec.cause = cause;
+        push_aborted_event(exec, now);
         abort_map_runs(state, exec_arn, now);
 
         Ok(AwsResponse::ok_json(json!({
@@ -642,6 +650,32 @@ fn abort_map_runs(state: &mut StepFunctionsState, execution_arn: &str, now: chro
         if in_run && child.status == ExecutionStatus::Running {
             child.status = ExecutionStatus::Aborted;
             child.stop_date = Some(now);
+            push_aborted_event(child, now);
         }
     }
+}
+
+/// An aborted execution's last event. Nothing follows it: `add_event` leaves an
+/// aborted execution's history as it is.
+fn push_aborted_event(exec: &mut Execution, now: chrono::DateTime<Utc>) {
+    let details = match (&exec.error, &exec.cause) {
+        (None, None) => json!({}),
+        (error, cause) => {
+            let mut details = json!({});
+            if let Some(error) = error {
+                details["error"] = json!(error);
+            }
+            if let Some(cause) = cause {
+                details["cause"] = json!(cause);
+            }
+            details
+        }
+    };
+    exec.history_events.push(crate::state::HistoryEvent {
+        id: exec.history_events.len() as i64 + 1,
+        event_type: "ExecutionAborted".to_string(),
+        timestamp: now,
+        previous_event_id: 0,
+        details,
+    });
 }

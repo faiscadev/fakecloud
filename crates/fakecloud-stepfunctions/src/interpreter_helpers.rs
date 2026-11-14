@@ -1900,6 +1900,11 @@ pub(crate) fn add_event(
         .by_arn_mut(execution_arn)
         .and_then(|s| s.executions.get_mut(execution_arn))
     {
+        // A stopped execution's history ends where it was aborted, whatever
+        // its states were still doing.
+        if exec.status == ExecutionStatus::Aborted {
+            return 0;
+        }
         let id = exec.history_events.len() as i64 + 1;
         exec.history_events.push(HistoryEvent {
             id,

@@ -1040,14 +1040,17 @@ async fn execute_map_state(
     let finished = finish_map_output(state_def, ctx, input, &results.output);
     if finished.is_ok() {
         if let Some(arn) = &map_run_arn {
-            finish_map_run(
+            // A map run stopped with its parent stays as it is.
+            let finished = finish_map_run(
                 shared_state,
                 arn,
                 execution_arn,
                 Some(results.tallies),
                 "SUCCEEDED",
             );
-            add_event(shared_state, execution_arn, "MapRunSucceeded", 0, json!({}));
+            if finished {
+                add_event(shared_state, execution_arn, "MapRunSucceeded", 0, json!({}));
+            }
         }
     }
     add_event(
@@ -1285,6 +1288,7 @@ async fn run_map_iterations(
     children: Option<&crate::state::MapRunChildren>,
 ) -> Result<MapResults, MapRunError> {
     let map_run_arn = children.map(|c| c.map_run_arn.as_str());
+    let child_type = map_child_type(state_def);
     let jsonata = crate::jsonata::is_jsonata(state_def);
     let input_path = state_def["InputPath"].as_str();
 
@@ -1356,16 +1360,12 @@ async fn run_map_iterations(
     };
 
     // Get the iterator definition (ItemProcessor or Iterator for backwards compat)
-    let iterator_def = state_def
-        .get("ItemProcessor")
-        .or_else(|| state_def.get("Iterator"))
-        .cloned()
-        .ok_or_else(|| {
-            (
-                "States.Runtime".to_string(),
-                "Map state has no ItemProcessor or Iterator".to_string(),
-            )
-        })?;
+    let iterator_def = map_processor(state_def).cloned().ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "Map state has no ItemProcessor or Iterator".to_string(),
+        )
+    })?;
 
     let total_items = batched_items.len();
     add_event(
@@ -1382,12 +1382,27 @@ async fn run_map_iterations(
             failed_event: false,
         },
     )?;
+    // How many items each of a map run's iterations processes: its batch's,
+    // under a batcher.
+    let item_counts: Vec<i64> = match (map_run_arn, &batch_config) {
+        (None, _) => Vec::new(),
+        (Some(_), None) => vec![1; batched_items.len()],
+        (Some(_), Some(_)) => batched_items
+            .iter()
+            .map(|batch| {
+                batch["Items"]
+                    .as_array()
+                    .map_or(1, |items| items.len() as i64)
+            })
+            .collect(),
+    };
     if let Some(arn) = map_run_arn {
         set_map_run_total(
             shared_state,
             arn,
             execution_arn,
             total_items,
+            item_counts.iter().sum(),
             max_concurrency,
             tolerance,
         );
@@ -1399,16 +1414,6 @@ async fn run_map_iterations(
             json!({ "mapRunArn": arn }),
         );
     }
-    // How many items each iteration processes: its batch's, under a batcher.
-    let item_counts: Vec<i64> = batched_items
-        .iter()
-        .map(|item| match &batch_config {
-            Some(_) => item["Items"]
-                .as_array()
-                .map_or(1, |items| items.len() as i64),
-            None => 1,
-        })
-        .collect();
 
     // Apply ItemSelector to every item before any iteration starts, so a
     // failing selector fails the state without leaving earlier iterations
@@ -1470,13 +1475,14 @@ async fn run_map_iterations(
             .acquire_owned()
             .await
             .map_err(|_| ("States.Runtime".to_string(), "Semaphore closed".to_string()))?;
-        let may_start = progress.may_start();
+        // Nothing more starts once the map run has been stopped with its parent.
+        let may_start = children.is_none_or(|c| map_run_running(shared_state, &c.map_run_arn))
+            && progress.may_start();
         let recorded_input = result_writer.map(|_| item_input.clone());
         let progress = progress.clone();
         // A map run's iterations are child executions of their own, which the
         // parent's history doesn't follow.
         let child = children.and_then(|children| {
-            let child_type = map_child_type(state_def);
             let (arn, name) =
                 crate::state::map_run_child_execution(&children.map_run_arn, index, child_type)?;
             Some(MapRunChild {
@@ -1769,6 +1775,7 @@ fn start_map_run(
             child_definition: serde_json::to_string(&child_definition)
                 .expect("serde_json::Value serialization is infallible"),
             child_type: map_child_type(state_def),
+            item_total: 0,
         },
     );
 }
@@ -1779,6 +1786,7 @@ fn set_map_run_total(
     map_run_arn: &str,
     execution_arn: &str,
     total: usize,
+    item_total: i64,
     max_concurrency: u64,
     tolerance: FailureTolerance,
 ) {
@@ -1788,6 +1796,7 @@ fn set_map_run_total(
     let s = accounts.regional_mut(&account, &region);
     if let Some(mr) = s.map_runs.get_mut(map_run_arn) {
         mr.total_count = total as i64;
+        mr.item_total = item_total;
         // The configured MaxConcurrency (0 == unlimited), as AWS reports it, not
         // the internal effective concurrency.
         mr.max_concurrency = max_concurrency as i32;
@@ -1806,22 +1815,33 @@ fn finish_map_run(
     execution_arn: &str,
     tallies: Option<(i64, i64)>,
     status: &str,
-) {
+) -> bool {
     let account = account_id_from_arn(execution_arn).to_string();
     let mut accounts = shared_state.write();
     let region = arn_region(execution_arn, accounts.region());
     let s = accounts.regional_mut(&account, &region);
-    if let Some(mr) = s.map_runs.get_mut(map_run_arn) {
-        if mr.status != "RUNNING" {
-            return;
-        }
-        mr.status = status.to_string();
-        if let Some((succeeded, failed)) = tallies {
-            mr.succeeded_count = succeeded;
-            mr.failed_count = failed;
-        }
-        mr.stop_date = Some(Utc::now());
+    let Some(mr) = s.map_runs.get_mut(map_run_arn) else {
+        return false;
+    };
+    if mr.status != "RUNNING" {
+        return false;
     }
+    mr.status = status.to_string();
+    if let Some((succeeded, failed)) = tallies {
+        mr.succeeded_count = succeeded;
+        mr.failed_count = failed;
+    }
+    mr.stop_date = Some(Utc::now());
+    true
+}
+
+/// Whether a map run is still running: not stopped with its parent.
+fn map_run_running(shared_state: &SharedStepFunctionsState, map_run_arn: &str) -> bool {
+    let accounts = shared_state.read();
+    accounts
+        .by_arn(map_run_arn)
+        .and_then(|s| s.map_runs.get(map_run_arn))
+        .is_some_and(|run| run.status == "RUNNING")
 }
 
 /// The S3 service as the execution that is calling it.

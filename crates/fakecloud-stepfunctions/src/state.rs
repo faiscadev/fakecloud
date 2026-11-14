@@ -174,6 +174,9 @@ pub struct MapRun {
     /// `ProcessorConfig.ExecutionType` of its child executions.
     #[serde(default = "default_child_type")]
     pub child_type: StateMachineType,
+    /// Items in all, which its batches hold under an `ItemBatcher`.
+    #[serde(default)]
+    pub item_total: i64,
 }
 
 fn default_child_type() -> StateMachineType {

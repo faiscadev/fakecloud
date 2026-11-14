@@ -2358,7 +2358,8 @@ async fn stopping_an_ended_execution_reports_its_stop_date() {
     assert_eq!(after.status().as_str(), "SUCCEEDED");
 }
 
-// Stopping an execution stops its map run and the children still running in it.
+// Stopping an execution stops its map run and the children still running in
+// it, and starts no more.
 #[tokio::test]
 async fn stopping_the_parent_aborts_its_map_run_children() {
     let server = TestServer::start().await;
@@ -2368,9 +2369,10 @@ async fn stopping_the_parent_aborts_its_map_run_children() {
         "dmap-stop",
         json!({"StartAt":"M","States":{"M":{
             "Type":"Map",
+            "MaxConcurrency":1,
             "ItemProcessor":{
                 "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
-                "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}
+                "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":1,"End":true}}
             },
             "End":true
         }}}),
@@ -2379,7 +2381,7 @@ async fn stopping_the_parent_aborts_its_map_run_children() {
     let started = client
         .start_execution()
         .state_machine_arn(&machine)
-        .input("[1,2]")
+        .input("[1,2,3]")
         .send()
         .await
         .unwrap();
@@ -2400,20 +2402,35 @@ async fn stopping_the_parent_aborts_its_map_run_children() {
                 .send()
                 .await
                 .unwrap();
-            if children.executions().len() == 2 {
+            if !children.executions().is_empty() {
                 run_arn = Some(arn);
                 break;
             }
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(20)).await;
     }
-    let run_arn = run_arn.expect("both children started");
+    let run_arn = run_arn.expect("the first child started");
     client
         .stop_execution()
         .execution_arn(parent)
         .send()
         .await
         .unwrap();
+    // Long enough for the running child's Wait to end and the next to start.
+    sleep(Duration::from_millis(2500)).await;
+
+    let children = client
+        .list_executions()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(children.executions().len(), 1, "{children:?}");
+    let child = &children.executions()[0];
+    assert_eq!(child.status().as_str(), "ABORTED");
+    assert!(child.stop_date().is_some());
+    let types = history_types(&client, child.execution_arn()).await;
+    assert_eq!(types.last().map(String::as_str), Some("ExecutionAborted"));
 
     let run = client
         .describe_map_run()
@@ -2422,19 +2439,81 @@ async fn stopping_the_parent_aborts_its_map_run_children() {
         .await
         .unwrap();
     assert_eq!(run.status().as_str(), "ABORTED");
+    let counts = run.execution_counts().unwrap();
+    assert_eq!(
+        (
+            counts.aborted(),
+            counts.running(),
+            counts.pending(),
+            counts.total()
+        ),
+        (3, 0, 0, 3)
+    );
+    let parent_types = history_types(&client, parent).await;
+    assert!(
+        !parent_types.iter().any(|t| t == "MapRunSucceeded"),
+        "{parent_types:?}"
+    );
+}
+
+// Under an ItemBatcher a child processes its batch: `itemCount` and the map
+// run's item counts follow the items, its execution counts the children.
+#[tokio::test]
+async fn batched_map_run_children_count_their_items() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "dmap-batched",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "ItemBatcher":{"MaxItemsPerBatch":2},
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"P","States":{"P":{"Type":"Pass","End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input("[1,2,3]")
+        .send()
+        .await
+        .unwrap();
+    wait_terminal(&client, started.execution_arn()).await;
+    let run_arn = client
+        .list_map_runs()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap()
+        .map_runs()[0]
+        .map_run_arn()
+        .to_string();
     let children = client
         .list_executions()
         .map_run_arn(&run_arn)
         .send()
         .await
         .unwrap();
-    for child in children.executions() {
-        assert_eq!(
-            child.status().as_str(),
-            "ABORTED",
-            "{}",
-            child.execution_arn()
-        );
-        assert!(child.stop_date().is_some());
-    }
+    let mut item_counts: Vec<i32> = children
+        .executions()
+        .iter()
+        .map(|c| c.item_count().unwrap())
+        .collect();
+    item_counts.sort_unstable();
+    assert_eq!(item_counts, [1, 2]);
+    let run = client
+        .describe_map_run()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    let items = run.item_counts().unwrap();
+    let executions = run.execution_counts().unwrap();
+    assert_eq!((items.total(), items.succeeded()), (3, 3));
+    assert_eq!((executions.total(), executions.succeeded()), (2, 2));
 }

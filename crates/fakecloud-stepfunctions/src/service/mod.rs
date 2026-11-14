@@ -209,6 +209,13 @@ pub fn reconcile_interrupted_executions(state: &SharedStepFunctionsState) -> usi
                 count += 1;
             }
         }
+        // Their map runs can't go on either.
+        for run in s.map_runs.values_mut() {
+            if run.status == "RUNNING" {
+                run.status = "ABORTED".to_string();
+                run.stop_date = Some(now);
+            }
+        }
     }
     count
 }
@@ -361,7 +368,76 @@ fn state_machine_alias_to_json(alias: &crate::state::StateMachineAlias) -> Value
     })
 }
 
-fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
+fn map_run_to_json(mr: &crate::state::MapRun, children: &[&Execution]) -> Value {
+    let (item_counts, execution_counts) = if children.is_empty() {
+        // A run whose iterations never became child executions (persisted
+        // before they did): its recorded tallies, alike for items and
+        // executions.
+        let counts = recorded_map_run_counts(mr);
+        (counts.clone(), counts)
+    } else {
+        (
+            child_counts(mr, children, mr.item_total.max(mr.total_count), |c| {
+                c.item_count.unwrap_or(1)
+            }),
+            child_counts(mr, children, mr.total_count, |_| 1),
+        )
+    };
+    json!({
+        "mapRunArn": mr.map_run_arn,
+        "executionArn": mr.execution_arn,
+        "maxConcurrency": mr.max_concurrency,
+        "toleratedFailurePercentage": mr.tolerated_failure_percentage,
+        "toleratedFailureCount": mr.tolerated_failure_count,
+        "status": mr.status,
+        "startDate": mr.start_date.timestamp(),
+        "stopDate": mr.stop_date.map(|d| d.timestamp()),
+        "itemCounts": item_counts,
+        "executionCounts": execution_counts,
+        "redriveCount": 0,
+    })
+}
+
+/// A map run's counts from its child executions, each weighing `weight`
+/// (one execution, or the items it processes) out of `total`. Iterations that
+/// never started are pending while it runs, and aborted with it.
+fn child_counts(
+    mr: &crate::state::MapRun,
+    children: &[&Execution],
+    total: i64,
+    weight: impl Fn(&Execution) -> i64,
+) -> Value {
+    let tally = |status: ExecutionStatus| -> i64 {
+        children
+            .iter()
+            .filter(|c| c.status == status)
+            .map(|c| weight(c))
+            .sum()
+    };
+    let succeeded = tally(ExecutionStatus::Succeeded);
+    let failed = tally(ExecutionStatus::Failed);
+    let started: i64 = children.iter().map(|c| weight(c)).sum();
+    let unstarted = (total - started).max(0);
+    let (pending, aborted_unstarted) = match mr.status.as_str() {
+        "RUNNING" => (unstarted, 0),
+        "ABORTED" => (0, unstarted),
+        _ => (0, 0),
+    };
+    json!({
+        "pending": pending,
+        "running": tally(ExecutionStatus::Running),
+        "succeeded": succeeded,
+        "failed": failed,
+        "timedOut": tally(ExecutionStatus::TimedOut),
+        "aborted": tally(ExecutionStatus::Aborted) + aborted_unstarted,
+        "total": total,
+        "resultsWritten": succeeded + failed,
+        "failuresNotRedrivable": 0,
+        "pendingRedrive": 0,
+    })
+}
+
+fn recorded_map_run_counts(mr: &crate::state::MapRun) -> Value {
     // Iterations still in flight while the map run is RUNNING; zero once it has
     // reached a terminal status.
     let accounted = mr.succeeded_count + mr.failed_count;
@@ -370,9 +446,7 @@ fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
     } else {
         0
     };
-    // AWS reports parallel `itemCounts` and `executionCounts` maps; with one
-    // child execution per item they carry identical tallies here.
-    let counts = json!({
+    json!({
         "pending": 0,
         "running": running,
         "succeeded": mr.succeeded_count,
@@ -383,19 +457,6 @@ fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
         "total": mr.total_count,
         "failuresNotRedrivable": 0,
         "pendingRedrive": 0,
-    });
-    json!({
-        "mapRunArn": mr.map_run_arn,
-        "executionArn": mr.execution_arn,
-        "maxConcurrency": mr.max_concurrency,
-        "toleratedFailurePercentage": mr.tolerated_failure_percentage,
-        "toleratedFailureCount": mr.tolerated_failure_count,
-        "status": mr.status,
-        "startDate": mr.start_date.timestamp(),
-        "stopDate": mr.stop_date.map(|d| d.timestamp()),
-        "itemCounts": counts,
-        "executionCounts": counts,
-        "redriveCount": 0,
     })
 }
 
@@ -1460,11 +1521,15 @@ fn labeled_state_machine<'a>(
     state: &'a StepFunctionsState,
     arn: &str,
 ) -> Option<(&'a StateMachine, &'a crate::state::MapRun)> {
+    // The newest run speaks for the state machine as it is now.
     let run = state
         .map_runs
         .values()
-        .find(|run| run.state_machine_arn == arn)?;
-    let (machine_arn, _) = arn.rsplit_once('/')?;
+        .filter(|run| run.state_machine_arn == arn)
+        .max_by_key(|run| run.start_date)?;
+    // `<machine>/<label>`, or `<machine>/<label>/...` for a map run nested in
+    // another's children.
+    let (machine_arn, _) = arn.split_once('/')?;
     Some((state.state_machines.get(machine_arn)?, run))
 }
 

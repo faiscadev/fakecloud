@@ -1289,6 +1289,17 @@ async fn sfn_stop_execution() {
     assert_eq!(desc.error(), Some("UserCancelled"));
     assert_eq!(desc.cause(), Some("Test cancellation"));
     assert_eq!(desc.stop_date(), Some(stopped.stop_date()));
+    let history = client
+        .get_execution_history()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let last = history.events().last().unwrap();
+    assert_eq!(last.r#type().as_str(), "ExecutionAborted");
+    let details = last.execution_aborted_event_details().unwrap();
+    assert_eq!(details.error(), Some("UserCancelled"));
+    assert_eq!(details.cause(), Some("Test cancellation"));
 }
 
 #[tokio::test]
