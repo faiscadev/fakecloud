@@ -1,6 +1,6 @@
 +++
 title = "KMS emulator for tests"
-description = "Run AWS KMS locally for integration tests with fakecloud. 54 KMS operations, real ECDH, encryption/decryption, aliases, grants, key import, multi-region keys. Any AWS SDK, free."
+description = "Run AWS KMS locally for integration tests with fakecloud. 56 KMS operations, real ECDH, encryption/decryption, aliases, grants, key import, multi-region keys. Any AWS SDK, free."
 template = "page.html"
 +++
 
@@ -15,7 +15,7 @@ Point your AWS SDK at `http://localhost:4566`.
 
 ## Why fakecloud for KMS
 
-- **54 KMS operations** at 100% conformance — symmetric and asymmetric keys, encrypt/decrypt, aliases, grants, data key generation, real ECDH, key import, multi-region keys, key policies.
+- **56 KMS operations** at 100% conformance — symmetric and asymmetric keys, encrypt/decrypt, aliases, grants, data key generation, real ECDH, key import, multi-region keys, key policies.
 - **Real cryptography.** Symmetric Encrypt/Decrypt/GenerateDataKey use real AES-256-GCM envelope encryption with AWS-shaped ciphertext blobs. Asymmetric Sign/Verify/GetPublicKey use real RSA (RSA_2048/3072/4096) and real ECDSA (ECC_NIST_P256/P384/P521, ECC_SECG_P256K1). DeriveSharedSecret performs real ECDH. Output ciphertexts and signatures are cryptographically meaningful, not opaque stubs.
 - **Aliases everywhere.** `alias/...` works anywhere a key id is accepted — Encrypt, Decrypt, Sign, Verify, GenerateDataKey, ReEncrypt, grants, key policies, and cross-service `KmsKeyId` parameters.
 - **Cross-service KMS hook.** S3 (SSE-KMS), SQS, SNS, DynamoDB, Secrets Manager, and SSM SecureString call into KMS for real encrypt/decrypt. Every call is recorded at `/_fakecloud/kms/usage` so tests can assert which service triggered which KMS operation on which key.

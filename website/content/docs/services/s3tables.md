@@ -1,11 +1,11 @@
 +++
 title = "Amazon S3 Tables"
-description = "Amazon S3 Tables (s3tables) on fakecloud: a complete 49-operation implementation (100% conformance) — table buckets, namespaces, Iceberg tables, metadata-location pointers with version-token concurrency, and every encryption/policy/maintenance/replication sub-resource. restJson1."
+description = "Amazon S3 Tables (s3tables) on fakecloud: a complete 55-operation implementation (100% conformance) — table buckets, namespaces, Iceberg tables, metadata-location pointers with version-token concurrency, and every encryption/policy/maintenance/replication sub-resource. restJson1."
 weight = 63
 +++
 
 fakecloud implements **Amazon S3 Tables** as a restJson1 service (sigv4
-signing name `s3tables`). All **49 operations** ship with **100% conformance**
+signing name `s3tables`). All **55 operations** ship with **100% conformance**
 against AWS's own Smithy model, backed by account-partitioned state that
 persists across restarts in persistent mode.
 

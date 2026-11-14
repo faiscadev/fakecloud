@@ -6,7 +6,7 @@ weight = 17
 
 # Amazon DocumentDB
 
-fakecloud implements the full **55-operation** Amazon DocumentDB (docdb)
+fakecloud implements the full **56-operation** Amazon DocumentDB (docdb)
 control plane. DocumentDB reuses Amazon RDS's wire contract: it speaks the
 AWS **Query** protocol (form-encoded requests, XML responses), signs SigV4
 with the `rds` scope, and is reached at `rds.<region>.amazonaws.com`. The

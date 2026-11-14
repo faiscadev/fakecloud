@@ -4,7 +4,7 @@ description = "AWS Athena — workgroups, data catalogs, named queries, prepared
 weight = 30
 +++
 
-fakecloud implements AWS Athena's full JSON 1.1 control plane: 70 operations covering workgroups, data catalogs, named queries, prepared statements, query executions, notebooks, sessions + calculations, capacity reservations, tagging, and read-only catalog lookups. 100% Smithy conformance.
+fakecloud implements AWS Athena's full JSON 1.1 control plane: 75 operations covering workgroups, data catalogs, named queries, prepared statements, query executions, notebooks, sessions + calculations, capacity reservations, tagging, and read-only catalog lookups. 100% Smithy conformance.
 
 **Status: 100% control-plane coverage. A minimal SQL evaluator handles `SELECT` / `SHOW DATABASES` / `SHOW TABLES` / `DESCRIBE` and parameter substitution against Glue Data Catalog state; complex queries (joins, aggregations, window functions, Parquet/ORC scans) intentionally fall back to a synthesized single-row result.**
 

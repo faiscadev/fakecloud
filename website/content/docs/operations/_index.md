@@ -381,6 +381,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `BatchExecuteStatement`
 - `BatchGetItem`
 - `BatchWriteItem`
+- `CancelBulkOperation`
 - `CreateBackup`
 - `CreateGlobalTable`
 - `CreateTable`
@@ -389,6 +390,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteResourcePolicy`
 - `DeleteTable`
 - `DescribeBackup`
+- `DescribeBulkOperation`
 - `DescribeContinuousBackups`
 - `DescribeContributorInsights`
 - `DescribeEndpoints`
@@ -410,6 +412,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetResourcePolicy`
 - `ImportTable`
 - `ListBackups`
+- `ListBulkOperations`
 - `ListContributorInsights`
 - `ListExports`
 - `ListGlobalTables`
@@ -423,6 +426,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `RestoreTableToPointInTime`
 - `Scan`
 - `SearchVectors`
+- `StartBulkPutItems`
 - `TagResource`
 - `TransactGetItems`
 - `TransactWriteItems`
@@ -663,6 +667,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeletePatchBaseline`
 - `DeleteResourceDataSync`
 - `DeleteResourcePolicy`
+- `DeregisterDefaultHostManagementConfiguration`
 - `DeregisterManagedInstance`
 - `DeregisterPatchBaselineForPatchGroup`
 - `DeregisterTargetFromMaintenanceWindow`
@@ -754,6 +759,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutInventory`
 - `PutParameter`
 - `PutResourcePolicy`
+- `RegisterDefaultHostManagementConfiguration`
 - `RegisterDefaultPatchBaseline`
 - `RegisterPatchBaselineForPatchGroup`
 - `RegisterTargetWithMaintenanceWindow`
@@ -944,6 +950,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateCustomKeyStore`
 - `CreateGrant`
 - `CreateKey`
+- `Decapsulate`
 - `Decrypt`
 - `DeleteAlias`
 - `DeleteCustomKeyStore`
@@ -956,6 +963,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DisconnectCustomKeyStore`
 - `EnableKey`
 - `EnableKeyRotation`
+- `Encapsulate`
 - `Encrypt`
 - `GenerateDataKey`
 - `GenerateDataKeyPair`
@@ -1434,6 +1442,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ApplyPendingMaintenanceAction`
 - `AuthorizeDBSecurityGroupIngress`
 - `BacktrackDBCluster`
+- `CancelDBCapacityReservation`
 - `CancelExportTask`
 - `CopyDBClusterParameterGroup`
 - `CopyDBClusterSnapshot`
@@ -1442,6 +1451,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CopyOptionGroup`
 - `CreateBlueGreenDeployment`
 - `CreateCustomDBEngineVersion`
+- `CreateDBCapacityReservation`
 - `CreateDBCluster`
 - `CreateDBClusterEndpoint`
 - `CreateDBClusterParameterGroup`
@@ -1485,6 +1495,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeAccountAttributes`
 - `DescribeBlueGreenDeployments`
 - `DescribeCertificates`
+- `DescribeDBCapacityReservations`
 - `DescribeDBClusterAutomatedBackups`
 - `DescribeDBClusterBacktracks`
 - `DescribeDBClusterEndpoints`
@@ -1539,6 +1550,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ModifyCertificates`
 - `ModifyCurrentDBClusterCapacity`
 - `ModifyCustomDBEngineVersion`
+- `ModifyDBCapacityReservation`
 - `ModifyDBCluster`
 - `ModifyDBClusterEndpoint`
 - `ModifyDBClusterParameterGroup`
@@ -1629,6 +1641,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeGlobalClusters`
 - `DescribeOrderableDBInstanceOptions`
 - `DescribePendingMaintenanceActions`
+- `DescribeServerlessV2PlatformVersions`
 - `FailoverDBCluster`
 - `FailoverGlobalCluster`
 - `ListTagsForResource`
@@ -2197,6 +2210,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ModifyServerlessCache`
 - `ModifyUser`
 - `ModifyUserGroup`
+- `PrepareMigration`
 - `PurchaseReservedCacheNodesOffering`
 - `RebalanceSlotsInGlobalReplicationGroup`
 - `RebootCacheCluster`
@@ -2204,6 +2218,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ResetCacheParameterGroup`
 - `RevokeCacheSecurityGroupIngress`
 - `StartMigration`
+- `StopMigration`
 - `TestFailover`
 - `TestMigration`
 
@@ -3329,6 +3344,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateStudioLifecycleConfig`
 - `CreateTrainingJob`
 - `CreateTrainingPlan`
+- `CreateTrainingSession`
 - `CreateTransformJob`
 - `CreateTrial`
 - `CreateTrialComponent`
@@ -3392,6 +3408,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteStudioLifecycleConfig`
 - `DeleteTags`
 - `DeleteTrainingJob`
+- `DeleteTrainingSession`
 - `DeleteTrial`
 - `DeleteTrialComponent`
 - `DeleteUserProfile`
@@ -3468,6 +3485,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeTrainingJob`
 - `DescribeTrainingPlan`
 - `DescribeTrainingPlanExtensionHistory`
+- `DescribeTrainingSession`
 - `DescribeTransformJob`
 - `DescribeTrial`
 - `DescribeTrialComponent`
@@ -3569,6 +3587,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListTrainingJobs`
 - `ListTrainingJobsForHyperParameterTuningJob`
 - `ListTrainingPlans`
+- `ListTrainingSessions`
 - `ListTransformJobs`
 - `ListTrialComponents`
 - `ListTrials`
@@ -3611,6 +3630,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `StopPipelineExecution`
 - `StopProcessingJob`
 - `StopTrainingJob`
+- `StopTrainingSession`
 - `StopTransformJob`
 - `UpdateAction`
 - `UpdateAppImageConfig`
@@ -3978,6 +3998,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AcceptInboundConnection`
 - `AddDataSource`
 - `AddDirectQueryDataSource`
+- `AddReplicationPeer`
 - `AddTags`
 - `AssociatePackage`
 - `AssociatePackages`
@@ -3985,6 +4006,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AuthorizeVpcEndpointAccess`
 - `CancelDomainConfigChange`
 - `CancelServiceSoftwareUpdate`
+- `CompareDomainConfiguration`
 - `CreateApplication`
 - `CreateDomain`
 - `CreateIndex`
@@ -4008,6 +4030,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeDomainConfig`
 - `DescribeDomainHealth`
 - `DescribeDomainNodes`
+- `DescribeDomainReplication`
 - `DescribeDomains`
 - `DescribeDryRunProgress`
 - `DescribeInboundConnections`
@@ -4021,6 +4044,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DetachDataSource`
 - `DissociatePackage`
 - `DissociatePackages`
+- `FailoverReplication`
 - `GetApplication`
 - `GetCapability`
 - `GetCompatibleVersions`
@@ -4055,12 +4079,14 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutDefaultApplicationSetting`
 - `RegisterCapability`
 - `RejectInboundConnection`
+- `RemoveReplicationPeer`
 - `RemoveTags`
 - `RevokeVpcEndpointAccess`
 - `RollbackServiceSoftwareUpdate`
 - `StartDomainMaintenance`
 - `StartMigration`
 - `StartServiceSoftwareUpdate`
+- `SwitchoverReplication`
 - `UpdateApplication`
 - `UpdateDataSource`
 - `UpdateDirectQueryDataSource`
@@ -4865,6 +4891,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeImages`
 - `DescribePullThroughCacheRules`
 - `DescribeRegistry`
+- `DescribeReplicationBackfillResults`
 - `DescribeRepositories`
 - `DescribeRepositoryCreationTemplates`
 - `GetAccountSetting`
@@ -4880,6 +4907,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListImageReferrers`
 - `ListImages`
 - `ListPullTimeUpdateExclusions`
+- `ListReplicationBackfills`
 - `ListTagsForResource`
 - `PutAccountSetting`
 - `PutImage`
@@ -4894,6 +4922,8 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `SetRepositoryPolicy`
 - `StartImageScan`
 - `StartLifecyclePolicyPreview`
+- `StartReplicationBackfill`
+- `StopReplicationBackfill`
 - `TagResource`
 - `UntagResource`
 - `UpdateImageStorageClass`
@@ -4904,11 +4934,13 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 ## [ECS](@/docs/services/ecs.md)
 
+- `AssociateGatewayWithCluster`
 - `ContinueServiceDeployment`
 - `CreateCapacityProvider`
 - `CreateCluster`
 - `CreateDaemon`
 - `CreateExpressGatewayService`
+- `CreateGateway`
 - `CreateService`
 - `CreateTaskSet`
 - `DeleteAccountSetting`
@@ -4918,6 +4950,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteDaemon`
 - `DeleteDaemonTaskDefinition`
 - `DeleteExpressGatewayService`
+- `DeleteGateway`
 - `DeleteService`
 - `DeleteTaskDefinitions`
 - `DeleteTaskSet`
@@ -4931,12 +4964,16 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeDaemonRevisions`
 - `DescribeDaemonTaskDefinition`
 - `DescribeExpressGatewayService`
+- `DescribeGateway`
+- `DescribeGatewayResources`
+- `DescribeGatewayRoute`
 - `DescribeServiceDeployments`
 - `DescribeServiceRevisions`
 - `DescribeServices`
 - `DescribeTaskDefinition`
 - `DescribeTaskSets`
 - `DescribeTasks`
+- `DisassociateGatewayFromCluster`
 - `DiscoverPollEndpoint`
 - `ExecuteCommand`
 - `GetTaskProtection`
@@ -4947,6 +4984,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListDaemonDeployments`
 - `ListDaemonTaskDefinitions`
 - `ListDaemons`
+- `ListGatewayClusterAssociations`
+- `ListGatewayRoutes`
+- `ListGateways`
 - `ListServiceDeployments`
 - `ListServices`
 - `ListServicesByNamespace`
@@ -4977,6 +5017,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateContainerInstancesState`
 - `UpdateDaemon`
 - `UpdateExpressGatewayService`
+- `UpdateGateway`
 - `UpdateService`
 - `UpdateServicePrimaryTaskSet`
 - `UpdateTaskProtection`
@@ -5305,6 +5346,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `SetDefaultPermissionVersion`
 - `TagResource`
 - `UntagResource`
+- `UpdatePermission`
 - `UpdateResourceShare`
 
 ## [AWS Cost Explorer](@/docs/services/ce.md)
@@ -5359,6 +5401,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 ## [Amazon S3 Tables](@/docs/services/s3tables.md)
 
+- `CompleteTableMigration`
 - `CreateNamespace`
 - `CreateTable`
 - `CreateTableBucket`
@@ -5384,6 +5427,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetTableMaintenanceConfiguration`
 - `GetTableMaintenanceJobStatus`
 - `GetTableMetadataLocation`
+- `GetTableMigration`
 - `GetTablePolicy`
 - `GetTableRecordExpirationConfiguration`
 - `GetTableRecordExpirationJobStatus`
@@ -5392,6 +5436,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetTableStorageClass`
 - `ListNamespaces`
 - `ListTableBuckets`
+- `ListTableMigrations`
 - `ListTables`
 - `ListTagsForResource`
 - `PutTableBucketEncryption`
@@ -5405,14 +5450,18 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutTableRecordExpirationConfiguration`
 - `PutTableReplication`
 - `RenameTable`
+- `StartTableMigration`
+- `SyncTableMigration`
 - `TagResource`
 - `UntagResource`
 - `UpdateTableMetadataLocation`
+- `UpdateTableMigration`
 
 ## [AWS Lake Formation](@/docs/services/lakeformation.md)
 
 - `AddLFTagsToResource`
 - `AssumeDecoratedRoleWithSAML`
+- `AttachRLSPolicy`
 - `BatchGrantPermissions`
 - `BatchRevokePermissions`
 - `CancelTransaction`
@@ -5422,16 +5471,19 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateLFTagExpression`
 - `CreateLakeFormationIdentityCenterConfiguration`
 - `CreateLakeFormationOptIn`
+- `CreateRLSPolicy`
 - `DeleteDataCellsFilter`
 - `DeleteLFTag`
 - `DeleteLFTagExpression`
 - `DeleteLakeFormationIdentityCenterConfiguration`
 - `DeleteLakeFormationOptIn`
 - `DeleteObjectsOnCancel`
+- `DeleteRLSPolicy`
 - `DeregisterResource`
 - `DescribeLakeFormationIdentityCenterConfiguration`
 - `DescribeResource`
 - `DescribeTransaction`
+- `DetachRLSPolicy`
 - `ExtendTransaction`
 - `GetDataCellsFilter`
 - `GetDataLakePrincipal`
@@ -5441,6 +5493,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetLFTagExpression`
 - `GetQueryState`
 - `GetQueryStatistics`
+- `GetRLSPolicy`
 - `GetResourceLFTags`
 - `GetTableObjects`
 - `GetTemporaryDataLocationCredentials`
@@ -5454,6 +5507,8 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListLFTags`
 - `ListLakeFormationOptIns`
 - `ListPermissions`
+- `ListRLSPolicies`
+- `ListRLSPolicyAttachments`
 - `ListResources`
 - `ListTableStorageOptimizers`
 - `ListTransactions`
@@ -5469,6 +5524,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateLFTag`
 - `UpdateLFTagExpression`
 - `UpdateLakeFormationIdentityCenterConfiguration`
+- `UpdateRLSPolicy`
 - `UpdateResource`
 - `UpdateTableObjects`
 - `UpdateTableStorageOptimizer`
@@ -6084,12 +6140,14 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateNotebook`
 - `CreatePreparedStatement`
 - `CreatePresignedNotebookUrl`
+- `CreateSystemTableConfiguration`
 - `CreateWorkGroup`
 - `DeleteCapacityReservation`
 - `DeleteDataCatalog`
 - `DeleteNamedQuery`
 - `DeleteNotebook`
 - `DeletePreparedStatement`
+- `DeleteSystemTableConfiguration`
 - `DeleteWorkGroup`
 - `ExportNotebook`
 - `GetCalculationExecution`
@@ -6109,6 +6167,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetSession`
 - `GetSessionEndpoint`
 - `GetSessionStatus`
+- `GetSystemTableConfiguration`
 - `GetTableMetadata`
 - `GetWorkGroup`
 - `ImportNotebook`
@@ -6125,6 +6184,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListPreparedStatements`
 - `ListQueryExecutions`
 - `ListSessions`
+- `ListSystemTableStatuses`
 - `ListTableMetadata`
 - `ListTagsForResource`
 - `ListWorkGroups`
@@ -6143,6 +6203,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateNotebook`
 - `UpdateNotebookMetadata`
 - `UpdatePreparedStatement`
+- `UpdateSystemTableConfiguration`
 - `UpdateWorkGroup`
 
 ## [ACM](@/docs/services/acm.md)
@@ -6404,6 +6465,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `BatchGetCrawlers`
 - `BatchGetCustomEntityTypes`
 - `BatchGetDataQualityResult`
+- `BatchGetDataQualityResultV2`
 - `BatchGetDataQualityRulesetEvaluationRun`
 - `BatchGetDevEndpoints`
 - `BatchGetIterableForms`
@@ -6523,6 +6585,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetDataQualityModel`
 - `GetDataQualityModelResult`
 - `GetDataQualityResult`
+- `GetDataQualityResultV2`
 - `GetDataQualityRuleRecommendationRun`
 - `GetDataQualityRuleset`
 - `GetDataQualityRulesetEvaluationRun`
@@ -6542,6 +6605,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetJobBookmark`
 - `GetJobRun`
 - `GetJobRuns`
+- `GetJobUpgradeAnalysis`
 - `GetJobs`
 - `GetMLTaskRun`
 - `GetMLTaskRuns`
@@ -6594,6 +6658,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListCrawls`
 - `ListCustomEntityTypes`
 - `ListDataQualityResults`
+- `ListDataQualityResultsV2`
 - `ListDataQualityRuleRecommendationRuns`
 - `ListDataQualityRulesetEvaluationRuns`
 - `ListDataQualityRulesets`
@@ -6620,6 +6685,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListUsageProfiles`
 - `ListWorkflows`
 - `ModifyIntegration`
+- `PublishDataQualityResultV2`
 - `PutAsset`
 - `PutAssetType`
 - `PutAttachment`
@@ -6649,6 +6715,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `StartExportLabelsTaskRun`
 - `StartImportLabelsTaskRun`
 - `StartJobRun`
+- `StartJobUpgradeAnalysis`
 - `StartMLEvaluationTaskRun`
 - `StartMLLabelingSetGenerationTaskRun`
 - `StartMaterializedViewRefreshTaskRun`
@@ -6658,6 +6725,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `StopColumnStatisticsTaskRunSchedule`
 - `StopCrawler`
 - `StopCrawlerSchedule`
+- `StopJobUpgradeAnalysis`
 - `StopMaterializedViewRefreshTaskRun`
 - `StopSession`
 - `StopTrigger`
@@ -7749,6 +7817,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetCapacityManagerMetricData`
 - `GetCapacityManagerMetricDimensions`
 - `GetCapacityManagerMonitoredTagKeys`
+- `GetCapacityManagerSupportabilityScores`
 - `GetCapacityReservationUsage`
 - `GetClientVpnEndpointAuthorizationPolicy`
 - `GetCoipPoolUsage`
@@ -7764,6 +7833,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetHostReservationPurchasePreview`
 - `GetImageAncestry`
 - `GetImageBlockPublicAccessState`
+- `GetImageFindings`
 - `GetInstanceMetadataDefaults`
 - `GetInstanceTpmEkPub`
 - `GetInstanceTypesFromInstanceRequirements`
@@ -7803,6 +7873,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetSnapshotBlockPublicAccessState`
 - `GetSpotPlacementScores`
 - `GetSubnetCidrReservations`
+- `GetTransitGatewayAttachmentNatConfiguration`
 - `GetTransitGatewayAttachmentPropagations`
 - `GetTransitGatewayMeteringPolicyEntries`
 - `GetTransitGatewayMulticastDomainAssociations`
@@ -7884,6 +7955,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ModifyTrafficMirrorFilterRule`
 - `ModifyTrafficMirrorSession`
 - `ModifyTransitGateway`
+- `ModifyTransitGatewayAttachmentNatConfiguration`
 - `ModifyTransitGatewayMeteringPolicy`
 - `ModifyTransitGatewayPolicyTableEntry`
 - `ModifyTransitGatewayPrefixListReference`

@@ -4,7 +4,7 @@ description = "Elastic Container Service — full API: clusters, task definition
 weight = 22
 +++
 
-fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 77 operations.
+fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 88 operations.
 
 **Status: full API.** Covers clusters, task definitions, real Fargate-style task execution, services with rolling deployments + CODE_DEPLOY blue/green task sets, daemons, ExpressGatewayService, task sets, container instances, capacity providers, attributes, task protection, ECS Exec, placement constraints / strategies, awsvpc ENI binding, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
 
