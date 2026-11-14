@@ -27,7 +27,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | Startup | ~300ms | ~3s | ~3s |
 | Idle memory | ~30 MiB | ~150 MiB | ~150 MiB |
 | Install size | ~130 MB | ~1 GB Docker image | ~1 GB Docker image |
-| Conformance methodology | Smithy-validated, 257,522/257,522 test variants pass on every commit | Not published | Not published |
+| Conformance methodology | Smithy-validated, 260,001/260,001 test variants pass on every commit | Not published | Not published |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) | Not published | Not published |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust, .NET | Python, Java | Python, Java |
 | Cognito User Pools | 132 ops, full auth flows | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |

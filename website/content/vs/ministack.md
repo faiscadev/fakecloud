@@ -16,7 +16,7 @@ Free, open-source, local AWS emulation. Real HTTP server speaking the AWS wire p
 
 **MiniStack's approach** (check their repo for current details — it's moving fast): positions as a free LocalStack replacement. Evaluate their service coverage and architecture directly against your test suite.
 
-**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Services land one at a time; a service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 107 services shipped today (including full ECR with OCI v2 `docker push`/`pull`, full ECS, full ELBv2 ALB/NLB/GWLB control plane); more progressively. Built around real Lambda execution, real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey/Memcached via Docker), and real cross-service wiring, validated on every commit against AWS's own Smithy models — 257,522/257,522 generated test variants pass, true 100% conformance — plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
+**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Services land one at a time; a service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 107 services shipped today (including full ECR with OCI v2 `docker push`/`pull`, full ECS, full ELBv2 ALB/NLB/GWLB control plane); more progressively. Built around real Lambda execution, real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey/Memcached via Docker), and real cross-service wiring, validated on every commit against AWS's own Smithy models — 260,001/260,001 generated test variants pass, true 100% conformance — plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
 
 These are philosophies, not rankings. Breadth-first and depth-first are different tradeoffs. A team whose tests lean lightly on many services will prefer breadth. A team whose tests exercise real cross-service flows or need real code execution will prefer depth.
 
@@ -35,11 +35,11 @@ These are philosophies, not rankings. Breadth-first and depth-first are differen
 | Distribution | Single static binary (~130 MB) + Docker image |
 | Startup | ~300ms |
 | Idle memory | ~30 MiB |
-| Services covered today | 107 (7,729 ops) at true 100% conformance (257,522/257,522 variants), incl. ECR + ECS + ELBv2 |
+| Services covered today | 107 (7,729 ops) at true 100% conformance (260,001/260,001 variants), incl. ECR + ECS + ELBv2 |
 | Lambda execution | Real, 31 runtimes in Docker |
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey/Memcached via Docker |
-| Conformance methodology | Smithy-validated, 257,522/257,522 test variants pass on every commit |
+| Conformance methodology | Smithy-validated, 260,001/260,001 test variants pass on every commit |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust, .NET |
 | License | AGPL-3.0 |

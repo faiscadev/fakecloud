@@ -2,7 +2,7 @@
 
 `conformance-baseline.json` is the exact conformance state CI checks. Every
 service is pinned at its full observed pass count — currently
-257,522 / 257,522 variants across all 107 services. CI fails any PR with a
+260,001 / 260,001 variants across all 107 services. CI fails any PR with a
 failing variant and any PR whose results drift from the baseline in either
 direction: a service below its pass count, a service above it, a changed
 variant total, or a service missing from either side. A gain the baseline

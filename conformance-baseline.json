@@ -1,14 +1,14 @@
 {
-  "variants_passed": 257522,
-  "total_variants": 257522,
+  "variants_passed": 260001,
+  "total_variants": 260001,
   "per_service": {
     "ce": {
       "passed": 1787,
       "total": 1787
     },
     "opensearch": {
-      "passed": 3095,
-      "total": 3095
+      "passed": 3290,
+      "total": 3290
     },
     "ses": {
       "passed": 3042,
@@ -43,8 +43,8 @@
       "total": 67
     },
     "logs": {
-      "passed": 4094,
-      "total": 4094
+      "passed": 4110,
+      "total": 4110
     },
     "codepipeline": {
       "passed": 1446,
@@ -67,24 +67,24 @@
       "total": 2365
     },
     "glue": {
-      "passed": 10538,
-      "total": 10538
+      "passed": 10793,
+      "total": 10793
     },
     "iam": {
       "passed": 6071,
       "total": 6071
     },
     "lakeformation": {
-      "passed": 1985,
-      "total": 1985
+      "passed": 2231,
+      "total": 2231
     },
     "codedeploy": {
-      "passed": 1349,
-      "total": 1349
+      "passed": 1352,
+      "total": 1352
     },
     "athena": {
-      "passed": 2309,
-      "total": 2309
+      "passed": 2460,
+      "total": 2460
     },
     "redshift": {
       "passed": 4240,
@@ -95,8 +95,8 @@
       "total": 550
     },
     "ecr": {
-      "passed": 1787,
-      "total": 1787
+      "passed": 1898,
+      "total": 1898
     },
     "events": {
       "passed": 2111,
@@ -147,8 +147,8 @@
       "total": 2786
     },
     "ecs": {
-      "passed": 2442,
-      "total": 2442
+      "passed": 2746,
+      "total": 2746
     },
     "organizations": {
       "passed": 2058,
@@ -179,16 +179,16 @@
       "total": 4110
     },
     "elasticache": {
-      "passed": 2218,
-      "total": 2218
+      "passed": 2272,
+      "total": 2272
     },
     "ec2": {
-      "passed": 26321,
-      "total": 26321
+      "passed": 26466,
+      "total": 26466
     },
     "dynamodb": {
-      "passed": 2164,
-      "total": 2164
+      "passed": 2295,
+      "total": 2295
     },
     "config": {
       "passed": 4738,
@@ -231,24 +231,24 @@
       "total": 1912
     },
     "ssm": {
-      "passed": 5475,
-      "total": 5475
+      "passed": 5529,
+      "total": 5529
     },
     "sagemaker": {
-      "passed": 16785,
-      "total": 16785
+      "passed": 16963,
+      "total": 16963
     },
     "sso": {
-      "passed": 2843,
-      "total": 2843
+      "passed": 2847,
+      "total": 2847
     },
     "textract": {
       "passed": 840,
       "total": 840
     },
     "transfer": {
-      "passed": 2757,
-      "total": 2757
+      "passed": 2745,
+      "total": 2745
     },
     "appconfig": {
       "passed": 2240,
@@ -259,12 +259,12 @@
       "total": 2391
     },
     "xray": {
-      "passed": 1067,
-      "total": 1067
+      "passed": 1069,
+      "total": 1069
     },
     "rds": {
-      "passed": 5539,
-      "total": 5539
+      "passed": 5731,
+      "total": 5731
     },
     "cloudcontrolapi": {
       "passed": 346,
@@ -295,8 +295,8 @@
       "total": 3795
     },
     "monitoring": {
-      "passed": 1909,
-      "total": 1909
+      "passed": 1912,
+      "total": 1912
     },
     "resource-groups": {
       "passed": 771,
@@ -339,8 +339,8 @@
       "total": 1286
     },
     "kms": {
-      "passed": 2282,
-      "total": 2282
+      "passed": 2363,
+      "total": 2363
     },
     "managedblockchain": {
       "passed": 1011,
@@ -367,16 +367,16 @@
       "total": 1292
     },
     "ram": {
-      "passed": 1073,
-      "total": 1073
+      "passed": 1168,
+      "total": 1168
     },
     "bedrock-agent-runtime": {
       "passed": 1028,
       "total": 1028
     },
     "docdb": {
-      "passed": 1517,
-      "total": 1517
+      "passed": 1546,
+      "total": 1546
     },
     "fis": {
       "passed": 860,
@@ -395,16 +395,16 @@
       "total": 1942
     },
     "s3tables": {
-      "passed": 1464,
-      "total": 1464
+      "passed": 1703,
+      "total": 1703
     },
     "eks": {
       "passed": 1995,
       "total": 1995
     },
     "mediaconvert": {
-      "passed": 1005,
-      "total": 1005
+      "passed": 1008,
+      "total": 1008
     },
     "servicediscovery": {
       "passed": 1062,
