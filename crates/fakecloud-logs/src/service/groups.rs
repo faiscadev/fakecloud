@@ -101,6 +101,7 @@ impl LogsService {
                 transformer: None,
                 deletion_protection: false,
                 log_group_class,
+                data_protection_deleted: false,
             },
         );
 
@@ -172,7 +173,7 @@ impl LogsService {
         validate_optional_enum_value(
             "logGroupClass",
             &body["logGroupClass"],
-            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY"],
+            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY", "ESSENTIALS"],
         )?;
 
         let accounts = self.state.read();
@@ -204,6 +205,11 @@ impl LogsService {
         let has_more = page.len() > limit;
         let page = if has_more { &page[..limit] } else { page };
 
+        let retention_policies = crate::retention::parsed_policies(&state.account_policies);
+        let account_data_protection = state
+            .account_policies
+            .values()
+            .any(|p| p.policy_type == "DATA_PROTECTION_POLICY");
         let log_groups: Vec<Value> = page
             .iter()
             .map(|g| {
@@ -230,11 +236,39 @@ impl LogsService {
                         .as_deref()
                         .unwrap_or("STANDARD"),
                 });
-                if let Some(days) = g.retention_in_days {
-                    obj["retentionInDays"] = json!(days);
+                // An applicable account-level retention policy replaces the
+                // group's own retention and is named in retentionPolicyName;
+                // a NEVER_EXPIRE policy omits retentionInDays.
+                match crate::retention::governing(&retention_policies, g) {
+                    Some(p) => {
+                        if let Some(days) = p.document.retention {
+                            obj["retentionInDays"] = json!(days);
+                        }
+                        obj["retentionPolicyName"] = json!(p.name);
+                    }
+                    None => {
+                        if let Some(days) = g.retention_in_days {
+                            obj["retentionInDays"] = json!(days);
+                        }
+                    }
                 }
                 if let Some(ref kms) = g.kms_key_id {
                     obj["kmsKeyId"] = json!(kms);
+                }
+                if g.data_protection_policy.is_some() {
+                    obj["dataProtectionStatus"] = json!("ACTIVATED");
+                } else if g.data_protection_deleted {
+                    obj["dataProtectionStatus"] = json!("DELETED");
+                }
+                if account_data_protection {
+                    obj["inheritedProperties"] = json!(["ACCOUNT_DATA_PROTECTION"]);
+                }
+                obj["deletionProtectionEnabled"] = json!(g.deletion_protection);
+                let bearer = [g.name.clone(), log_group_arn.to_string(), g.wildcard_arn()]
+                    .iter()
+                    .find_map(|k| state.bearer_token_auth.get(k).copied());
+                if let Some(enabled) = bearer {
+                    obj["bearerTokenAuthenticationEnabled"] = json!(enabled);
                 }
                 obj
             })
@@ -563,7 +597,7 @@ impl LogsService {
         validate_optional_enum_value(
             "logGroupClass",
             &body["logGroupClass"],
-            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY"],
+            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY", "ESSENTIALS"],
         )?;
         validate_optional_string_length(
             "logGroupNamePattern",
@@ -676,7 +710,7 @@ impl LogsService {
         validate_optional_enum_value(
             "logGroupClass",
             &body["logGroupClass"],
-            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY"],
+            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY", "ESSENTIALS"],
         )?;
 
         let accounts = self.state.read();

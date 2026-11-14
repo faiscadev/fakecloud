@@ -101,6 +101,46 @@ pub fn validate_optional_range_i64(
     Ok(())
 }
 
+/// Read an optional list-of-strings filter member, enforcing the model's
+/// list length bounds. Absent (or `null`) means "no filter".
+pub fn optional_string_list(
+    body: &serde_json::Value,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<Vec<String>>, AwsServiceError> {
+    let value = &body[field];
+    if value.is_null() {
+        return Ok(None);
+    }
+    let items = value.as_array().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "SerializationException",
+            format!("Value for '{field}' must be a list"),
+        )
+    })?;
+    if items.len() < min || items.len() > max {
+        return Err(invalid_parameter(format!(
+            "Value at '{field}' failed to satisfy constraint: \
+             Member must have length between {min} and {max}",
+        )));
+    }
+    items
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_string).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "SerializationException",
+                    format!("Value for '{field}' must be a list of strings"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 /// Validate an optional enum value if present.
 pub fn validate_optional_enum_value(
     field: &str,

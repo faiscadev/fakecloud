@@ -448,7 +448,7 @@ impl LogsService {
         // silently pruned. Batches are chronological, so the accepted events are
         // the contiguous input range after the too-old prefix and expired events
         // are a prefix of that range.
-        if let Some(days) = group.retention_in_days {
+        if let Some(days) = crate::retention::effective_retention(&state.account_policies, group) {
             let cutoff = now.saturating_sub(i64::from(days).saturating_mul(86_400_000));
             let expired = new_events
                 .iter()
@@ -932,9 +932,9 @@ impl LogsService {
             )
         })?;
 
-        let retention_cutoff = group
-            .retention_in_days
-            .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
+        let retention_cutoff =
+            crate::retention::effective_retention(&state.account_policies, group)
+                .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
 
         // All events are indexed 0..n
         let all_events: Vec<&LogEvent> = stream
@@ -1101,9 +1101,9 @@ impl LogsService {
 
         let mut filtered_events: Vec<Value> = Vec::new();
 
-        let retention_cutoff = group
-            .retention_in_days
-            .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
+        let retention_cutoff =
+            crate::retention::effective_retention(&state.account_policies, group)
+                .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
 
         let streams: Vec<(&String, &LogStream)> = if !stream_names.is_empty() {
             group

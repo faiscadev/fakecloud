@@ -1,6 +1,7 @@
 pub mod filter_pattern;
 pub mod ingest;
 pub mod query;
+pub mod retention;
 pub(crate) mod service;
 pub(crate) mod state;
 pub mod transformer;

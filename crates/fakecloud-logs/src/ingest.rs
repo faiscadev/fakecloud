@@ -54,7 +54,13 @@ pub fn append_events(
             transformer: None,
             deletion_protection: false,
             log_group_class: Some("STANDARD".into()),
+            data_protection_deleted: false,
         });
+    // CloudWatch Logs rejects events older than the group's effective
+    // retention rather than storing them only for the next retention sweep to
+    // delete. An account-level retention policy overrides the group's own.
+    let retention_cutoff = crate::retention::effective_retention(&logs.account_policies, group)
+        .map(|days| now.saturating_sub(i64::from(days).saturating_mul(86_400_000)));
     let stream_arn = group.stream_arn(stream_name);
     let stream = group
         .log_streams
@@ -79,11 +85,6 @@ pub fn append_events(
         .max()
         .unwrap_or(0)
         .max(stream.last_sequence);
-    // CloudWatch Logs rejects events older than the group's retention rather
-    // than storing them only for the next retention sweep to delete.
-    let retention_cutoff = group
-        .retention_in_days
-        .map(|days| now.saturating_sub(i64::from(days).saturating_mul(86_400_000)));
     let accepted = events
         .iter()
         .filter(|e| retention_cutoff.is_none_or(|cutoff| e.timestamp_ms >= cutoff));

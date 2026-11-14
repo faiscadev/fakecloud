@@ -8,8 +8,48 @@ use super::LogsService;
 use chrono::Utc;
 
 use super::extract_log_group_from_arn;
+use crate::retention;
 use crate::state::{AccountPolicy, DataProtectionPolicy, IndexPolicy, ResourcePolicy, Transformer};
 use crate::transformer;
+
+/// The model's `PolicyType` enum.
+const POLICY_TYPES: &[&str] = &[
+    "DATA_PROTECTION_POLICY",
+    "SUBSCRIPTION_FILTER_POLICY",
+    "FIELD_INDEX_POLICY",
+    "TRANSFORMER_POLICY",
+    "METRIC_EXTRACTION_POLICY",
+    "RETENTION_POLICY",
+];
+
+fn invalid_parameter(message: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        message.into(),
+    )
+}
+
+/// Read `dryRun` (default `false`). It is valid only for retention policies.
+fn parse_dry_run(body: &Value, policy_type: &str) -> Result<bool, AwsServiceError> {
+    let dry_run = match &body["dryRun"] {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        _ => {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "SerializationException",
+                "Value for 'dryRun' must be a boolean",
+            ))
+        }
+    };
+    if dry_run && policy_type != retention::RETENTION_POLICY {
+        return Err(invalid_parameter(
+            "dryRun is valid only when policyType is RETENTION_POLICY.",
+        ));
+    }
+    Ok(dry_run)
+}
 
 impl LogsService {
     // ---- Resource Policies ----
@@ -152,17 +192,7 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_enum_value(
-            "policyType",
-            &body["policyType"],
-            &[
-                "DATA_PROTECTION_POLICY",
-                "SUBSCRIPTION_FILTER_POLICY",
-                "FIELD_INDEX_POLICY",
-                "TRANSFORMER_POLICY",
-                "METRIC_EXTRACTION_POLICY",
-            ],
-        )?;
+        validate_optional_enum_value("policyType", &body["policyType"], POLICY_TYPES)?;
         validate_optional_enum_value("scope", &body["scope"], &["ALL"])?;
         let policy_name = body["policyName"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -186,12 +216,39 @@ impl LogsService {
             )
         })?;
 
+        let dry_run = parse_dry_run(&body, policy_type)?;
+        let selection_criteria = body["selectionCriteria"].as_str().map(|s| s.to_string());
+        if policy_type == retention::RETENTION_POLICY {
+            retention::parse_document(policy_document).map_err(invalid_parameter)?;
+            retention::parse_criteria(selection_criteria.as_deref()).map_err(invalid_parameter)?;
+        }
+
         let now = Utc::now().timestamp_millis();
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         let account_id = state.account_id.clone();
         let scope = body["scope"].as_str().map(|s| s.to_string());
-        let selection_criteria = body["selectionCriteria"].as_str().map(|s| s.to_string());
+        let key = (policy_name.to_string(), policy_type.to_string());
+        let existing = state.account_policies.get(&key);
+
+        if policy_type == retention::RETENTION_POLICY
+            && existing.is_none()
+            && state
+                .account_policies
+                .values()
+                .filter(|p| p.policy_type == retention::RETENTION_POLICY)
+                .count()
+                >= retention::MAX_RETENTION_POLICIES
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "LimitExceededException",
+                format!(
+                    "An account can have at most {} retention policies in a Region.",
+                    retention::MAX_RETENTION_POLICIES
+                ),
+            ));
+        }
 
         let policy = AccountPolicy {
             policy_name: policy_name.to_string(),
@@ -201,9 +258,33 @@ impl LogsService {
             selection_criteria: selection_criteria.clone(),
             account_id: account_id.clone(),
             last_updated_time: now,
+            created_at: existing.map_or(now, AccountPolicy::created_time),
         };
 
-        let key = (policy_name.to_string(), policy_type.to_string());
+        if dry_run {
+            // Preview only: nothing is saved.
+            let before = retention::parsed_policies(&state.account_policies);
+            let replaced = existing.and_then(retention::ParsedPolicy::from_stored);
+            let added = retention::ParsedPolicy::from_stored(&policy)
+                .expect("retention policy validated above");
+            let mut after: Vec<_> = before
+                .iter()
+                .filter(|p| p.name != policy_name)
+                .cloned()
+                .collect();
+            after.push(added.clone());
+            let result = retention::dry_run_result(
+                state.log_groups.values(),
+                |g| added.applies_to(g) || replaced.as_ref().is_some_and(|r| r.applies_to(g)),
+                &before,
+                &after,
+            );
+            return Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({ "dryRunResult": result })).unwrap(),
+            ));
+        }
+
         state.account_policies.insert(key, policy);
 
         let mut result = json!({
@@ -233,17 +314,7 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_enum_value(
-            "policyType",
-            &body["policyType"],
-            &[
-                "DATA_PROTECTION_POLICY",
-                "SUBSCRIPTION_FILTER_POLICY",
-                "FIELD_INDEX_POLICY",
-                "TRANSFORMER_POLICY",
-                "METRIC_EXTRACTION_POLICY",
-            ],
-        )?;
+        validate_optional_enum_value("policyType", &body["policyType"], POLICY_TYPES)?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 4096)?;
         let policy_type = body["policyType"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -309,17 +380,42 @@ impl LogsService {
             )
         })?;
 
+        validate_optional_enum_value("policyType", &body["policyType"], POLICY_TYPES)?;
+        let dry_run = parse_dry_run(&body, policy_type)?;
+
         let key = (policy_name.to_string(), policy_type.to_string());
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        if state.account_policies.remove(&key).is_none() {
+        let Some(existing) = state.account_policies.get(&key) else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ResourceNotFoundException",
                 format!("Account policy {policy_name} of type {policy_type} not found"),
             ));
+        };
+
+        if dry_run {
+            // Preview only: the policy stays in place.
+            let before = retention::parsed_policies(&state.account_policies);
+            let removed = retention::ParsedPolicy::from_stored(existing);
+            let after: Vec<_> = before
+                .iter()
+                .filter(|p| p.name != policy_name)
+                .cloned()
+                .collect();
+            let result = retention::dry_run_result(
+                state.log_groups.values(),
+                |g| removed.as_ref().is_some_and(|r| r.applies_to(g)),
+                &before,
+                &after,
+            );
+            return Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({ "dryRunResult": result })).unwrap(),
+            ));
         }
 
+        state.account_policies.remove(&key);
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
@@ -382,6 +478,7 @@ impl LogsService {
             policy_document: policy_document.clone(),
             last_updated_time: now,
         });
+        group.data_protection_deleted = false;
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -496,6 +593,7 @@ impl LogsService {
         }
 
         group.data_protection_policy = None;
+        group.data_protection_deleted = true;
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
@@ -1455,5 +1553,353 @@ mod tests {
         assert!(names.contains(&"@timestamp"));
         assert!(names.contains(&"userId"));
         assert!(names.contains(&"requestId"));
+    }
+
+    // ---- Account-level retention policies ----
+
+    fn describe_groups(svc: &crate::service::LogsService) -> Value {
+        let resp = svc
+            .describe_log_groups(&make_request("DescribeLogGroups", json!({})))
+            .unwrap();
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn group<'a>(body: &'a Value, name: &str) -> &'a Value {
+        body["logGroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["logGroupName"] == name)
+            .unwrap()
+    }
+
+    fn put_retention(
+        svc: &crate::service::LogsService,
+        name: &str,
+        doc: &str,
+        criteria: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Value, fakecloud_core::service::AwsServiceError> {
+        let mut body = json!({
+            "policyName": name,
+            "policyType": "RETENTION_POLICY",
+            "policyDocument": doc,
+            "dryRun": dry_run,
+        });
+        if let Some(c) = criteria {
+            body["selectionCriteria"] = json!(c);
+        }
+        svc.put_account_policy(&make_request("PutAccountPolicy", body))
+            .map(|r| serde_json::from_slice(r.body.expect_bytes()).unwrap())
+    }
+
+    #[test]
+    fn retention_policy_dry_run_previews_without_saving() {
+        let svc = make_service();
+        create_group(&svc, "/app/a");
+        create_group(&svc, "/app/b");
+        create_group(&svc, "/other");
+        svc.put_retention_policy(&make_request(
+            "PutRetentionPolicy",
+            json!({ "logGroupName": "/app/a", "retentionInDays": 30 }),
+        ))
+        .unwrap();
+
+        let body = put_retention(
+            &svc,
+            "app-90",
+            r#"{"retentionInDays": 90, "enforcementMode": "RETROACTIVE"}"#,
+            Some(r#"LogGroupNamePrefix IN ["/app"]"#),
+            true,
+        )
+        .unwrap();
+        assert!(body.get("accountPolicy").is_none(), "{body}");
+        let dr = &body["dryRunResult"];
+        // /app/a: 30 -> 90 is longer; /app/b: never-expire -> 90 is shorter.
+        assert_eq!(dr["totalMatchedLogGroups"], 2);
+        assert_eq!(dr["increasedRetentionLogGroupCount"], 1);
+        assert_eq!(dr["decreasedRetentionLogGroupCount"], 1);
+        assert_eq!(dr["unchangedRetentionLogGroupCount"], 0);
+        assert_eq!(dr["failedAnalysisCount"], 0);
+        let impacts = dr["topLogGroupsImpacted"].as_array().unwrap();
+        let a = impacts
+            .iter()
+            .find(|i| i["logGroupName"] == "/app/a")
+            .unwrap();
+        assert_eq!(a["currentRetention"], "30");
+        assert_eq!(a["proposedRetention"], "90");
+        let b = impacts
+            .iter()
+            .find(|i| i["logGroupName"] == "/app/b")
+            .unwrap();
+        assert_eq!(b["currentRetention"], "NEVER_EXPIRE");
+
+        // Nothing was saved.
+        let resp = svc
+            .describe_account_policies(&make_request(
+                "DescribeAccountPolicies",
+                json!({ "policyType": "RETENTION_POLICY" }),
+            ))
+            .unwrap();
+        let listed: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(listed["accountPolicies"].as_array().unwrap().is_empty());
+        let groups = describe_groups(&svc);
+        assert_eq!(group(&groups, "/app/a")["retentionInDays"], 30);
+        assert!(group(&groups, "/app/a")
+            .get("retentionPolicyName")
+            .is_none());
+    }
+
+    #[test]
+    fn retention_policy_applies_longest_and_surfaces_policy_name() {
+        let svc = make_service();
+        create_group(&svc, "/app/a");
+        create_group(&svc, "/other");
+        svc.put_retention_policy(&make_request(
+            "PutRetentionPolicy",
+            json!({ "logGroupName": "/other", "retentionInDays": 7 }),
+        ))
+        .unwrap();
+
+        let body = put_retention(
+            &svc,
+            "baseline",
+            r#"{"retentionInDays": 30, "enforcementMode": "RETROACTIVE"}"#,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["accountPolicy"]["policyType"], "RETENTION_POLICY");
+        put_retention(
+            &svc,
+            "app-forever",
+            r#"{"retentionInDays": "NEVER_EXPIRE", "enforcementMode": "RETROACTIVE"}"#,
+            Some(r#"LogGroupNamePrefix IN ["/app"]"#),
+            false,
+        )
+        .unwrap();
+
+        let groups = describe_groups(&svc);
+        // The account policy replaces the group's own 7 days.
+        let other = group(&groups, "/other");
+        assert_eq!(other["retentionInDays"], 30);
+        assert_eq!(other["retentionPolicyName"], "baseline");
+        // NEVER_EXPIRE is the longest and omits retentionInDays.
+        let app = group(&groups, "/app/a");
+        assert!(app.get("retentionInDays").is_none(), "{app}");
+        assert_eq!(app["retentionPolicyName"], "app-forever");
+
+        // Dry-run delete previews the fallback, delete really removes it.
+        let resp = svc
+            .delete_account_policy(&make_request(
+                "DeleteAccountPolicy",
+                json!({ "policyName": "baseline", "policyType": "RETENTION_POLICY", "dryRun": true }),
+            ))
+            .unwrap();
+        let dr: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        // /other falls back to 7 days (shorter); /app/a stays NEVER_EXPIRE.
+        assert_eq!(dr["dryRunResult"]["totalMatchedLogGroups"], 2);
+        assert_eq!(dr["dryRunResult"]["decreasedRetentionLogGroupCount"], 1);
+        assert_eq!(dr["dryRunResult"]["unchangedRetentionLogGroupCount"], 1);
+        assert_eq!(
+            group(&describe_groups(&svc), "/other")["retentionPolicyName"],
+            "baseline"
+        );
+        svc.delete_account_policy(&make_request(
+            "DeleteAccountPolicy",
+            json!({ "policyName": "baseline", "policyType": "RETENTION_POLICY" }),
+        ))
+        .unwrap();
+        let other = group(&describe_groups(&svc), "/other").clone();
+        assert_eq!(other["retentionInDays"], 7);
+        assert!(other.get("retentionPolicyName").is_none());
+    }
+
+    #[test]
+    fn retention_policy_new_only_skips_existing_groups() {
+        let svc = make_service();
+        create_group(&svc, "/old");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        put_retention(
+            &svc,
+            "new-only",
+            r#"{"retentionInDays": 60, "enforcementMode": "NEW_ONLY"}"#,
+            None,
+            false,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        create_group(&svc, "/new");
+        let groups = describe_groups(&svc);
+        assert!(group(&groups, "/old").get("retentionPolicyName").is_none());
+        assert_eq!(group(&groups, "/new")["retentionPolicyName"], "new-only");
+        assert_eq!(group(&groups, "/new")["retentionInDays"], 60);
+    }
+
+    #[test]
+    fn retention_policy_expires_events_by_policy_retention() {
+        let svc = make_service();
+        create_group(&svc, "/exp");
+        create_stream(&svc, "/exp", "s");
+        put_events(&svc, "/exp", "s", &["fresh"]);
+        // An event older than the 14-day PutLogEvents window, as if it had
+        // been stored long ago.
+        {
+            let mut accounts = svc.state.write();
+            let stream = accounts
+                .default_regional_mut()
+                .log_groups
+                .get_mut("/exp")
+                .unwrap()
+                .log_streams
+                .get_mut("s")
+                .unwrap();
+            let mut stale = stream.events[0].clone();
+            stale.timestamp -= 40 * 86_400_000;
+            stale.message = "stale".into();
+            stream.events.insert(0, stale);
+        }
+        put_retention(
+            &svc,
+            "thirty",
+            r#"{"retentionInDays": 30, "enforcementMode": "RETROACTIVE"}"#,
+            None,
+            false,
+        )
+        .unwrap();
+        let resp = svc
+            .get_log_events(&make_request(
+                "GetLogEvents",
+                json!({ "logGroupName": "/exp", "logStreamName": "s" }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let messages: Vec<&str> = body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(messages, ["fresh"], "{body}");
+    }
+
+    #[test]
+    fn retention_policy_validation() {
+        let svc = make_service();
+        // Below the 30-day account-policy minimum.
+        let err = put_retention(
+            &svc,
+            "p",
+            r#"{"retentionInDays": 14, "enforcementMode": "RETROACTIVE"}"#,
+            None,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "InvalidParameterException");
+        // Only LogGroupNamePrefix criteria.
+        let err = put_retention(
+            &svc,
+            "p",
+            r#"{"retentionInDays": 30, "enforcementMode": "RETROACTIVE"}"#,
+            Some(r#"LogGroupName IN ["x"]"#),
+            false,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "InvalidParameterException");
+        // dryRun is only valid for retention policies.
+        let err = svc
+            .put_account_policy(&make_request(
+                "PutAccountPolicy",
+                json!({
+                    "policyName": "dp",
+                    "policyType": "DATA_PROTECTION_POLICY",
+                    "policyDocument": "{}",
+                    "dryRun": true,
+                }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidParameterException");
+        // At most 20 retention policies per Region.
+        for i in 0..20 {
+            put_retention(
+                &svc,
+                &format!("p{i}"),
+                r#"{"retentionInDays": 30, "enforcementMode": "RETROACTIVE"}"#,
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        let err = put_retention(
+            &svc,
+            "p20",
+            r#"{"retentionInDays": 30, "enforcementMode": "RETROACTIVE"}"#,
+            None,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "LimitExceededException");
+        // Updating an existing one is still allowed.
+        put_retention(
+            &svc,
+            "p0",
+            r#"{"retentionInDays": 60, "enforcementMode": "RETROACTIVE"}"#,
+            None,
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn describe_log_groups_renders_protection_and_class_members() {
+        let svc = make_service();
+        svc.create_log_group(&make_request(
+            "CreateLogGroup",
+            json!({ "logGroupName": "/ess", "logGroupClass": "ESSENTIALS" }),
+        ))
+        .unwrap();
+        svc.put_log_group_deletion_protection(&make_request(
+            "PutLogGroupDeletionProtection",
+            json!({ "logGroupIdentifier": "/ess", "deletionProtectionEnabled": true }),
+        ))
+        .unwrap();
+        svc.put_bearer_token_authentication(&make_request(
+            "PutBearerTokenAuthentication",
+            json!({ "logGroupIdentifier": "/ess", "bearerTokenAuthenticationEnabled": true }),
+        ))
+        .unwrap();
+        svc.put_data_protection_policy(&make_request(
+            "PutDataProtectionPolicy",
+            json!({ "logGroupIdentifier": "/ess", "policyDocument": "{}" }),
+        ))
+        .unwrap();
+        let g = group(&describe_groups(&svc), "/ess").clone();
+        assert_eq!(g["logGroupClass"], "ESSENTIALS");
+        assert_eq!(g["deletionProtectionEnabled"], true);
+        assert_eq!(g["bearerTokenAuthenticationEnabled"], true);
+        assert_eq!(g["dataProtectionStatus"], "ACTIVATED");
+        assert!(g.get("inheritedProperties").is_none());
+
+        svc.delete_data_protection_policy(&make_request(
+            "DeleteDataProtectionPolicy",
+            json!({ "logGroupIdentifier": "/ess" }),
+        ))
+        .unwrap();
+        svc.put_account_policy(&make_request(
+            "PutAccountPolicy",
+            json!({
+                "policyName": "acct-dp",
+                "policyType": "DATA_PROTECTION_POLICY",
+                "policyDocument": "{}",
+            }),
+        ))
+        .unwrap();
+        let g = group(&describe_groups(&svc), "/ess").clone();
+        assert_eq!(g["dataProtectionStatus"], "DELETED");
+        assert_eq!(g["inheritedProperties"], json!(["ACCOUNT_DATA_PROTECTION"]));
     }
 }
