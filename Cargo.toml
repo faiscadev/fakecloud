@@ -36,6 +36,7 @@ rcgen = "0.13"
 sha1 = "0.10"
 sha2 = "0.10"
 p256 = "0.13"
+ml-kem = { version = "=0.3.4", features = ["getrandom", "pkcs8"] }
 hmac = "0.12"
 num-bigint = "0.4"
 crc32c = "0.6"

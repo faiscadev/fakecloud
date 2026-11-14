@@ -131,7 +131,7 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
             "DescribeKey" => GrantRequest::NoContext,
             // No encryption context: a constrained grant never covers them.
             "Sign" | "Verify" | "GetPublicKey" | "GenerateMac" | "VerifyMac"
-            | "DeriveSharedSecret" => {
+            | "DeriveSharedSecret" | "Encapsulate" | "Decapsulate" => {
                 context = HashMap::new();
                 GrantRequest::Context(&context)
             }
@@ -836,6 +836,8 @@ mod tests {
             "GenerateMac",
             "VerifyMac",
             "DeriveSharedSecret",
+            "Encapsulate",
+            "Decapsulate",
             "DescribeKey",
         ];
         for constraint in ["EncryptionContextSubset", "EncryptionContextEquals"] {
@@ -844,7 +846,7 @@ mod tests {
                 &operations,
                 Some(serde_json::json!({constraint: {"k": "v"}})),
             )]);
-            for op in &operations[..6] {
+            for op in &operations[..8] {
                 assert_eq!(
                     ask(&state, USER, op, serde_json::json!({})),
                     None,

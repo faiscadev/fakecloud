@@ -5856,3 +5856,251 @@ fn listed_grants_name_their_key_by_its_arn() {
     ids.sort();
     assert_eq!(ids, vec![arn_in("us-east-1"), arn_in("us-west-2")]);
 }
+
+mod ml_kem {
+    use super::*;
+
+    fn ml_kem_key(svc: &KmsService, spec: &str) -> String {
+        create_key_with_opts(
+            svc,
+            json!({ "KeySpec": spec, "KeyUsage": "ENCAPSULATE_DECAPSULATE" }),
+        )
+    }
+
+    fn json_of(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn b64(s: &Value) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(s.as_str().unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn ml_kem_encapsulate_decapsulate_round_trip() {
+        let svc = make_service();
+        for (spec, ct_len) in [
+            ("ML_KEM_512", 768),
+            ("ML_KEM_768", 1088),
+            ("ML_KEM_1024", 1568),
+        ] {
+            let key_id = ml_kem_key(&svc, spec);
+            let enc = json_of(
+                svc.encapsulate(&make_request(
+                    "Encapsulate",
+                    json!({ "KeyId": key_id, "EncapsulationAlgorithm": "ML_KEM" }),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(enc["EncapsulationAlgorithm"], "ML_KEM");
+            assert!(enc["KeyId"].as_str().unwrap().ends_with(&key_id));
+            let secret = b64(&enc["SharedSecret"]);
+            assert_eq!(secret.len(), 32, "{spec}");
+            assert_eq!(
+                b64(&enc["SharedSecretCiphertextBlob"]).len(),
+                ct_len,
+                "{spec}"
+            );
+
+            let dec = json_of(
+                svc.decapsulate(&make_request(
+                    "Decapsulate",
+                    json!({
+                        "KeyId": key_id,
+                        "EncapsulationAlgorithm": "ML_KEM",
+                        "SharedSecretCiphertextBlob": enc["SharedSecretCiphertextBlob"],
+                    }),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(b64(&dec["SharedSecret"]), secret, "{spec}");
+            assert_eq!(dec["EncapsulationAlgorithm"], "ML_KEM");
+        }
+    }
+
+    /// A client encapsulating locally against GetPublicKey's SPKI reaches the
+    /// same secret KMS's Decapsulate recovers.
+    #[test]
+    fn ml_kem_public_key_is_usable_outside_kms() {
+        let svc = make_service();
+        let key_id = ml_kem_key(&svc, "ML_KEM_768");
+        let public = json_of(
+            svc.get_public_key(&make_request("GetPublicKey", json!({ "KeyId": key_id })))
+                .unwrap(),
+        );
+        assert_eq!(public["KeyUsage"], "ENCAPSULATE_DECAPSULATE");
+        assert_eq!(public["EncapsulationAlgorithms"], json!(["ML_KEM"]));
+        let (ct, secret) =
+            asym_mlkem::encapsulate("ML_KEM_768", &b64(&public["PublicKey"])).unwrap();
+        let dec = json_of(
+        svc.decapsulate(&make_request(
+            "Decapsulate",
+            json!({
+                "KeyId": key_id,
+                "EncapsulationAlgorithm": "ML_KEM",
+                "SharedSecretCiphertextBlob": base64::engine::general_purpose::STANDARD.encode(ct),
+            }),
+        ))
+        .unwrap(),
+    );
+        assert_eq!(b64(&dec["SharedSecret"]), secret);
+    }
+
+    #[test]
+    fn ml_kem_key_metadata_lists_encapsulation_algorithms() {
+        let svc = make_service();
+        let key_id = ml_kem_key(&svc, "ML_KEM_512");
+        let meta = json_of(
+            svc.describe_key(&make_request("DescribeKey", json!({ "KeyId": key_id })))
+                .unwrap(),
+        );
+        assert_eq!(meta["KeyMetadata"]["KeySpec"], "ML_KEM_512");
+        assert_eq!(
+            meta["KeyMetadata"]["EncapsulationAlgorithms"],
+            json!(["ML_KEM"])
+        );
+        // Other keys carry no EncapsulationAlgorithms.
+        let plain = create_key(&svc);
+        let meta = json_of(
+            svc.describe_key(&make_request("DescribeKey", json!({ "KeyId": plain })))
+                .unwrap(),
+        );
+        assert!(meta["KeyMetadata"].get("EncapsulationAlgorithms").is_none());
+    }
+
+    #[test]
+    fn ml_kem_spec_requires_encapsulate_decapsulate_usage() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateKey",
+            json!({ "KeySpec": "ML_KEM_768", "KeyUsage": "SIGN_VERIFY" }),
+        );
+        assert!(svc.create_key(&req).is_err());
+        let req = make_request(
+            "CreateKey",
+            json!({ "KeySpec": "RSA_2048", "KeyUsage": "ENCAPSULATE_DECAPSULATE" }),
+        );
+        assert!(svc.create_key(&req).is_err());
+    }
+
+    #[test]
+    fn encapsulate_errors_follow_key_usage_state_and_algorithm() {
+        let svc = make_service();
+        let symmetric = create_key(&svc);
+        let err = svc
+            .encapsulate(&make_request(
+                "Encapsulate",
+                json!({ "KeyId": symmetric, "EncapsulationAlgorithm": "ML_KEM" }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidKeyUsageException");
+
+        let key_id = ml_kem_key(&svc, "ML_KEM_768");
+        let err = svc
+            .encapsulate(&make_request(
+                "Encapsulate",
+                json!({ "KeyId": key_id, "EncapsulationAlgorithm": "RSA" }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidKeyUsageException");
+
+        let err = svc
+            .encapsulate(&make_request(
+                "Encapsulate",
+                json!({ "KeyId": key_id, "EncapsulationAlgorithm": "ML_KEM", "DryRun": true }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "DryRunOperationException");
+
+        let err = svc
+            .encapsulate(&make_request(
+                "Encapsulate",
+                json!({ "KeyId": "no-such-key", "EncapsulationAlgorithm": "ML_KEM" }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "NotFoundException");
+
+        svc.disable_key(&make_request("DisableKey", json!({ "KeyId": key_id })))
+            .unwrap();
+        let err = svc
+            .encapsulate(&make_request(
+                "Encapsulate",
+                json!({ "KeyId": key_id, "EncapsulationAlgorithm": "ML_KEM" }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "DisabledException");
+    }
+
+    #[test]
+    fn decapsulate_refuses_wrong_length_and_implicitly_rejects_foreign_ciphertext() {
+        let svc = make_service();
+        let a = ml_kem_key(&svc, "ML_KEM_768");
+        let b = ml_kem_key(&svc, "ML_KEM_768");
+        let enc = json_of(
+            svc.encapsulate(&make_request(
+                "Encapsulate",
+                json!({ "KeyId": a, "EncapsulationAlgorithm": "ML_KEM" }),
+            ))
+            .unwrap(),
+        );
+        let ct = b64(&enc["SharedSecretCiphertextBlob"]);
+
+        let err = svc
+            .decapsulate(&make_request(
+                "Decapsulate",
+                json!({
+                    "KeyId": a,
+                    "EncapsulationAlgorithm": "ML_KEM",
+                    "SharedSecretCiphertextBlob":
+                        base64::engine::general_purpose::STANDARD.encode(&ct[..100]),
+                }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidCiphertextException");
+
+        let other = json_of(
+            svc.decapsulate(&make_request(
+                "Decapsulate",
+                json!({
+                    "KeyId": b,
+                    "EncapsulationAlgorithm": "ML_KEM",
+                    "SharedSecretCiphertextBlob": enc["SharedSecretCiphertextBlob"],
+                }),
+            ))
+            .unwrap(),
+        );
+        let other = b64(&other["SharedSecret"]);
+        assert_eq!(other.len(), 32);
+        assert_ne!(other, b64(&enc["SharedSecret"]));
+    }
+
+    #[test]
+    fn generate_data_key_pair_ml_kem_returns_seed_pkcs8_and_spki() {
+        let svc = make_service();
+        let wrapping = create_key(&svc);
+        let resp = json_of(
+            svc.generate_data_key_pair(&make_request(
+                "GenerateDataKeyPair",
+                json!({ "KeyId": wrapping, "KeyPairSpec": "ML_KEM_1024" }),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(resp["KeyPairSpec"], "ML_KEM_1024");
+        let private = b64(&resp["PrivateKeyPlaintext"]);
+        // Seed-format PKCS#8: the same length for every ML-KEM spec.
+        assert_eq!(private.len(), 86);
+        let (ct, secret) =
+            asym_mlkem::encapsulate("ML_KEM_1024", &b64(&resp["PublicKey"])).unwrap();
+        assert_eq!(
+            asym_mlkem::decapsulate("ML_KEM_1024", &private, &ct).unwrap(),
+            secret
+        );
+    }
+}

@@ -1138,6 +1138,101 @@ async fn kms_derive_shared_secret() {
 }
 
 // ---------------------------------------------------------------------------
+// ML-KEM key encapsulation
+// ---------------------------------------------------------------------------
+
+/// Drive a KMS operation over raw awsJson1.1 (the pinned SDK predates the
+/// ML-KEM Encapsulate / Decapsulate APIs).
+async fn kms_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("TrentService.{op}"))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/kms/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+async fn ml_kem_key_id(server: &TestServer) -> String {
+    let (status, body) = kms_raw(
+        server,
+        "CreateKey",
+        serde_json::json!({"KeySpec": "ML_KEM_768", "KeyUsage": "ENCAPSULATE_DECAPSULATE"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["KeyMetadata"]["EncapsulationAlgorithms"],
+        serde_json::json!(["ML_KEM"])
+    );
+    body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string()
+}
+
+#[test_action("kms", "Encapsulate", checksum = "da97fbab")]
+#[tokio::test]
+async fn kms_encapsulate() {
+    let server = TestServer::start().await;
+    let key_id = ml_kem_key_id(&server).await;
+    let (status, body) = kms_raw(
+        &server,
+        "Encapsulate",
+        serde_json::json!({"KeyId": key_id, "EncapsulationAlgorithm": "ML_KEM"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["EncapsulationAlgorithm"], "ML_KEM");
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let ct = b64
+        .decode(body["SharedSecretCiphertextBlob"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(ct.len(), 1088);
+    let secret = b64.decode(body["SharedSecret"].as_str().unwrap()).unwrap();
+    assert_eq!(secret.len(), 32);
+}
+
+#[test_action("kms", "Decapsulate", checksum = "54091d12")]
+#[tokio::test]
+async fn kms_decapsulate() {
+    let server = TestServer::start().await;
+    let key_id = ml_kem_key_id(&server).await;
+    let (_, enc) = kms_raw(
+        &server,
+        "Encapsulate",
+        serde_json::json!({"KeyId": key_id, "EncapsulationAlgorithm": "ML_KEM"}),
+    )
+    .await;
+    let (status, dec) = kms_raw(
+        &server,
+        "Decapsulate",
+        serde_json::json!({
+            "KeyId": key_id,
+            "EncapsulationAlgorithm": "ML_KEM",
+            "SharedSecretCiphertextBlob": enc["SharedSecretCiphertextBlob"],
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{dec}");
+    assert_eq!(dec["SharedSecret"], enc["SharedSecret"]);
+    assert_eq!(dec["EncapsulationAlgorithm"], "ML_KEM");
+}
+
+// ---------------------------------------------------------------------------
 // Custom Key Stores
 // ---------------------------------------------------------------------------
 
