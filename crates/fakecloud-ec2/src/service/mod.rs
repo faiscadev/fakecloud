@@ -304,6 +304,7 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "EnableImageBlockPublicAccess",
     "DisableImageBlockPublicAccess",
     "GetImageBlockPublicAccessState",
+    "GetImageFindings",
     "EnableAllowedImagesSettings",
     "DisableAllowedImagesSettings",
     "GetAllowedImagesSettings",
@@ -458,6 +459,8 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetTransitGatewayRouteTableAssociations",
     "GetTransitGatewayRouteTablePropagations",
     "GetTransitGatewayAttachmentPropagations",
+    "GetTransitGatewayAttachmentNatConfiguration",
+    "ModifyTransitGatewayAttachmentNatConfiguration",
     "CreateTransitGatewayPrefixListReference",
     "DeleteTransitGatewayPrefixListReference",
     "ModifyTransitGatewayPrefixListReference",
@@ -872,6 +875,7 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetCapacityManagerMetricData",
     "GetCapacityManagerMetricDimensions",
     "GetCapacityManagerMonitoredTagKeys",
+    "GetCapacityManagerSupportabilityScores",
     "GetDeclarativePoliciesReportSummary",
     "GetDefaultCreditSpecification",
     "GetHostReservationPurchasePreview",
@@ -1782,6 +1786,7 @@ impl AwsService for Ec2Service {
             "GetImageBlockPublicAccessState" => {
                 image::get_image_block_public_access_state(self, &request)
             }
+            "GetImageFindings" => image::get_image_findings(self, &request),
             "EnableAllowedImagesSettings" => image::enable_allowed_images_settings(self, &request),
             "DisableAllowedImagesSettings" => {
                 image::disable_allowed_images_settings(self, &request)
@@ -2078,6 +2083,12 @@ impl AwsService for Ec2Service {
             }
             "GetTransitGatewayAttachmentPropagations" => {
                 tgw::get_transit_gateway_attachment_propagations(self, &request)
+            }
+            "GetTransitGatewayAttachmentNatConfiguration" => {
+                tgw::get_transit_gateway_attachment_nat_configuration(self, &request)
+            }
+            "ModifyTransitGatewayAttachmentNatConfiguration" => {
+                tgw::modify_transit_gateway_attachment_nat_configuration(self, &request)
             }
             "CreateTransitGatewayPrefixListReference" => {
                 tgw::create_transit_gateway_prefix_list_reference(self, &request)
@@ -2867,6 +2878,9 @@ impl AwsService for Ec2Service {
             }
             "GetCapacityManagerMonitoredTagKeys" => {
                 rest::get_capacity_manager_monitored_tag_keys(self, &request)
+            }
+            "GetCapacityManagerSupportabilityScores" => {
+                rest::get_capacity_manager_supportability_scores(self, &request)
             }
             "GetDeclarativePoliciesReportSummary" => {
                 rest::get_declarative_policies_report_summary(self, &request)

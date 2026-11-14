@@ -1338,6 +1338,27 @@ pub struct TgwAttachment {
     #[serde(default)]
     pub subnet_ids: Vec<String>,
     pub state: String,
+    /// NAT gateway support (`ModifyTransitGatewayAttachmentNatConfiguration`):
+    /// `true` once enabled. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nat_gateway_support: bool,
+    /// Whether the transit gateway installs routes for the NAT CIDRs in the
+    /// route tables the attachment propagates to (`enable`/`disable`). `None`
+    /// is the default, `enable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nat_system_route_support: Option<String>,
+    /// The attachment's NAT gateway rules, by rule number.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nat_gateway_rules: Vec<TgwNatRule>,
+}
+
+/// One NAT gateway rule of a transit gateway attachment: source addresses in
+/// `match_source_cidr` are translated to the same offsets in `nat_cidr`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TgwNatRule {
+    pub rule_number: i64,
+    pub match_source_cidr: String,
+    pub nat_cidr: String,
 }
 
 /// A Transit Gateway route table.
@@ -2123,6 +2144,165 @@ pub struct TgwMcastGroup {
     pub is_member: bool,
 }
 
+/// One allowed-images `ImageCriterion`: an AMI is allowed when it meets every
+/// condition the criterion sets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageCriterion {
+    #[serde(default)]
+    pub image_providers: Vec<String>,
+    #[serde(default)]
+    pub marketplace_product_codes: Vec<String>,
+    #[serde(default)]
+    pub image_names: Vec<String>,
+    /// `DeprecationTimeCondition.MaximumDaysSinceDeprecated`.
+    #[serde(default)]
+    pub maximum_days_since_deprecated: Option<i64>,
+    /// `CreationDateCondition.MaximumDaysSinceCreated`.
+    #[serde(default)]
+    pub maximum_days_since_created: Option<i64>,
+    #[serde(default)]
+    pub image_watermarks: Vec<ImageWatermarkCriterion>,
+    #[serde(default)]
+    pub scan_result_condition: Option<ScanResultCondition>,
+}
+
+/// One `ImageWatermarkFilter` of an allowed-images criterion.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageWatermarkCriterion {
+    #[serde(default)]
+    pub watermark_key: Option<String>,
+    #[serde(default)]
+    pub source_image_region: Option<String>,
+    #[serde(default)]
+    pub maximum_days_since_source_image_created: Option<i64>,
+    #[serde(default)]
+    pub maximum_days_since_watermark_created: Option<i64>,
+}
+
+/// The Amazon Inspector `ScanResultCondition` of an allowed-images criterion.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanResultCondition {
+    #[serde(default)]
+    pub max_days_since_last_finding_scan: Option<i64>,
+    #[serde(default)]
+    pub maximum_severity_label: Option<String>,
+    #[serde(default)]
+    pub max_days_since_informational_fix_available: Option<i64>,
+    #[serde(default)]
+    pub max_days_since_low_fix_available: Option<i64>,
+    #[serde(default)]
+    pub max_days_since_medium_fix_available: Option<i64>,
+    #[serde(default)]
+    pub max_days_since_high_fix_available: Option<i64>,
+    #[serde(default)]
+    pub max_days_since_critical_fix_available: Option<i64>,
+}
+
+/// A Capacity Reservation Fleet, as `CreateCapacityReservationFleet` was
+/// asked for it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CapacityReservationFleet {
+    pub id: String,
+    pub total_target_capacity: i64,
+    #[serde(default)]
+    pub allocation_strategy: String,
+    #[serde(default)]
+    pub tenancy: String,
+    #[serde(default)]
+    pub instance_match_criteria: String,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub create_time: String,
+    #[serde(default)]
+    pub instance_type_specifications: Vec<FleetInstanceTypeSpecification>,
+    /// `InstanceRequirements` as sent, keyed by its wire path below
+    /// `InstanceRequirements.` (`VCpuCount.Min`, `CpuManufacturer.1`, ...).
+    #[serde(default)]
+    pub instance_requirements: BTreeMap<String, String>,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
+    #[serde(default)]
+    pub availability_zone_id: Option<String>,
+}
+
+/// One `ReservationFleetInstanceSpecification` of a Capacity Reservation Fleet.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FleetInstanceTypeSpecification {
+    #[serde(default)]
+    pub instance_type: Option<String>,
+    #[serde(default)]
+    pub instance_platform: Option<String>,
+    #[serde(default)]
+    pub weight: Option<f64>,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
+    #[serde(default)]
+    pub availability_zone_id: Option<String>,
+    #[serde(default)]
+    pub ebs_optimized: Option<bool>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+}
+
+fn deserialize_capacity_reservation_fleets<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, CapacityReservationFleet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        TargetCapacity(String),
+        Full(Box<CapacityReservationFleet>),
+    }
+    let stored: BTreeMap<String, Stored> = BTreeMap::deserialize(deserializer)?;
+    Ok(stored
+        .into_iter()
+        .map(|(id, f)| {
+            let fleet = match f {
+                Stored::TargetCapacity(cap) => CapacityReservationFleet {
+                    id: id.clone(),
+                    total_target_capacity: cap.parse().unwrap_or(1),
+                    allocation_strategy: "prioritized".into(),
+                    tenancy: "default".into(),
+                    instance_match_criteria: "open".into(),
+                    create_time: "2024-01-01T00:00:00.000Z".into(),
+                    ..Default::default()
+                },
+                Stored::Full(f) => *f,
+            };
+            (id, fleet)
+        })
+        .collect())
+}
+
+/// Allowed-images criteria as persisted now, or as an older build persisted
+/// them (each criterion only its list of image providers).
+fn deserialize_image_criteria<'de, D>(deserializer: D) -> Result<Vec<ImageCriterion>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Providers(Vec<String>),
+        Full(Box<ImageCriterion>),
+    }
+    let stored: Vec<Stored> = Vec::deserialize(deserializer)?;
+    Ok(stored
+        .into_iter()
+        .map(|c| match c {
+            Stored::Providers(image_providers) => ImageCriterion {
+                image_providers,
+                ..Default::default()
+            },
+            Stored::Full(c) => *c,
+        })
+        .collect())
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -2220,11 +2400,12 @@ pub struct Ec2State {
     /// Account-level allowed-images settings state.
     #[serde(default)]
     pub allowed_images_settings: String,
-    /// Allowed-images `imageCriterionSet`: each criterion is its list of
-    /// `ImageProvider`s, persisted by ReplaceImageCriteriaInAllowedImagesSettings
-    /// and reported by GetAllowedImagesSettings.
-    #[serde(default)]
-    pub allowed_image_criteria: Vec<Vec<String>>,
+    /// Allowed-images `imageCriterionSet`, persisted by
+    /// ReplaceImageCriteriaInAllowedImagesSettings and reported by
+    /// GetAllowedImagesSettings. Snapshots from builds that kept only each
+    /// criterion's `ImageProvider` list still load.
+    #[serde(default, deserialize_with = "deserialize_image_criteria")]
+    pub allowed_image_criteria: Vec<ImageCriterion>,
     #[serde(default)]
     pub network_acls: BTreeMap<String, NetworkAcl>,
     #[serde(default)]
@@ -2258,9 +2439,10 @@ pub struct Ec2State {
     #[serde(default)]
     pub capacity_reservation_modification_quotes:
         BTreeMap<String, CapacityReservationModificationQuote>,
-    /// Capacity reservation fleet ids (metadata-only).
-    #[serde(default)]
-    pub capacity_reservation_fleets: BTreeMap<String, String>,
+    /// Capacity Reservation Fleets by id. Snapshots from builds that kept
+    /// only each fleet's total target capacity still load.
+    #[serde(default, deserialize_with = "deserialize_capacity_reservation_fleets")]
+    pub capacity_reservation_fleets: BTreeMap<String, CapacityReservationFleet>,
     /// offering id -> Capacity Block offering described to this account.
     #[serde(default)]
     pub capacity_block_offerings: BTreeMap<String, CapacityBlockOffering>,

@@ -10,7 +10,9 @@ use crate::service_helpers::{
     gen_id, indexed_list, paginate, parse_filters, require, validate_enum, validate_length,
     validate_max_results, Filter,
 };
-use crate::state::{Ec2State, Image, Tag};
+use crate::state::{
+    Ec2State, Image, ImageCriterion, ImageWatermarkCriterion, ScanResultCondition, Tag,
+};
 
 /// Shared `Name` (3..128) + `Description` (0..255) length checks.
 fn validate_image_strings(req: &AwsRequest) -> Result<(), AwsServiceError> {
@@ -332,6 +334,55 @@ pub(crate) fn describe_images(
     );
     Ok(Ec2Service::respond(
         "DescribeImages",
+        &req.request_id,
+        &body,
+    ))
+}
+
+/// `GetImageFindings`: the Amazon Inspector findings for an AMI the caller can
+/// see (the same set `DescribeImages` serves). Inspector reports findings only
+/// for AMIs it has scanned, and nothing in fakecloud scans AMIs (there is no
+/// Inspector), so every visible AMI has no findings, as an unscanned one has on
+/// AWS; an AMI the caller cannot see is `InvalidAMIID.NotFound`.
+pub(crate) fn get_image_findings(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = require(&req.query_params, "ImageId")?;
+    validate_max_results(&req.query_params, 1, 1000)?;
+    let visible = svc
+        .state
+        .read()
+        .regional(&req.account_id, &req.region)
+        .map_or_else(
+            || {
+                Ec2State::new(&req.account_id, &req.region)
+                    .images
+                    .contains_key(&id)
+            },
+            |s| s.images.get(&id).is_some_and(|i| !i.in_recycle_bin),
+        );
+    if !visible {
+        return Err(crate::service_helpers::not_found(
+            "InvalidAMIID.NotFound",
+            &id,
+        ));
+    }
+    let findings: Vec<String> = Vec::new();
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&findings, next_token, max_results)?;
+    let body = format!(
+        "{}{}",
+        ec2_list("imageFindingSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
+    Ok(Ec2Service::respond(
+        "GetImageFindings",
         &req.request_id,
         &body,
     ))
@@ -1020,6 +1071,195 @@ pub(crate) fn disable_allowed_images_settings(
     ))
 }
 
+const SEVERITY_LABELS: &[&str] = &["informational", "low", "medium", "high", "critical"];
+
+/// A day count of an allowed-images condition: an integer in
+/// `[0, 2147483647]`, `None` when the member is absent.
+fn day_limit(
+    params: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<Option<i64>, AwsServiceError> {
+    let Some(raw) = params.get(key).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    match raw.parse::<i64>() {
+        Ok(n) if (0..=i64::from(i32::MAX)).contains(&n) => Ok(Some(n)),
+        _ => Err(crate::service_helpers::invalid_parameter_value(format!(
+            "{key} must be an integer between 0 and 2147483647"
+        ))),
+    }
+}
+
+/// An optional integer member, `None` when absent.
+fn optional_int(
+    params: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<Option<i64>, AwsServiceError> {
+    params
+        .get(key)
+        .filter(|v| !v.is_empty())
+        .map(|v| {
+            v.parse::<i64>().map_err(|_| {
+                crate::service_helpers::invalid_parameter_value(format!("{key} must be an integer"))
+            })
+        })
+        .transpose()
+}
+
+/// Parse one `ImageCriterionRequest` sent under `prefix`
+/// (`ImageCriterion.N`).
+fn parse_image_criterion(
+    params: &std::collections::HashMap<String, String>,
+    prefix: &str,
+) -> Result<ImageCriterion, AwsServiceError> {
+    let mut watermarks = Vec::new();
+    let mut m = 1;
+    loop {
+        let wp = format!("{prefix}.ImageWatermark.{m}");
+        if !params.keys().any(|k| k.starts_with(&format!("{wp}."))) {
+            break;
+        }
+        watermarks.push(ImageWatermarkCriterion {
+            watermark_key: params.get(&format!("{wp}.WatermarkKey")).cloned(),
+            source_image_region: params.get(&format!("{wp}.SourceImageRegion")).cloned(),
+            maximum_days_since_source_image_created: optional_int(
+                params,
+                &format!("{wp}.MaximumDaysSinceSourceImageCreated"),
+            )?,
+            maximum_days_since_watermark_created: optional_int(
+                params,
+                &format!("{wp}.MaximumDaysSinceWatermarkCreated"),
+            )?,
+        });
+        m += 1;
+    }
+    let sp = format!("{prefix}.ScanResultCondition");
+    let scan_result_condition = if params.keys().any(|k| k.starts_with(&format!("{sp}."))) {
+        let severity_key = format!("{sp}.MaximumSeverityLabel");
+        validate_enum(params, &severity_key, SEVERITY_LABELS)?;
+        let days = |member: &str| day_limit(params, &format!("{sp}.{member}"));
+        Some(ScanResultCondition {
+            max_days_since_last_finding_scan: days("MaxDaysSinceLastFindingScan")?,
+            maximum_severity_label: params.get(&severity_key).cloned(),
+            max_days_since_informational_fix_available: days(
+                "MaxDaysSinceInformationalFixAvailable",
+            )?,
+            max_days_since_low_fix_available: days("MaxDaysSinceLowFixAvailable")?,
+            max_days_since_medium_fix_available: days("MaxDaysSinceMediumFixAvailable")?,
+            max_days_since_high_fix_available: days("MaxDaysSinceHighFixAvailable")?,
+            max_days_since_critical_fix_available: days("MaxDaysSinceCriticalFixAvailable")?,
+        })
+    } else {
+        None
+    };
+    Ok(ImageCriterion {
+        image_providers: indexed_list(params, &format!("{prefix}.ImageProvider")),
+        marketplace_product_codes: indexed_list(
+            params,
+            &format!("{prefix}.MarketplaceProductCode"),
+        ),
+        image_names: indexed_list(params, &format!("{prefix}.ImageName")),
+        maximum_days_since_deprecated: day_limit(
+            params,
+            &format!("{prefix}.DeprecationTimeCondition.MaximumDaysSinceDeprecated"),
+        )?,
+        maximum_days_since_created: day_limit(
+            params,
+            &format!("{prefix}.CreationDateCondition.MaximumDaysSinceCreated"),
+        )?,
+        image_watermarks: watermarks,
+        scan_result_condition,
+    })
+}
+
+fn opt_elem<T: ToString>(name: &str, v: Option<&T>) -> String {
+    v.map(|v| ec2_elem(name, &v.to_string()))
+        .unwrap_or_default()
+}
+
+/// One `ImageCriterion` of `imageCriterionSet`. `ec2_list` wraps each list
+/// element in `<item>`, the member name the SDK reads.
+fn image_criterion_xml(c: &ImageCriterion) -> String {
+    let mut out = String::new();
+    if !c.image_providers.is_empty() {
+        out.push_str(&ec2_list("imageProviderSet", &c.image_providers));
+    }
+    if !c.marketplace_product_codes.is_empty() {
+        out.push_str(&ec2_list(
+            "marketplaceProductCodeSet",
+            &c.marketplace_product_codes,
+        ));
+    }
+    if !c.image_names.is_empty() {
+        out.push_str(&ec2_list("imageNameSet", &c.image_names));
+    }
+    if let Some(d) = c.maximum_days_since_deprecated {
+        out.push_str(&format!(
+            "<deprecationTimeCondition>{}</deprecationTimeCondition>",
+            ec2_elem("maximumDaysSinceDeprecated", &d.to_string())
+        ));
+    }
+    if let Some(d) = c.maximum_days_since_created {
+        out.push_str(&format!(
+            "<creationDateCondition>{}</creationDateCondition>",
+            ec2_elem("maximumDaysSinceCreated", &d.to_string())
+        ));
+    }
+    if !c.image_watermarks.is_empty() {
+        let items: Vec<String> = c
+            .image_watermarks
+            .iter()
+            .map(|w| {
+                format!(
+                    "{}{}{}{}",
+                    opt_elem("watermarkKey", w.watermark_key.as_ref()),
+                    opt_elem("sourceImageRegion", w.source_image_region.as_ref()),
+                    opt_elem(
+                        "maximumDaysSinceSourceImageCreated",
+                        w.maximum_days_since_source_image_created.as_ref()
+                    ),
+                    opt_elem(
+                        "maximumDaysSinceWatermarkCreated",
+                        w.maximum_days_since_watermark_created.as_ref()
+                    ),
+                )
+            })
+            .collect();
+        out.push_str(&ec2_list("imageWatermarkSet", &items));
+    }
+    if let Some(s) = &c.scan_result_condition {
+        out.push_str(&format!(
+            "<scanResultCondition>{}{}{}{}{}{}{}</scanResultCondition>",
+            opt_elem(
+                "maxDaysSinceLastFindingScan",
+                s.max_days_since_last_finding_scan.as_ref()
+            ),
+            opt_elem("maximumSeverityLabel", s.maximum_severity_label.as_ref()),
+            opt_elem(
+                "maxDaysSinceInformationalFixAvailable",
+                s.max_days_since_informational_fix_available.as_ref()
+            ),
+            opt_elem(
+                "maxDaysSinceLowFixAvailable",
+                s.max_days_since_low_fix_available.as_ref()
+            ),
+            opt_elem(
+                "maxDaysSinceMediumFixAvailable",
+                s.max_days_since_medium_fix_available.as_ref()
+            ),
+            opt_elem(
+                "maxDaysSinceHighFixAvailable",
+                s.max_days_since_high_fix_available.as_ref()
+            ),
+            opt_elem(
+                "maxDaysSinceCriticalFixAvailable",
+                s.max_days_since_critical_fix_available.as_ref()
+            ),
+        ));
+    }
+    out
+}
+
 pub(crate) fn get_allowed_images_settings(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -1039,13 +1279,7 @@ pub(crate) fn get_allowed_images_settings(
             .map(|s| s.allowed_image_criteria.clone())
             .unwrap_or_default()
     };
-    let criterion_items: Vec<String> = criteria
-        .iter()
-        // `ec2_list` wraps each element in `<item>`, which is the
-        // ImageProviderList member name the SDK reads — so pass the raw
-        // provider strings, not pre-wrapped elements.
-        .map(|providers| ec2_list("imageProviderSet", providers))
-        .collect();
+    let criterion_items: Vec<String> = criteria.iter().map(image_criterion_xml).collect();
     let body = format!(
         "{}{}",
         ec2_elem("state", &st),
@@ -1062,25 +1296,17 @@ pub(crate) fn replace_image_criteria_in_allowed_images_settings(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // Parse `ImageCriterion.N.ImageProvider.M` into a list-of-provider-lists and
-    // persist it so GetAllowedImagesSettings round-trips (was a no-op stub).
-    let mut criteria: Vec<Vec<String>> = Vec::new();
+    // Parse every `ImageCriterion.N.*` member and persist it so
+    // GetAllowedImagesSettings round-trips the whole criterion.
+    let mut criteria: Vec<ImageCriterion> = Vec::new();
     let mut n = 1;
     loop {
-        let providers = indexed_list(
-            &req.query_params,
-            &format!("ImageCriterion.{n}.ImageProvider"),
-        );
-        // A criterion with no ImageProvider.M still counts if its prefix exists.
-        let has_criterion = providers.is_empty()
-            && req
-                .query_params
-                .keys()
-                .any(|k| k.starts_with(&format!("ImageCriterion.{n}.")));
-        if providers.is_empty() && !has_criterion {
+        let prefix = format!("ImageCriterion.{n}");
+        let lead = format!("{prefix}.");
+        if !req.query_params.keys().any(|k| k.starts_with(&lead)) {
             break;
         }
-        criteria.push(providers);
+        criteria.push(parse_image_criterion(&req.query_params, &prefix)?);
         n += 1;
     }
     {
@@ -1812,5 +2038,142 @@ mod instance_type_specification_tests {
         )
         .unwrap();
         assert!(!describe(&svc, &id).contains("<instanceTypeSpecification>"));
+    }
+}
+
+#[cfg(test)]
+mod allowed_images_and_findings_tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn image_criteria_round_trip_every_member() {
+        let svc = Ec2Service::new();
+        replace_image_criteria_in_allowed_images_settings(
+            &svc,
+            &req(
+                "ReplaceImageCriteriaInAllowedImagesSettings",
+                &[
+                    ("ImageCriterion.1.ImageProvider.1", "amazon"),
+                    ("ImageCriterion.1.ImageName.1", "al2023-*"),
+                    ("ImageCriterion.1.MarketplaceProductCode.1", "abc123"),
+                    (
+                        "ImageCriterion.1.DeprecationTimeCondition.MaximumDaysSinceDeprecated",
+                        "30",
+                    ),
+                    (
+                        "ImageCriterion.1.CreationDateCondition.MaximumDaysSinceCreated",
+                        "300",
+                    ),
+                    ("ImageCriterion.1.ImageWatermark.1.WatermarkKey", "golden"),
+                    (
+                        "ImageCriterion.1.ImageWatermark.1.MaximumDaysSinceWatermarkCreated",
+                        "5",
+                    ),
+                    (
+                        "ImageCriterion.1.ScanResultCondition.MaximumSeverityLabel",
+                        "medium",
+                    ),
+                    (
+                        "ImageCriterion.1.ScanResultCondition.MaxDaysSinceLastFindingScan",
+                        "7",
+                    ),
+                    (
+                        "ImageCriterion.1.ScanResultCondition.MaxDaysSinceCriticalFixAvailable",
+                        "0",
+                    ),
+                    ("ImageCriterion.2.ImageProvider.1", "123456789012"),
+                ],
+            ),
+        )
+        .unwrap();
+        let got =
+            body(get_allowed_images_settings(&svc, &req("GetAllowedImagesSettings", &[])).unwrap());
+        for expected in [
+            "<imageProviderSet><item>amazon</item></imageProviderSet>",
+            "<imageNameSet><item>al2023-*</item></imageNameSet>",
+            "<marketplaceProductCodeSet><item>abc123</item></marketplaceProductCodeSet>",
+            "<deprecationTimeCondition><maximumDaysSinceDeprecated>30</maximumDaysSinceDeprecated></deprecationTimeCondition>",
+            "<creationDateCondition><maximumDaysSinceCreated>300</maximumDaysSinceCreated></creationDateCondition>",
+            "<imageWatermarkSet><item><watermarkKey>golden</watermarkKey><maximumDaysSinceWatermarkCreated>5</maximumDaysSinceWatermarkCreated></item></imageWatermarkSet>",
+            "<scanResultCondition><maxDaysSinceLastFindingScan>7</maxDaysSinceLastFindingScan><maximumSeverityLabel>medium</maximumSeverityLabel><maxDaysSinceCriticalFixAvailable>0</maxDaysSinceCriticalFixAvailable></scanResultCondition>",
+            "<item><imageProviderSet><item>123456789012</item></imageProviderSet></item>",
+        ] {
+            assert!(got.contains(expected), "missing {expected}: {got}");
+        }
+
+        for (k, v) in [
+            (
+                "ImageCriterion.1.ScanResultCondition.MaximumSeverityLabel",
+                "severe",
+            ),
+            (
+                "ImageCriterion.1.ScanResultCondition.MaxDaysSinceLowFixAvailable",
+                "-1",
+            ),
+            (
+                "ImageCriterion.1.CreationDateCondition.MaximumDaysSinceCreated",
+                "2147483648",
+            ),
+        ] {
+            assert_eq!(
+                err_of(replace_image_criteria_in_allowed_images_settings(
+                    &svc,
+                    &req("ReplaceImageCriteriaInAllowedImagesSettings", &[(k, v)]),
+                ))
+                .code(),
+                "InvalidParameterValue",
+                "{k}={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn criteria_persisted_as_provider_lists_still_load() {
+        let mut stored = serde_json::to_value(Ec2State::default()).unwrap();
+        stored["allowed_image_criteria"] = serde_json::json!([["amazon"], []]);
+        let state: Ec2State = serde_json::from_value(stored).unwrap();
+        assert_eq!(state.allowed_image_criteria.len(), 2);
+        assert_eq!(state.allowed_image_criteria[0].image_providers, ["amazon"]);
+        assert_eq!(state.allowed_image_criteria[1], ImageCriterion::default());
+    }
+
+    #[test]
+    fn findings_are_listed_for_visible_amis_only() {
+        let svc = Ec2Service::new();
+        let id = {
+            let r = register_image(
+                &svc,
+                &req(
+                    "RegisterImage",
+                    &[("Name", "scan-me"), ("Architecture", "x86_64")],
+                ),
+            )
+            .unwrap();
+            let b = body(r);
+            b.split("<imageId>")
+                .nth(1)
+                .unwrap()
+                .split('<')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let got =
+            body(get_image_findings(&svc, &req("GetImageFindings", &[("ImageId", &id)])).unwrap());
+        assert!(got.contains("GetImageFindingsResponse"), "{got}");
+        assert!(!got.contains("<snapshotId>"), "{got}");
+        assert_eq!(
+            err_of(get_image_findings(
+                &svc,
+                &req("GetImageFindings", &[("ImageId", "ami-00000000000000000")]),
+            ))
+            .code(),
+            "InvalidAMIID.NotFound"
+        );
     }
 }

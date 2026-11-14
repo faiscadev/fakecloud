@@ -14363,3 +14363,149 @@ async fn ec2_delete_client_vpn_endpoint_authorization_policy() {
     .unwrap();
     assert!(!body.contains("<policyDocument>"), "{body}");
 }
+
+#[test_action("ec2", "GetCapacityManagerSupportabilityScores", checksum = "2c998d11")]
+#[tokio::test]
+async fn ec2_get_capacity_manager_supportability_scores() {
+    let server = TestServer::start().await;
+    let body = ec2_raw(
+        &server,
+        "Action=GetCapacityManagerSupportabilityScores&Version=2016-11-15\
+         &MarketType=on-demand&CapacityAmount=4&CapacityUnit=instances\
+         &CapacityAvailabilityZoneId.1=use1-az1&CapacityAvailabilityZoneId.2=usw2-az1\
+         &InstanceType.1=m5.large",
+    )
+    .await
+    .text()
+    .await
+    .unwrap();
+    assert!(
+        body.contains("<aggregateScore>high</aggregateScore>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<availabilityZoneId>usw2-az1</availabilityZoneId>"),
+        "{body}"
+    );
+    assert_eq!(body.matches("<score>").count(), 2, "{body}");
+}
+
+#[test_action("ec2", "GetImageFindings", checksum = "40532f4a")]
+#[tokio::test]
+async fn ec2_get_image_findings() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let id = make_ami(&c).await;
+    let body = ec2_raw(
+        &server,
+        &format!("Action=GetImageFindings&Version=2016-11-15&ImageId={id}"),
+    )
+    .await
+    .text()
+    .await
+    .unwrap();
+    // Nothing has scanned the AMI, so Inspector reports no findings.
+    assert!(body.contains("GetImageFindingsResponse"), "{body}");
+    assert!(!body.contains("<severityLabel>"), "{body}");
+}
+
+async fn make_tgw_vpc_attachment(c: &aws_sdk_ec2::Client) -> String {
+    let t = make_tgw(c).await;
+    c.create_transit_gateway_vpc_attachment()
+        .transit_gateway_id(&t)
+        .vpc_id("vpc-1")
+        .subnet_ids("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_vpc_attachment()
+        .unwrap()
+        .transit_gateway_attachment_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action(
+    "ec2",
+    "GetTransitGatewayAttachmentNatConfiguration",
+    checksum = "8b6f45ce"
+)]
+#[tokio::test]
+async fn ec2_get_transit_gateway_attachment_nat_configuration() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let id = make_tgw_vpc_attachment(&c).await;
+    let body = ec2_raw(
+        &server,
+        &format!(
+            "Action=GetTransitGatewayAttachmentNatConfiguration&Version=2016-11-15\
+             &TransitGatewayAttachmentId={id}"
+        ),
+    )
+    .await
+    .text()
+    .await
+    .unwrap();
+    assert!(
+        body.contains("<natGatewaySupport>disabled</natGatewaySupport>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<natSystemRouteSupport>enable</natSystemRouteSupport>"),
+        "{body}"
+    );
+}
+
+#[test_action(
+    "ec2",
+    "ModifyTransitGatewayAttachmentNatConfiguration",
+    checksum = "c8552596"
+)]
+#[tokio::test]
+async fn ec2_modify_transit_gateway_attachment_nat_configuration() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let id = make_tgw_vpc_attachment(&c).await;
+    let body = ec2_raw(
+        &server,
+        &format!(
+            "Action=ModifyTransitGatewayAttachmentNatConfiguration&Version=2016-11-15\
+             &TransitGatewayAttachmentId={id}&NatGatewaySupport=enable\
+             &NatGatewayRule.1.RuleNumber=10&NatGatewayRule.1.MatchSourceCidr=10.0.0.0%2F24\
+             &NatGatewayRule.1.NatCidr=100.64.0.0%2F24"
+        ),
+    )
+    .await
+    .text()
+    .await
+    .unwrap();
+    assert!(
+        body.contains("<natGatewaySupport>enabling</natGatewaySupport>"),
+        "{body}"
+    );
+    assert!(body.contains("<state>pending</state>"), "{body}");
+    let atts = c
+        .describe_transit_gateway_attachments()
+        .transit_gateway_attachment_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    let body = ec2_raw(
+        &server,
+        &format!(
+            "Action=GetTransitGatewayAttachmentNatConfiguration&Version=2016-11-15\
+             &TransitGatewayAttachmentId={id}"
+        ),
+    )
+    .await
+    .text()
+    .await
+    .unwrap();
+    assert!(
+        body.contains("<natGatewaySupport>enabled</natGatewaySupport>"),
+        "{body}"
+    );
+    assert!(body.contains("<natCidr>100.64.0.0/24</natCidr>"), "{body}");
+    assert!(body.contains("<state>activated</state>"), "{body}");
+    assert!(!atts.transit_gateway_attachments().is_empty());
+}

@@ -281,7 +281,7 @@ pub fn security_group_vpcs_in(
 }
 
 /// Parse an IPv4 CIDR into `(network, prefix_len)`.
-fn parse_ipv4_cidr(cidr: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_ipv4_cidr(cidr: &str) -> Option<(u32, u32)> {
     let (addr, len) = cidr.split_once('/')?;
     let addr: Ipv4Addr = addr.parse().ok()?;
     let len: u32 = len.parse().ok()?;
