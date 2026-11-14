@@ -31,9 +31,12 @@ use crate::state::{
 };
 use crate::validate;
 
+mod rls;
+
 pub const LAKEFORMATION_ACTIONS: &[&str] = &[
     "AddLFTagsToResource",
     "AssumeDecoratedRoleWithSAML",
+    "AttachRLSPolicy",
     "BatchGrantPermissions",
     "BatchRevokePermissions",
     "CancelTransaction",
@@ -43,16 +46,19 @@ pub const LAKEFORMATION_ACTIONS: &[&str] = &[
     "CreateLFTagExpression",
     "CreateLakeFormationIdentityCenterConfiguration",
     "CreateLakeFormationOptIn",
+    "CreateRLSPolicy",
     "DeleteDataCellsFilter",
     "DeleteLFTag",
     "DeleteLFTagExpression",
     "DeleteLakeFormationIdentityCenterConfiguration",
     "DeleteLakeFormationOptIn",
     "DeleteObjectsOnCancel",
+    "DeleteRLSPolicy",
     "DeregisterResource",
     "DescribeLakeFormationIdentityCenterConfiguration",
     "DescribeResource",
     "DescribeTransaction",
+    "DetachRLSPolicy",
     "ExtendTransaction",
     "GetDataCellsFilter",
     "GetDataLakePrincipal",
@@ -62,6 +68,7 @@ pub const LAKEFORMATION_ACTIONS: &[&str] = &[
     "GetLFTagExpression",
     "GetQueryState",
     "GetQueryStatistics",
+    "GetRLSPolicy",
     "GetResourceLFTags",
     "GetTableObjects",
     "GetTemporaryDataLocationCredentials",
@@ -75,6 +82,8 @@ pub const LAKEFORMATION_ACTIONS: &[&str] = &[
     "ListLFTags",
     "ListLakeFormationOptIns",
     "ListPermissions",
+    "ListRLSPolicies",
+    "ListRLSPolicyAttachments",
     "ListResources",
     "ListTableStorageOptimizers",
     "ListTransactions",
@@ -90,6 +99,7 @@ pub const LAKEFORMATION_ACTIONS: &[&str] = &[
     "UpdateLFTag",
     "UpdateLFTagExpression",
     "UpdateLakeFormationIdentityCenterConfiguration",
+    "UpdateRLSPolicy",
     "UpdateResource",
     "UpdateTableObjects",
     "UpdateTableStorageOptimizer",
@@ -98,6 +108,11 @@ pub const LAKEFORMATION_ACTIONS: &[&str] = &[
 /// Actions that mutate persisted state and therefore trigger a snapshot.
 const MUTATING: &[&str] = &[
     "AddLFTagsToResource",
+    "AttachRLSPolicy",
+    "CreateRLSPolicy",
+    "DeleteRLSPolicy",
+    "DetachRLSPolicy",
+    "UpdateRLSPolicy",
     "BatchGrantPermissions",
     "BatchRevokePermissions",
     "CancelTransaction",
@@ -400,6 +415,9 @@ fn resource_signature(resource: &Value, account_id: &str) -> String {
             dl.get("ResourceArn").and_then(Value::as_str).unwrap_or("")
         );
     }
+    if let Some(sig) = rls::rls_policy_signature(resource, account_id) {
+        return sig;
+    }
     format!("other\u{1}{resource}")
 }
 
@@ -413,6 +431,15 @@ impl LakeFormationService {
         validate::validate(action, req)?;
         let body = req_body(req);
         match action {
+            // Row-level security policies
+            "CreateRLSPolicy" => self.create_rls_policy(req, &body),
+            "GetRLSPolicy" => self.get_rls_policy(req, &body),
+            "UpdateRLSPolicy" => self.update_rls_policy(req, &body),
+            "DeleteRLSPolicy" => self.delete_rls_policy(req, &body),
+            "ListRLSPolicies" => self.list_rls_policies(req, &body),
+            "AttachRLSPolicy" => self.attach_rls_policy(req, &body),
+            "DetachRLSPolicy" => self.detach_rls_policy(req, &body),
+            "ListRLSPolicyAttachments" => self.list_rls_policy_attachments(req, &body),
             // LF-tags
             "CreateLFTag" => self.create_lf_tag(req, &body),
             "GetLFTag" => self.get_lf_tag(req, &body),
@@ -743,6 +770,7 @@ impl LakeFormationService {
         let condition = body.get("Condition").cloned();
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        rls::check_rls_policy_resource(st, &resource, &req.account_id)?;
         apply_grant(
             &mut st.grants,
             catalog,
@@ -768,6 +796,7 @@ impl LakeFormationService {
         let condition = body.get("Condition").cloned();
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        rls::check_rls_policy_resource(st, &resource, &req.account_id)?;
         apply_revoke(
             &mut st.grants,
             &principal,
@@ -794,9 +823,17 @@ impl LakeFormationService {
             .unwrap_or_default();
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        let mut failures = Vec::new();
         for entry in &entries {
             let principal = entry.get("Principal").cloned().unwrap_or(Value::Null);
             let resource = entry.get("Resource").cloned().unwrap_or(Value::Null);
+            if let Err(e) = rls::check_rls_policy_resource(st, &resource, &req.account_id) {
+                failures.push(json!({
+                    "RequestEntry": entry,
+                    "Error": { "ErrorCode": e.code(), "ErrorMessage": e.message() },
+                }));
+                continue;
+            }
             let permissions = string_list(entry, "Permissions");
             let grant_opt = string_list(entry, "PermissionsWithGrantOption");
             let condition = entry.get("Condition").cloned();
@@ -823,8 +860,7 @@ impl LakeFormationService {
                 );
             }
         }
-        // No per-entry failures for well-formed synthetic input.
-        Ok(ok(json!({ "Failures": [] })))
+        Ok(ok(json!({ "Failures": failures })))
     }
 
     fn list_permissions(

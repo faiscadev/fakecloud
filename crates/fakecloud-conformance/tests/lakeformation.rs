@@ -100,3 +100,131 @@ use helpers::TestServer;
 async fn lakeformation_conformance() {
     let _server = TestServer::start().await;
 }
+
+/// POST a restJson1 Lake Formation operation (`POST /<Operation>`), returning
+/// `(status, parsed_body)`. The RLS operations are newer than any Lake
+/// Formation SDK this workspace depends on.
+async fn lf(server: &TestServer, op: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{op}", server.endpoint()))
+        .header("content-type", "application/json")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lakeformation/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[test_action("lakeformation", "CreateRLSPolicy", checksum = "1614d26a")]
+#[test_action("lakeformation", "GetRLSPolicy", checksum = "46224af1")]
+#[test_action("lakeformation", "UpdateRLSPolicy", checksum = "43d402b3")]
+#[test_action("lakeformation", "ListRLSPolicies", checksum = "0097b41a")]
+#[test_action("lakeformation", "AttachRLSPolicy", checksum = "745919e2")]
+#[test_action("lakeformation", "ListRLSPolicyAttachments", checksum = "b765833d")]
+#[test_action("lakeformation", "DetachRLSPolicy", checksum = "56638f50")]
+#[test_action("lakeformation", "DeleteRLSPolicy", checksum = "4c9492f9")]
+#[tokio::test]
+async fn lakeformation_rls_policy_lifecycle() {
+    use serde_json::json;
+    let server = TestServer::start().await;
+    let table = json!({"Table": {"DatabaseName": "sales", "Name": "orders"}});
+    let principal =
+        json!({"DataLakePrincipalIdentifier": "arn:aws:iam::123456789012:role/analyst"});
+
+    let (status, out) = lf(
+        &server,
+        "CreateRLSPolicy",
+        json!({
+            "Name": "us-only",
+            "AttachmentColumns": [{"Name": "region", "Type": "string"}],
+            "FilterExpression": "region = 'us'",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+
+    let (status, out) = lf(
+        &server,
+        "UpdateRLSPolicy",
+        json!({"Name": "us-only", "FilterExpression": "region = 'eu'"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+
+    let (status, out) = lf(&server, "GetRLSPolicy", json!({"Name": "us-only"})).await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["RLSPolicy"]["FilterExpression"], "region = 'eu'");
+    assert_eq!(out["RLSPolicy"]["AttachmentColumns"][0]["Name"], "region");
+
+    let (status, out) = lf(&server, "ListRLSPolicies", json!({})).await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["RLSPolicies"][0]["Name"], "us-only");
+
+    let (status, out) = lf(
+        &server,
+        "AttachRLSPolicy",
+        json!({"Name": "us-only", "Resource": table, "Principal": principal, "SetDefault": true}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+
+    let (status, out) = lf(
+        &server,
+        "ListRLSPolicyAttachments",
+        json!({"Resource": table}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let items = out["RLSPolicyAttachments"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["PolicyName"], "us-only");
+    assert_eq!(items[0]["DefaultRLSPolicy"], true);
+    assert_eq!(items[0]["Principal"], principal);
+
+    // Permissions on the policy itself go through the regular grant path.
+    let (status, out) = lf(
+        &server,
+        "GrantPermissions",
+        json!({"Principal": principal, "Resource": {"RLSPolicy": {"Name": "us-only"}}, "Permissions": ["DESCRIBE"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = lf(
+        &server,
+        "ListPermissions",
+        json!({"Resource": {"RLSPolicy": {"Name": "us-only"}}}),
+    )
+    .await;
+    assert_eq!(
+        out["PrincipalResourcePermissions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let (status, out) = lf(
+        &server,
+        "DetachRLSPolicy",
+        json!({"Name": "us-only", "Resource": table, "Principal": principal}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = lf(&server, "ListRLSPolicyAttachments", json!({})).await;
+    assert!(out["RLSPolicyAttachments"].as_array().unwrap().is_empty());
+
+    let (status, out) = lf(&server, "DeleteRLSPolicy", json!({"Name": "us-only"})).await;
+    assert_eq!(status, 200, "{out}");
+    let (status, out) = lf(&server, "GetRLSPolicy", json!({"Name": "us-only"})).await;
+    assert_eq!(status, 400);
+    assert!(out.to_string().contains("EntityNotFoundException"), "{out}");
+}
