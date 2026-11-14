@@ -476,11 +476,31 @@ pub(crate) fn build_k8s_network_config(req: Option<&Value>) -> Value {
         .and_then(|v| v.get("enabled"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    json!({
+    let mut elb = json!({ "enabled": elb_enabled });
+    if let Some(gw) = req
+        .and_then(|v| v.get("elasticLoadBalancing"))
+        .and_then(|v| v.get("gatewayApi"))
+        .filter(|v| v.is_object())
+    {
+        elb["gatewayApi"] = gw.clone();
+    }
+    let mut out = json!({
         "serviceIpv4Cidr": service_cidr,
         "ipFamily": ip_family,
-        "elasticLoadBalancing": { "enabled": elb_enabled },
-    })
+        "elasticLoadBalancing": elb,
+    });
+    // An IPv6 cluster gets a service CIDR carved from a unique-local range
+    // (EKS assigns a /108 from fc00::/7).
+    if ip_family == "ipv6" {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        out["serviceIpv6Cidr"] = json!(format!(
+            "fd{}:{}:{}::/108",
+            &id[0..2],
+            &id[2..6],
+            &id[6..10]
+        ));
+    }
+    out
 }
 
 /// Apply an `UpdateClusterConfig` `kubernetesNetworkConfig` to the stored
@@ -495,12 +515,16 @@ pub(crate) fn merge_k8s_network_config_update(existing: &mut Value, req: &Value)
             existing[key] = v.clone();
         }
     }
-    if let Some(enabled) = req
-        .get("elasticLoadBalancing")
-        .and_then(|v| v.get("enabled"))
-        .and_then(Value::as_bool)
-    {
-        existing["elasticLoadBalancing"] = json!({ "enabled": enabled });
+    if let Some(req_elb) = req.get("elasticLoadBalancing").filter(|v| v.is_object()) {
+        if !existing["elasticLoadBalancing"].is_object() {
+            existing["elasticLoadBalancing"] = json!({ "enabled": false });
+        }
+        if let Some(enabled) = req_elb.get("enabled").and_then(Value::as_bool) {
+            existing["elasticLoadBalancing"]["enabled"] = json!(enabled);
+        }
+        if let Some(gw) = req_elb.get("gatewayApi").filter(|v| v.is_object()) {
+            existing["elasticLoadBalancing"]["gatewayApi"] = gw.clone();
+        }
     }
 }
 

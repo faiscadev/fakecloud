@@ -3830,6 +3830,50 @@ async fn update_cluster_config_merges_network_config() {
 }
 
 #[tokio::test]
+async fn elastic_load_balancing_gateway_api_round_trips() {
+    let svc = EksService::new(make_state());
+    let mut body: Value = serde_json::from_str(&create_body("gw")).unwrap();
+    body["kubernetesNetworkConfig"] = json!({
+        "ipFamily": "ipv6",
+        "elasticLoadBalancing": { "enabled": true, "gatewayApi": { "crds": { "managed": true } } }
+    });
+    svc.handle(make_request(Method::POST, "/clusters", &body.to_string()))
+        .await
+        .unwrap();
+    let get = || async {
+        body_of(
+            svc.handle(make_request(Method::GET, "/clusters/gw", ""))
+                .await
+                .unwrap(),
+        )["cluster"]["kubernetesNetworkConfig"]
+            .clone()
+    };
+    let kn = get().await;
+    assert_eq!(
+        kn["elasticLoadBalancing"],
+        json!({ "enabled": true, "gatewayApi": { "crds": { "managed": true } } })
+    );
+    let v6 = kn["serviceIpv6Cidr"].as_str().unwrap();
+    assert!(v6.starts_with("fd") && v6.ends_with("::/108"), "{v6}");
+
+    // Toggling CRD management keeps `enabled`; toggling `enabled` keeps it.
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters/gw/update-config",
+        &json!({ "kubernetesNetworkConfig": { "elasticLoadBalancing": { "gatewayApi": { "crds": { "managed": false } } } } })
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    let kn = get().await;
+    assert_eq!(kn["elasticLoadBalancing"]["enabled"], true);
+    assert_eq!(
+        kn["elasticLoadBalancing"]["gatewayApi"]["crds"]["managed"],
+        false
+    );
+}
+
+#[tokio::test]
 async fn addon_errors_match_a_live_eks_cluster() {
     let svc = EksService::new(make_state());
     create_cluster_on(&svc, "live", "1.31").await;
