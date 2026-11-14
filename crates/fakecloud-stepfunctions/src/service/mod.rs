@@ -209,6 +209,10 @@ pub fn reconcile_interrupted_executions(state: &SharedStepFunctionsState) -> usi
                 count += 1;
             }
         }
+        // Their map runs can't go on either.
+        for run in s.map_runs.values_mut() {
+            run.abort(now);
+        }
     }
     count
 }
@@ -361,29 +365,20 @@ fn state_machine_alias_to_json(alias: &crate::state::StateMachineAlias) -> Value
     })
 }
 
-fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
-    // Iterations still in flight while the map run is RUNNING; zero once it has
-    // reached a terminal status.
-    let accounted = mr.succeeded_count + mr.failed_count;
-    let running = if mr.status == "RUNNING" {
-        (mr.total_count - accounted).max(0)
+fn map_run_to_json(mr: &crate::state::MapRun, children: &[&Execution]) -> Value {
+    let (item_counts, execution_counts) = if mr.state_machine_arn.is_empty() {
+        // A run persisted before its iterations became child executions: its
+        // recorded tallies, alike for items and executions.
+        let counts = recorded_map_run_counts(mr);
+        (counts.clone(), counts)
     } else {
-        0
+        (
+            child_counts(mr, children, mr.item_total.max(mr.total_count), |c| {
+                c.item_count.unwrap_or(1)
+            }),
+            child_counts(mr, children, mr.total_count, |_| 1),
+        )
     };
-    // AWS reports parallel `itemCounts` and `executionCounts` maps; with one
-    // child execution per item they carry identical tallies here.
-    let counts = json!({
-        "pending": 0,
-        "running": running,
-        "succeeded": mr.succeeded_count,
-        "failed": mr.failed_count,
-        "timedOut": 0,
-        "aborted": 0,
-        "results": mr.succeeded_count,
-        "total": mr.total_count,
-        "failuresNotRedrivable": 0,
-        "pendingRedrive": 0,
-    });
     json!({
         "mapRunArn": mr.map_run_arn,
         "executionArn": mr.execution_arn,
@@ -393,8 +388,72 @@ fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
         "status": mr.status,
         "startDate": mr.start_date.timestamp(),
         "stopDate": mr.stop_date.map(|d| d.timestamp()),
-        "itemCounts": counts,
-        "executionCounts": counts,
+        "itemCounts": item_counts,
+        "executionCounts": execution_counts,
+        "redriveCount": 0,
+    })
+}
+
+/// A map run's counts from its child executions, each weighing `weight`
+/// (one execution, or the items it processes) out of `total`. Iterations that
+/// never started are pending while it runs, and aborted with it.
+fn child_counts(
+    mr: &crate::state::MapRun,
+    children: &[&Execution],
+    total: i64,
+    weight: impl Fn(&Execution) -> i64,
+) -> Value {
+    let tally = |status: ExecutionStatus| -> i64 {
+        children
+            .iter()
+            .filter(|c| c.status == status)
+            .map(|c| weight(c))
+            .sum()
+    };
+    let succeeded = tally(ExecutionStatus::Succeeded);
+    let failed = tally(ExecutionStatus::Failed);
+    let started: i64 = children.iter().map(|c| weight(c)).sum();
+    let unstarted = (total - started).max(0);
+    // A run that failed past its tolerance leaves the rest pending, as its
+    // `ResultWriter` reports them; one stopped with its parent, aborted.
+    let (pending, aborted_unstarted) = match mr.status.as_str() {
+        "ABORTED" => (0, unstarted),
+        _ => (unstarted, 0),
+    };
+    json!({
+        "pending": pending,
+        "running": tally(ExecutionStatus::Running),
+        "succeeded": succeeded,
+        "failed": failed,
+        "timedOut": tally(ExecutionStatus::TimedOut),
+        "aborted": tally(ExecutionStatus::Aborted) + aborted_unstarted,
+        "total": total,
+        "resultsWritten": succeeded + failed,
+        "failuresNotRedrivable": 0,
+        "pendingRedrive": 0,
+    })
+}
+
+fn recorded_map_run_counts(mr: &crate::state::MapRun) -> Value {
+    // Iterations still in flight while the map run is RUNNING; zero once it has
+    // reached a terminal status.
+    let accounted = mr.succeeded_count + mr.failed_count;
+    let running = if mr.status == "RUNNING" {
+        (mr.total_count - accounted).max(0)
+    } else {
+        0
+    };
+    json!({
+        "pending": 0,
+        "running": running,
+        "succeeded": mr.succeeded_count,
+        "failed": mr.failed_count,
+        "timedOut": 0,
+        "aborted": 0,
+        "resultsWritten": accounted,
+        "total": mr.total_count,
+        "failuresNotRedrivable": 0,
+        "pendingRedrive": 0,
     })
 }
 
@@ -1422,6 +1481,55 @@ fn reject_express_execution_arn(arn: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// DescribeExecution and DescribeStateMachineForExecution do take the EXPRESS
+/// child executions of a map run, which AWS keeps (recorded): an EXPRESS ARN
+/// under a labeled state machine.
+fn reject_unlabeled_express_execution_arn(arn: &str) -> Result<(), AwsServiceError> {
+    if crate::state::is_labeled_arn(arn) {
+        return Ok(());
+    }
+    reject_express_execution_arn(arn)
+}
+
+fn validation_exception(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", message)
+}
+
+/// What `DescribeStateMachine` and `DescribeStateMachineForExecution` show for
+/// the labeled state machine a map run's children run, as recorded: the
+/// parent state machine's settings with the processor's definition, its
+/// execution type and the run's label.
+fn labeled_state_machine_to_json(sm: &StateMachine, run: &crate::state::MapRun) -> Value {
+    let mut resp = state_machine_to_json(sm);
+    resp["stateMachineArn"] = json!(run.state_machine_arn);
+    resp["definition"] = json!(run.child_definition);
+    resp["type"] = json!(run.child_type.as_str());
+    resp["label"] = json!(run.label);
+    if let Some(fields) = resp.as_object_mut() {
+        fields.remove("revisionId");
+        fields.remove("description");
+    }
+    resp
+}
+
+/// The map run whose children run the labeled state machine `arn`, and the
+/// state machine it belongs to.
+fn labeled_state_machine<'a>(
+    state: &'a StepFunctionsState,
+    arn: &str,
+) -> Option<(&'a StateMachine, &'a crate::state::MapRun)> {
+    // The newest run speaks for the state machine as it is now.
+    let run = state
+        .map_runs
+        .values()
+        .filter(|run| run.state_machine_arn == arn)
+        .max_by_key(|run| run.start_date)?;
+    // `<machine>/<label>`, or `<machine>/<label>/...` for a map run nested in
+    // another's children.
+    let (machine_arn, _) = arn.split_once('/')?;
+    Some((state.state_machines.get(machine_arn)?, run))
+}
+
 fn state_machine_type_not_supported(message: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -1448,6 +1556,9 @@ pub(crate) fn execution_to_json(exec: &Execution) -> Value {
         "redriveCount": exec.redrive_count,
     });
 
+    if let Some(ref map_run_arn) = exec.map_run_arn {
+        resp["mapRunArn"] = json!(map_run_arn);
+    }
     if let Some(ref input) = exec.input {
         resp["input"] = json!(input);
     }
@@ -1511,7 +1622,7 @@ fn validate_arn(arn: &str) -> Result<(), AwsServiceError> {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidArn",
-            format!("Invalid Arn: '{arn}'"),
+            format!("Invalid Arn: 'Invalid ARN prefix: {arn}'"),
         ));
     }
     Ok(())
@@ -1648,6 +1759,8 @@ pub fn start_execution_from_delivery(
         billed_memory_mb: None,
         role_arn: sm_role_arn,
         redrive_count: 0,
+        map_run_arn: None,
+        item_count: None,
     };
 
     st.executions.insert(exec_arn.clone(), execution);
@@ -3650,6 +3763,49 @@ mod tests {
         assert!(err.to_string().contains("InvalidExecutionInput"));
     }
 
+    /// An event with nothing to say carries no `...EventDetails` member, as
+    /// recorded for `MapRunSucceeded` and `MapStateSucceeded`.
+    #[test]
+    fn history_events_without_details_carry_none() {
+        let state = make_state();
+        let arn = "arn:aws:states:us-east-1:123456789012:execution:sm:run";
+        let mut exec = make_execution(arn, ExecutionStatus::Succeeded);
+        for (event_type, details) in [
+            (
+                "MapRunStarted",
+                json!({"mapRunArn": "arn:aws:states:us-east-1:123456789012:mapRun:sm/l:x"}),
+            ),
+            ("MapRunSucceeded", json!({})),
+        ] {
+            exec.history_events.push(crate::state::HistoryEvent {
+                id: exec.history_events.len() as i64 + 1,
+                event_type: event_type.to_string(),
+                timestamp: Utc::now(),
+                previous_event_id: 0,
+                details,
+            });
+        }
+        state
+            .write()
+            .regional_mut("123456789012", "us-east-1")
+            .executions
+            .insert(arn.to_string(), exec);
+        let svc = StepFunctionsService::new(state);
+        let resp = svc
+            .get_execution_history(&make_request(
+                "GetExecutionHistory",
+                &json!({ "executionArn": arn }).to_string(),
+            ))
+            .unwrap();
+        let events = body_json(&resp)["events"].clone();
+        assert!(events[0].get("mapRunStartedEventDetails").is_some());
+        let keys: Vec<&String> = events[1].as_object().unwrap().keys().collect();
+        assert!(
+            !keys.iter().any(|k| k.ends_with("EventDetails")),
+            "{keys:?}"
+        );
+    }
+
     /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
     #[test]
     fn snapshot_hook_is_none_without_store() {
@@ -3691,6 +3847,8 @@ mod tests {
             billed_memory_mb: None,
             role_arn: String::new(),
             redrive_count: 0,
+            map_run_arn: None,
+            item_count: None,
         }
     }
 
@@ -3733,6 +3891,16 @@ mod tests {
         let svc = StepFunctionsService::new(state.clone());
         let execution_arn =
             "arn:aws:states:us-east-1:123456789012:execution:dist-sm:exec-1".to_string();
+        // The execution StartExecution records, which its map run's children
+        // run under.
+        state
+            .write()
+            .regional_mut("123456789012", "us-east-1")
+            .executions
+            .insert(
+                execution_arn.clone(),
+                make_execution(&execution_arn, ExecutionStatus::Running),
+            );
 
         let def = json!({
             "StartAt": "M",

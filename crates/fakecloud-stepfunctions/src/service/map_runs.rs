@@ -23,7 +23,12 @@ impl StepFunctionsService {
             .map_runs
             .get(&arn)
             .ok_or_else(|| resource_not_found(&arn))?;
-        Ok(AwsResponse::ok_json(map_run_to_json(mr)))
+        let children: Vec<&crate::state::Execution> = state
+            .executions
+            .values()
+            .filter(|e| e.map_run_arn.as_deref() == Some(arn.as_str()))
+            .collect();
+        Ok(AwsResponse::ok_json(map_run_to_json(mr, &children)))
     }
 
     pub(super) fn list_map_runs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -64,7 +69,14 @@ impl StepFunctionsService {
                 json!({
                     "mapRunArn": r.map_run_arn,
                     "executionArn": r.execution_arn,
-                    "stateMachineArn": state_machine_arn_from_execution(&r.execution_arn),
+                    // The labeled state machine its children run, as recorded;
+                    // a run persisted before it was kept falls back to the
+                    // parent's.
+                    "stateMachineArn": if r.state_machine_arn.is_empty() {
+                        state_machine_arn_from_execution(&r.execution_arn)
+                    } else {
+                        r.state_machine_arn.clone()
+                    },
                     "startDate": r.start_date.timestamp(),
                     "stopDate": r.stop_date.map(|d| d.timestamp()),
                 })

@@ -36,6 +36,8 @@ fn create_execution(state: &SharedStepFunctionsState, arn: &str, input: Option<S
             billed_memory_mb: None,
             role_arn: "arn:aws:iam::123456789012:role/test".to_string(),
             redrive_count: 0,
+            map_run_arn: None,
+            item_count: None,
         },
     );
 }
@@ -1208,6 +1210,8 @@ fn make_exec(status: ExecutionStatus) -> Execution {
         billed_memory_mb: None,
         role_arn: String::new(),
         redrive_count: 0,
+        map_run_arn: None,
+        item_count: None,
     }
 }
 
@@ -2691,20 +2695,116 @@ fn a_negative_jsonata_tolerance_is_refused_as_negative() {
 }
 
 #[test]
-fn map_run_arn_joins_machine_and_execution_names_for_both_types() {
-    let standard =
-        map_run_arn_for("arn:aws:states:us-east-1:123456789012:execution:sm:run").unwrap();
-    assert!(
-        standard.starts_with("arn:aws:states:us-east-1:123456789012:mapRun:sm/run:"),
-        "{standard}"
-    );
-    let express = map_run_arn_for(
-        "arn:aws:states:us-east-1:123456789012:express:sm:run:0b1c2d3e-aaaa-bbbb-cccc-0123456789ab",
+fn map_run_arns_hang_off_the_machine_and_label_for_both_types() {
+    use crate::state::{map_run_child_execution, MapRunChildren, StateMachineType};
+    let standard = MapRunChildren::new(
+        "arn:aws:states:us-east-1:123456789012:execution:sm:run",
+        "M",
+        Some("lbl"),
     )
     .unwrap();
     assert!(
-        express.starts_with("arn:aws:states:us-east-1:123456789012:mapRun:sm/run:"),
-        "{express}"
+        standard
+            .map_run_arn
+            .starts_with("arn:aws:states:us-east-1:123456789012:mapRun:sm/lbl:"),
+        "{}",
+        standard.map_run_arn
     );
-    assert!(!express.contains("0b1c2d3e"), "{express}");
+    assert_eq!(
+        standard.state_machine_arn,
+        "arn:aws:states:us-east-1:123456789012:stateMachine:sm/lbl"
+    );
+    // Without a Label, as recorded, the run is named by an id stable for the
+    // state machine and state, whichever execution runs it.
+    let express_arn =
+        "arn:aws:states:us-east-1:123456789012:express:sm:run:0b1c2d3e-aaaa-bbbb-cccc-0123456789ab";
+    let first = MapRunChildren::new(express_arn, "M", None).unwrap();
+    let again = MapRunChildren::new(
+        "arn:aws:states:us-east-1:123456789012:execution:sm:other",
+        "M",
+        None,
+    )
+    .unwrap();
+    assert_eq!(first.label, again.label);
+    assert_eq!(
+        uuid::Uuid::parse_str(&first.label)
+            .unwrap()
+            .get_version_num(),
+        3
+    );
+    assert_ne!(first.map_run_arn, again.map_run_arn);
+    assert!(
+        !first.map_run_arn.contains("0b1c2d3e"),
+        "{}",
+        first.map_run_arn
+    );
+
+    let (arn, name) =
+        map_run_child_execution(&standard.map_run_arn, 0, StateMachineType::Standard).unwrap();
+    assert_eq!(
+        arn,
+        format!("arn:aws:states:us-east-1:123456789012:execution:sm/lbl:{name}")
+    );
+    let (arn, name) =
+        map_run_child_execution(&standard.map_run_arn, 0, StateMachineType::Express).unwrap();
+    assert_eq!(
+        arn,
+        format!("arn:aws:states:us-east-1:123456789012:express:sm/lbl:{name}")
+    );
+    assert_eq!(name.split(':').count(), 2, "{name}");
+}
+
+#[derive(Default)]
+struct RecordedLogs(parking_lot::Mutex<Vec<(String, String)>>);
+
+impl fakecloud_core::delivery::CloudwatchLogsDelivery for RecordedLogs {
+    fn put_log_events(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        log_group_name: &str,
+        log_stream_name: &str,
+        _events: &[(i64, String)],
+    ) {
+        self.0
+            .lock()
+            .push((log_group_name.to_string(), log_stream_name.to_string()));
+    }
+}
+
+/// An execution logs under its state machine's logging configuration, and a
+/// log group ARN in AWS's own `log-group:<name>:*` form names `<name>`.
+#[test]
+fn execution_logs_go_to_the_named_log_group() {
+    let state = make_state();
+    let logging = json!({
+        "level": "ALL",
+        "includeExecutionData": false,
+        "destinations": [{"cloudWatchLogsLogGroup": {
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:sfn-logged:*"
+        }}]
+    });
+    let logs = Arc::new(RecordedLogs::default());
+    let delivery = Arc::new(DeliveryBus::new().with_cloudwatch_logs(logs.clone()));
+    let arn = arn_for("logged");
+    create_execution(&state, &arn, None);
+    let fut = execute_state_machine(
+        state.clone(),
+        arn.clone(),
+        json!({"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}}).to_string(),
+        None,
+        Some(delivery),
+        None,
+        None,
+        Some(logging),
+    );
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(fut);
+    assert_eq!(
+        logs.0.lock().clone(),
+        [("sfn-logged".to_string(), "exec-1".to_string())]
+    );
 }

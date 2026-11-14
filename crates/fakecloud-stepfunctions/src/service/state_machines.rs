@@ -120,6 +120,11 @@ impl StepFunctionsService {
         let state = accounts
             .regional(&req.account_id, &req.region)
             .unwrap_or(&empty);
+        if crate::state::is_labeled_arn(arn) {
+            let (sm, run) =
+                labeled_state_machine(state, arn).ok_or_else(|| state_machine_not_found(arn))?;
+            return Ok(AwsResponse::ok_json(labeled_state_machine_to_json(sm, run)));
+        }
         let sm = state
             .state_machines
             .get(arn)
@@ -272,7 +277,7 @@ impl StepFunctionsService {
         let exec_arn = body["executionArn"]
             .as_str()
             .ok_or_else(|| missing("executionArn"))?;
-        reject_express_execution_arn(exec_arn)?;
+        reject_unlabeled_express_execution_arn(exec_arn)?;
 
         let accounts = self.state.read();
         let empty = StepFunctionsState::new(&req.account_id, &req.region);
@@ -283,6 +288,25 @@ impl StepFunctionsService {
             .executions
             .get(exec_arn)
             .ok_or_else(|| execution_not_found(exec_arn))?;
+
+        // A map run's child runs its labeled state machine, as recorded.
+        if let Some(run) = exec
+            .map_run_arn
+            .as_ref()
+            .and_then(|arn| state.map_runs.get(arn))
+        {
+            let sm = labeled_state_machine(state, &run.state_machine_arn)
+                .map(|(sm, _)| sm)
+                .ok_or_else(|| state_machine_not_found(&run.state_machine_arn))?;
+            let mut resp = labeled_state_machine_to_json(sm, run);
+            if let Some(fields) = resp.as_object_mut() {
+                fields.remove("type");
+                fields.remove("status");
+                fields.remove("creationDate");
+            }
+            resp["mapRunArn"] = json!(run.map_run_arn);
+            return Ok(AwsResponse::ok_json(resp));
+        }
 
         let sm = state
             .state_machines

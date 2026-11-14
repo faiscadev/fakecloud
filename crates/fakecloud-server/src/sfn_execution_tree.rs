@@ -89,6 +89,8 @@ mod tests {
                 billed_memory_mb: None,
                 role_arn: "arn:aws:iam::123456789012:role/r".to_string(),
                 redrive_count: 0,
+                map_run_arn: None,
+                item_count: None,
             },
         );
     }

@@ -160,6 +160,39 @@ pub struct MapRun {
     /// Iterations that failed.
     #[serde(default)]
     pub failed_count: i64,
+    /// The state machine its child executions run:
+    /// `stateMachine:<machine>/<label>` (see [`MapRunChildren`]).
+    #[serde(default)]
+    pub state_machine_arn: String,
+    /// The Map state's `Label`, or the stable id AWS names it by without one.
+    #[serde(default)]
+    pub label: String,
+    /// The definition its child executions run: the `ItemProcessor` without
+    /// its `ProcessorConfig`, as `DescribeStateMachineForExecution` reports it.
+    #[serde(default)]
+    pub child_definition: String,
+    /// `ProcessorConfig.ExecutionType` of its child executions.
+    #[serde(default = "default_child_type")]
+    pub child_type: StateMachineType,
+    /// Items in all, which its batches hold under an `ItemBatcher`.
+    #[serde(default)]
+    pub item_total: i64,
+}
+
+impl MapRun {
+    /// Stop a running map run with its parent; `false` if it had ended.
+    pub fn abort(&mut self, now: DateTime<Utc>) -> bool {
+        if self.status != "RUNNING" {
+            return false;
+        }
+        self.status = "ABORTED".to_string();
+        self.stop_date = Some(now);
+        true
+    }
+}
+
+fn default_child_type() -> StateMachineType {
+    StateMachineType::Standard
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +332,14 @@ pub struct Execution {
     /// persisted before it was tracked.
     #[serde(default)]
     pub redrive_count: u32,
+    /// The map run that started this execution, for a child execution of a
+    /// distributed Map.
+    #[serde(default)]
+    pub map_run_arn: Option<String>,
+    /// How many items a map run child execution processes (`itemCount`): one,
+    /// or its batch's size under an `ItemBatcher`.
+    #[serde(default)]
+    pub item_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +461,74 @@ pub fn execution_arn(
 /// Whether `arn` is an EXPRESS execution ARN (`...:express:<machine>:...`).
 pub fn is_express_execution_arn(arn: &str) -> bool {
     arn.split(':').nth(5) == Some("express")
+}
+
+/// Whether a state machine or execution ARN names a labeled state machine:
+/// `<machine>/<label>`, the state machine of a map run's child executions.
+/// A state machine's own name can't contain a `/`.
+pub fn is_labeled_arn(arn: &str) -> bool {
+    arn.split(':').nth(6).is_some_and(|name| name.contains('/'))
+}
+
+/// The ARNs a distributed Map's run and its child executions are named by,
+/// as recorded: everything hangs off `<machine>/<label>`.
+pub struct MapRunChildren {
+    /// `mapRun:<machine>/<label>:<id>`.
+    pub map_run_arn: String,
+    /// `stateMachine:<machine>/<label>`.
+    pub state_machine_arn: String,
+    pub label: String,
+}
+
+impl MapRunChildren {
+    /// The map run a Map state named `state_name` starts in `execution_arn`
+    /// (STANDARD or EXPRESS). Without a `Label` AWS names the run by an id
+    /// stable for the state machine and state, as recorded.
+    pub fn new(execution_arn: &str, state_name: &str, label: Option<&str>) -> Option<Self> {
+        let (prefix, tail) = execution_arn
+            .split_once(":execution:")
+            .or_else(|| execution_arn.split_once(":express:"))?;
+        let machine = tail.split(':').next()?;
+        let label = match label {
+            Some(label) => label.to_string(),
+            None => uuid::Uuid::new_v3(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("{prefix}:stateMachine:{machine}#{state_name}").as_bytes(),
+            )
+            .to_string(),
+        };
+        Some(Self {
+            map_run_arn: format!("{prefix}:mapRun:{machine}/{label}:{}", uuid::Uuid::new_v4()),
+            state_machine_arn: format!("{prefix}:stateMachine:{machine}/{label}"),
+            label,
+        })
+    }
+}
+
+/// The ARN and name of a map run's `index`th child execution, as recorded: a
+/// name-derived id under `<machine>/<label>`, which an EXPRESS child follows
+/// with its own id, as any EXPRESS execution does.
+pub fn map_run_child_execution(
+    map_run_arn: &str,
+    index: usize,
+    child_type: StateMachineType,
+) -> Option<(String, String)> {
+    let (prefix, run) = map_run_arn.split_once(":mapRun:")?;
+    let (path, _) = run.rsplit_once(':')?;
+    let id = uuid::Uuid::new_v3(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("{map_run_arn}#{index}").as_bytes(),
+    );
+    Some(match child_type {
+        StateMachineType::Standard => {
+            let name = id.to_string();
+            (format!("{prefix}:execution:{path}:{name}"), name)
+        }
+        StateMachineType::Express => {
+            let name = format!("{id}:{}", uuid::Uuid::new_v4());
+            (format!("{prefix}:express:{path}:{name}"), name)
+        }
+    })
 }
 
 /// A fresh ARN for one EXPRESS execution: `express:<machine>:<name>:<id>`.

@@ -5,6 +5,7 @@
 
 mod helpers;
 
+use aws_sdk_sfn::error::ProvideErrorMetadata;
 use helpers::TestServer;
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
@@ -1866,8 +1867,6 @@ async fn sync_waits_for_an_express_child_as_recorded() {
 /// execution ARN, and ListExecutions refuses an EXPRESS state machine.
 #[tokio::test]
 async fn express_executions_refuse_the_execution_operations() {
-    use aws_sdk_sfn::error::ProvideErrorMetadata;
-
     let server = TestServer::start().await;
     let client = server.sfn_client().await;
     let sm = create_express_machine(
@@ -1950,4 +1949,777 @@ async fn express_executions_refuse_the_execution_operations() {
             Some("This operation is not supported by this type of state machine")
         )
     );
+}
+
+/// The distributed Map recorded against AWS: three items, one failing, under a
+/// tolerance, with a `Label`.
+fn recorded_map_run(execution_type: &str) -> Value {
+    json!({"StartAt":"M","States":{"M":{
+        "Type":"Map","ToleratedFailureCount":5,"Label":"lbl",
+        "ItemProcessor":{
+            "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":execution_type},
+            "StartAt":"C",
+            "States":{
+                "C":{"Type":"Choice","Choices":[{"Variable":"$","StringEquals":"bad","Next":"F"}],"Default":"P"},
+                "P":{"Type":"Pass","End":true},
+                "F":{"Type":"Fail","Error":"E","Cause":"c"}
+            }
+        },
+        "End":true
+    }}})
+}
+
+async fn history_types(client: &aws_sdk_sfn::Client, arn: &str) -> Vec<String> {
+    client
+        .get_execution_history()
+        .execution_arn(arn)
+        .send()
+        .await
+        .unwrap()
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str().to_string())
+        .collect()
+}
+
+// A distributed Map's iterations are child executions of their own, which
+// ListExecutions lists by map run and DescribeExecution describes, for STANDARD
+// and EXPRESS children alike, as recorded against AWS.
+#[tokio::test]
+async fn map_run_children_are_listed_and_described_as_recorded() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    for (execution_type, kind) in [("STANDARD", "execution"), ("EXPRESS", "express")] {
+        let name = format!("dmap-{}", execution_type.to_lowercase());
+        let machine = create_machine(&client, &name, recorded_map_run(execution_type)).await;
+        let started = client
+            .start_execution()
+            .state_machine_arn(&machine)
+            .name("run1")
+            .input(r#"["a","b","bad"]"#)
+            .send()
+            .await
+            .unwrap();
+        let parent = wait_terminal(&client, started.execution_arn()).await;
+        assert_eq!(parent.status().as_str(), "SUCCEEDED", "{execution_type}");
+
+        // The parent's history follows the map run, not its iterations.
+        assert_eq!(
+            history_types(&client, started.execution_arn()).await,
+            [
+                "ExecutionStarted",
+                "MapStateEntered",
+                "MapStateStarted",
+                "MapRunStarted",
+                "MapRunSucceeded",
+                "MapStateSucceeded",
+                "MapStateExited",
+                "ExecutionSucceeded",
+            ],
+            "{execution_type}"
+        );
+
+        let labeled = format!("{machine}/lbl");
+        let runs = client
+            .list_map_runs()
+            .execution_arn(started.execution_arn())
+            .send()
+            .await
+            .unwrap();
+        let run = &runs.map_runs()[0];
+        assert_eq!(run.state_machine_arn(), labeled);
+        let run_arn = run.map_run_arn().to_string();
+        assert!(
+            run_arn.starts_with(&format!(
+                "arn:aws:states:us-east-1:123456789012:mapRun:{name}/lbl:"
+            )),
+            "{run_arn}"
+        );
+        let described_run = client
+            .describe_map_run()
+            .map_run_arn(&run_arn)
+            .send()
+            .await
+            .unwrap();
+        let counts = described_run.execution_counts().unwrap();
+        assert_eq!(
+            (
+                counts.succeeded(),
+                counts.failed(),
+                counts.results_written()
+            ),
+            (2, 1, 3)
+        );
+        assert_eq!(described_run.redrive_count(), Some(0));
+
+        let children = client
+            .list_executions()
+            .map_run_arn(&run_arn)
+            .send()
+            .await
+            .unwrap();
+        let children = children.executions();
+        assert_eq!(children.len(), 3, "{execution_type}");
+        let child_prefix = format!("arn:aws:states:us-east-1:123456789012:{kind}:{name}/lbl:");
+        for child in children {
+            assert!(
+                child.execution_arn().starts_with(&child_prefix),
+                "{}",
+                child.execution_arn()
+            );
+            assert_eq!(
+                child.execution_arn(),
+                format!("{child_prefix}{}", child.name())
+            );
+            assert_eq!(child.state_machine_arn(), labeled);
+            assert_eq!(child.map_run_arn(), Some(run_arn.as_str()));
+            assert_eq!(child.item_count(), Some(1));
+            assert_eq!(child.redrive_count(), Some(0));
+        }
+        let mut statuses: Vec<&str> = children.iter().map(|c| c.status().as_str()).collect();
+        statuses.sort_unstable();
+        assert_eq!(statuses, ["FAILED", "SUCCEEDED", "SUCCEEDED"]);
+
+        let failed = client
+            .list_executions()
+            .map_run_arn(&run_arn)
+            .status_filter(aws_sdk_sfn::types::ExecutionStatus::Failed)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(failed.executions().len(), 1);
+        let failed_arn = failed.executions()[0].execution_arn().to_string();
+        let page = client
+            .list_executions()
+            .map_run_arn(&run_arn)
+            .max_results(1)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.executions().len(), 1);
+        assert!(page.next_token().is_some());
+
+        let child = client
+            .describe_execution()
+            .execution_arn(&failed_arn)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(child.input(), Some("\"bad\""));
+        assert_eq!((child.error(), child.cause()), (Some("E"), Some("c")));
+        assert_eq!(child.map_run_arn(), Some(run_arn.as_str()));
+        assert_eq!(child.state_machine_arn(), labeled);
+
+        let child_machine = client
+            .describe_state_machine_for_execution()
+            .execution_arn(&failed_arn)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(child_machine.state_machine_arn(), labeled);
+        assert_eq!(child_machine.name(), name);
+        assert_eq!(child_machine.label(), Some("lbl"));
+        assert_eq!(child_machine.map_run_arn(), Some(run_arn.as_str()));
+        let mut processor =
+            recorded_map_run(execution_type)["States"]["M"]["ItemProcessor"].clone();
+        processor.as_object_mut().unwrap().remove("ProcessorConfig");
+        assert_eq!(
+            serde_json::from_str::<Value>(child_machine.definition()).unwrap(),
+            processor
+        );
+        let labeled_machine = client
+            .describe_state_machine()
+            .state_machine_arn(&labeled)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(labeled_machine.r#type().as_str(), execution_type);
+        assert_eq!(labeled_machine.label(), Some("lbl"));
+        assert_eq!(labeled_machine.name(), name);
+
+        let history = client
+            .get_execution_history()
+            .execution_arn(&failed_arn)
+            .send()
+            .await;
+        let redriven = client
+            .redrive_execution()
+            .execution_arn(&failed_arn)
+            .send()
+            .await
+            .unwrap_err();
+        match execution_type {
+            "STANDARD" => {
+                let types: Vec<&str> = history
+                    .as_ref()
+                    .unwrap()
+                    .events()
+                    .iter()
+                    .map(|e| e.r#type().as_str())
+                    .collect();
+                assert_eq!(
+                    types,
+                    [
+                        "ExecutionStarted",
+                        "ChoiceStateEntered",
+                        "ChoiceStateExited",
+                        "FailStateEntered",
+                        "ExecutionFailed"
+                    ]
+                );
+                let stopped = client
+                    .stop_execution()
+                    .execution_arn(&failed_arn)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(stopped.stop_date(), child.stop_date().unwrap());
+                assert_eq!(
+                    (redriven.code(), redriven.message()),
+                    (
+                        Some("ValidationException"),
+                        Some("Labeled Execution ARNs are not supported for this API")
+                    )
+                );
+            }
+            _ => {
+                let err = history.unwrap_err();
+                assert_eq!(err.code(), Some("InvalidArn"));
+                assert_eq!(redriven.code(), Some("InvalidArn"));
+            }
+        }
+
+        // The state machine lists its own execution only; its labeled one
+        // can't be listed.
+        let own = client
+            .list_executions()
+            .state_machine_arn(&machine)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(own.executions().len(), 1);
+        assert_eq!(own.executions()[0].name(), "run1");
+        assert_eq!(own.executions()[0].map_run_arn(), None);
+        let err = client
+            .list_executions()
+            .state_machine_arn(&labeled)
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code(), err.message()),
+            (
+                Some("ValidationException"),
+                Some("Labeled State Machine ARNs are not supported for this API")
+            )
+        );
+    }
+}
+
+// ListExecutions takes a state machine or a map run, and refuses anything else
+// as recorded against AWS.
+#[tokio::test]
+async fn list_executions_refuses_what_aws_refuses() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(&client, "dmap-errors", recorded_map_run("STANDARD")).await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input(r#"["a"]"#)
+        .send()
+        .await
+        .unwrap();
+    wait_terminal(&client, started.execution_arn()).await;
+    let run_arn = client
+        .list_map_runs()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap()
+        .map_runs()[0]
+        .map_run_arn()
+        .to_string();
+
+    let pick_one = (
+        Some("ValidationException"),
+        Some("Must provide a StateMachine ARN or MapRun ARN"),
+    );
+    let err = client.list_executions().send().await.unwrap_err();
+    assert_eq!((err.code(), err.message()), pick_one);
+    let err = client
+        .list_executions()
+        .state_machine_arn(&machine)
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!((err.code(), err.message()), pick_one);
+
+    let err = client
+        .list_executions()
+        .map_run_arn("foo")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (
+            Some("InvalidArn"),
+            Some("Invalid Arn: 'Invalid ARN prefix: foo'")
+        )
+    );
+    let err = client
+        .list_executions()
+        .map_run_arn(&machine)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (
+            Some("InvalidArn"),
+            Some("Invalid Arn: 'Resource type not valid in this context: stateMachine'")
+        )
+    );
+    let missing = "arn:aws:states:us-east-1:123456789012:mapRun:nope/x:y";
+    let err = client
+        .list_executions()
+        .map_run_arn(missing)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message().map(str::to_string)),
+        (
+            Some("ResourceNotFound"),
+            Some(format!("Resource not found: '{missing}'"))
+        )
+    );
+}
+
+// Without a `Label`, AWS names a map run's children by an id stable for the
+// state machine and state, so every run of the state shares it, as recorded.
+#[tokio::test]
+async fn an_unlabeled_map_run_keeps_its_name_across_executions() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let mut definition = recorded_map_run("STANDARD");
+    definition["States"]["M"]
+        .as_object_mut()
+        .unwrap()
+        .remove("Label");
+    let machine = create_machine(&client, "dmap-unlabeled", definition).await;
+    let mut labeled = Vec::new();
+    for _ in 0..2 {
+        let started = client
+            .start_execution()
+            .state_machine_arn(&machine)
+            .input(r#"["a"]"#)
+            .send()
+            .await
+            .unwrap();
+        wait_terminal(&client, started.execution_arn()).await;
+        let runs = client
+            .list_map_runs()
+            .execution_arn(started.execution_arn())
+            .send()
+            .await
+            .unwrap();
+        labeled.push(runs.map_runs()[0].state_machine_arn().to_string());
+    }
+    assert_eq!(labeled[0], labeled[1]);
+    let label = labeled[0].strip_prefix(&format!("{machine}/")).unwrap();
+    assert_eq!(uuid::Uuid::parse_str(label).unwrap().get_version_num(), 3);
+}
+
+// Stopping an execution that has ended changes nothing and reports when it
+// stopped, as recorded against AWS.
+#[tokio::test]
+async fn stopping_an_ended_execution_reports_its_stop_date() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_echo_child(&client).await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .send()
+        .await
+        .unwrap();
+    let ended = wait_terminal(&client, started.execution_arn()).await;
+    let stopped = client
+        .stop_execution()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stopped.stop_date(), ended.stop_date().unwrap());
+    let after = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(after.status().as_str(), "SUCCEEDED");
+}
+
+// Stopping an execution stops its map run and the children still running in
+// it, and starts no more.
+#[tokio::test]
+async fn stopping_the_parent_aborts_its_map_run_children() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "dmap-stop",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "MaxConcurrency":1,
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":1,"End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input("[1,2,3]")
+        .send()
+        .await
+        .unwrap();
+    let parent = started.execution_arn();
+    let mut run_arn = None;
+    for _ in 0..200 {
+        let runs = client
+            .list_map_runs()
+            .execution_arn(parent)
+            .send()
+            .await
+            .unwrap();
+        if let Some(run) = runs.map_runs().first() {
+            let arn = run.map_run_arn().to_string();
+            let children = client
+                .list_executions()
+                .map_run_arn(&arn)
+                .send()
+                .await
+                .unwrap();
+            if !children.executions().is_empty() {
+                run_arn = Some(arn);
+                break;
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    let run_arn = run_arn.expect("the first child started");
+    client
+        .stop_execution()
+        .execution_arn(parent)
+        .send()
+        .await
+        .unwrap();
+    // Long enough for the running child's Wait to end and the next to start.
+    sleep(Duration::from_millis(2500)).await;
+
+    let children = client
+        .list_executions()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(children.executions().len(), 1, "{children:?}");
+    let child = &children.executions()[0];
+    assert_eq!(child.status().as_str(), "ABORTED");
+    assert!(child.stop_date().is_some());
+    let types = history_types(&client, child.execution_arn()).await;
+    assert_eq!(types.last().map(String::as_str), Some("ExecutionAborted"));
+
+    let run = client
+        .describe_map_run()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(run.status().as_str(), "ABORTED");
+    let counts = run.execution_counts().unwrap();
+    assert_eq!(
+        (
+            counts.aborted(),
+            counts.running(),
+            counts.pending(),
+            counts.total()
+        ),
+        (3, 0, 0, 3)
+    );
+    let parent_types = history_types(&client, parent).await;
+    assert!(
+        !parent_types.iter().any(|t| t == "MapRunSucceeded"),
+        "{parent_types:?}"
+    );
+}
+
+// Under an ItemBatcher a child processes its batch: `itemCount` and the map
+// run's item counts follow the items, its execution counts the children.
+#[tokio::test]
+async fn batched_map_run_children_count_their_items() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "dmap-batched",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "ItemBatcher":{"MaxItemsPerBatch":2},
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"P","States":{"P":{"Type":"Pass","End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input("[1,2,3]")
+        .send()
+        .await
+        .unwrap();
+    wait_terminal(&client, started.execution_arn()).await;
+    let run_arn = client
+        .list_map_runs()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap()
+        .map_runs()[0]
+        .map_run_arn()
+        .to_string();
+    let children = client
+        .list_executions()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    let mut item_counts: Vec<i32> = children
+        .executions()
+        .iter()
+        .map(|c| c.item_count().unwrap())
+        .collect();
+    item_counts.sort_unstable();
+    assert_eq!(item_counts, [1, 2]);
+    let run = client
+        .describe_map_run()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    let items = run.item_counts().unwrap();
+    let executions = run.execution_counts().unwrap();
+    assert_eq!((items.total(), items.succeeded()), (3, 3));
+    assert_eq!((executions.total(), executions.succeeded()), (2, 2));
+}
+
+/// Wait until `execution_arn` has a map run with at least `children` children
+/// started; returns the map run ARN.
+async fn wait_for_map_run_children(
+    client: &aws_sdk_sfn::Client,
+    execution_arn: &str,
+    children: usize,
+) -> String {
+    for _ in 0..300 {
+        let runs = client
+            .list_map_runs()
+            .execution_arn(execution_arn)
+            .send()
+            .await
+            .unwrap();
+        if let Some(run) = runs.map_runs().first() {
+            let arn = run.map_run_arn().to_string();
+            let listed = client
+                .list_executions()
+                .map_run_arn(&arn)
+                .send()
+                .await
+                .unwrap();
+            if listed.executions().len() >= children {
+                return arn;
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("{execution_arn} started no map run with {children} children");
+}
+
+// A child stopped on its own fails its iteration, whatever its states return.
+#[tokio::test]
+async fn a_stopped_child_fails_its_iteration() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "dmap-stop-child",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":1,"End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input("[1]")
+        .send()
+        .await
+        .unwrap();
+    let run_arn = wait_for_map_run_children(&client, started.execution_arn(), 1).await;
+    let child = client
+        .list_executions()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap()
+        .executions()[0]
+        .execution_arn()
+        .to_string();
+    client
+        .stop_execution()
+        .execution_arn(&child)
+        .send()
+        .await
+        .unwrap();
+    let parent = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(parent.status().as_str(), "FAILED");
+    assert_eq!(
+        parent.error(),
+        Some("States.ExceedToleratedFailureThreshold")
+    );
+}
+
+// Stopping the root stops map runs nested in its children too.
+#[tokio::test]
+async fn stopping_the_root_aborts_nested_map_runs() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let inner = json!({
+        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+        "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}
+    });
+    let machine = create_machine(
+        &client,
+        "dmap-nested-stop",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"Inner",
+                "States":{"Inner":{"Type":"Map","ItemsPath":"$.xs","ItemProcessor":inner,"End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input(r#"[{"xs":[1]}]"#)
+        .send()
+        .await
+        .unwrap();
+    let outer_run = wait_for_map_run_children(&client, started.execution_arn(), 1).await;
+    let child = client
+        .list_executions()
+        .map_run_arn(&outer_run)
+        .send()
+        .await
+        .unwrap()
+        .executions()[0]
+        .execution_arn()
+        .to_string();
+    let inner_run = wait_for_map_run_children(&client, &child, 1).await;
+    client
+        .stop_execution()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    for run in [&outer_run, &inner_run] {
+        let described = client
+            .describe_map_run()
+            .map_run_arn(run)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(described.status().as_str(), "ABORTED", "{run}");
+        let children = client
+            .list_executions()
+            .map_run_arn(run)
+            .send()
+            .await
+            .unwrap();
+        for child in children.executions() {
+            assert_eq!(
+                child.status().as_str(),
+                "ABORTED",
+                "{}",
+                child.execution_arn()
+            );
+        }
+    }
+}
+
+// A run that fails past its tolerance leaves what it never started pending:
+// its counts still add up to its total.
+#[tokio::test]
+async fn a_failed_map_run_counts_what_it_never_started_as_pending() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "dmap-failed-counts",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "MaxConcurrency":1,
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"F","States":{"F":{"Type":"Fail","Error":"E"}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input("[1,2,3,4,5]")
+        .send()
+        .await
+        .unwrap();
+    let parent = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(parent.status().as_str(), "FAILED");
+    let run_arn = client
+        .list_map_runs()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap()
+        .map_runs()[0]
+        .map_run_arn()
+        .to_string();
+    let run = client
+        .describe_map_run()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    let c = run.execution_counts().unwrap();
+    assert_eq!(c.total(), 5);
+    assert_eq!(
+        c.pending() + c.running() + c.succeeded() + c.failed() + c.timed_out() + c.aborted(),
+        5,
+        "{c:?}"
+    );
+    assert!(c.pending() > 0, "{c:?}");
 }

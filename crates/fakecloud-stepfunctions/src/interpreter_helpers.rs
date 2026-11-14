@@ -1900,6 +1900,11 @@ pub(crate) fn add_event(
         .by_arn_mut(execution_arn)
         .and_then(|s| s.executions.get_mut(execution_arn))
     {
+        // A stopped execution's history ends where it was aborted, whatever
+        // its states were still doing.
+        if exec.status == ExecutionStatus::Aborted {
+            return 0;
+        }
         let id = exec.history_events.len() as i64 + 1;
         exec.history_events.push(HistoryEvent {
             id,
@@ -2053,12 +2058,11 @@ pub(crate) fn deliver_execution_logs(
         return;
     }
     let log_account_id = parts[4];
-    let log_group_name = parts
-        .last()
-        .map_or("", |v| v)
-        .trim_start_matches("log-group:")
-        .to_string();
-    let log_group_name = log_group_name.trim_end_matches(":*");
+    // `log-group:<name>`, which AWS's own ARNs follow with `:*`.
+    let log_group_name = match (parts.get(5), parts.get(6)) {
+        (Some(&"log-group"), Some(name)) => *name,
+        _ => return,
+    };
 
     let accounts = state.read();
     let s = match accounts.by_arn(execution_arn) {
