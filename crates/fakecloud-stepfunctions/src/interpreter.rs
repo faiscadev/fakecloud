@@ -1011,7 +1011,8 @@ async fn execute_map_state(
             return;
         };
         finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
-        if failed_event {
+        // A run stopped with its parent didn't fail.
+        if failed_event && map_run_status(shared_state, arn).as_deref() == Some("FAILED") {
             let (StateFailure::Own((error, cause)) | StateFailure::Ran((error, cause))) = failure;
             add_event(
                 shared_state,
@@ -1511,7 +1512,15 @@ async fn run_map_iterations(
             async move {
                 let _permit = permit;
                 let started = Utc::now();
-                if !may_start {
+                // The map run may have been stopped since this iteration was
+                // let start: then it never does.
+                let started_child = match &child {
+                    Some(child) if may_start => {
+                        start_map_run_child(&state, &arn, child, &item_input)
+                    }
+                    _ => true,
+                };
+                if !may_start || !started_child {
                     let record = recorded_input.map(|input| crate::map_s3::IterationRecord {
                         input,
                         started,
@@ -1523,7 +1532,6 @@ async fn run_map_iterations(
                 }
                 let result = match &child {
                     Some(child) => {
-                        start_map_run_child(&state, &arn, child, &item_input);
                         let result = run_states(
                             &iter_def, item_input, &delivery, &ddb, &reg, &state, &child.arn,
                         )
@@ -1532,13 +1540,6 @@ async fn run_map_iterations(
                             Ok(output) => succeed_execution(&state, &child.arn, output),
                             Err((error, cause)) => fail_execution(&state, &child.arn, error, cause),
                         }
-                        let logging = execution_logging_configuration(&state, &arn);
-                        deliver_execution_logs(
-                            &state,
-                            &child.arn,
-                            delivery.as_ref(),
-                            logging.as_ref(),
-                        );
                         // A child stopped on its own did not succeed, whatever
                         // its states went on to return.
                         match aborted_with(&state, &child.arn) {
@@ -1702,16 +1703,20 @@ fn start_map_run_child(
     parent_arn: &str,
     child: &MapRunChild,
     input: &Value,
-) {
+) -> bool {
     let input_text =
         serde_json::to_string(input).expect("serde_json::Value serialization is infallible");
     let role_arn = {
         let mut accounts = shared_state.write();
         let Some(state) = accounts.by_arn_mut(parent_arn) else {
-            return;
+            return false;
         };
-        let Some(parent) = state.executions.get(parent_arn) else {
-            return;
+        let running = state
+            .map_runs
+            .get(&child.map_run_arn)
+            .is_some_and(|run| run.status == "RUNNING");
+        let Some(parent) = state.executions.get(parent_arn).filter(|_| running) else {
+            return false;
         };
         let role_arn = parent.role_arn.clone();
         let execution = crate::state::Execution {
@@ -1746,6 +1751,7 @@ fn start_map_run_child(
         0,
         json!({ "input": input_text, "roleArn": role_arn }),
     );
+    true
 }
 
 /// Persist a fresh RUNNING MapRun record for a distributed Map, from before it
@@ -1847,22 +1853,6 @@ fn finish_map_run(
     true
 }
 
-/// The logging configuration of `execution_arn`'s state machine, which its
-/// map run children log under too.
-fn execution_logging_configuration(
-    shared_state: &SharedStepFunctionsState,
-    execution_arn: &str,
-) -> Option<Value> {
-    let accounts = shared_state.read();
-    let state = accounts.by_arn(execution_arn)?;
-    let exec = state.executions.get(execution_arn)?;
-    state
-        .state_machines
-        .get(&exec.state_machine_arn)?
-        .logging_configuration
-        .clone()
-}
-
 /// The error and cause an execution was stopped with, if it was stopped.
 fn aborted_with(
     shared_state: &SharedStepFunctionsState,
@@ -1879,6 +1869,15 @@ fn aborted_with(
             exec.cause.clone().unwrap_or_default(),
         )
     })
+}
+
+/// A map run's status.
+fn map_run_status(shared_state: &SharedStepFunctionsState, map_run_arn: &str) -> Option<String> {
+    let accounts = shared_state.read();
+    accounts
+        .by_arn(map_run_arn)
+        .and_then(|s| s.map_runs.get(map_run_arn))
+        .map(|run| run.status.clone())
 }
 
 /// Whether a map run is still running: not stopped with its parent.

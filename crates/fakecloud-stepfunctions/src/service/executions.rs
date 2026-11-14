@@ -365,9 +365,13 @@ impl StepFunctionsService {
                     "timestamp": e.timestamp.timestamp_millis() as f64 / 1000.0,
                     "previousEventId": e.previous_event_id,
                 });
-                // Events with nothing to say (`MapRunSucceeded`,
-                // `MapStateSucceeded`) carry no details, as recorded.
-                if e.details.as_object().is_none_or(|d| !d.is_empty()) {
+                // `MapRunSucceeded` and `MapStateSucceeded` carry no
+                // details, as recorded.
+                let detailless = matches!(
+                    e.event_type.as_str(),
+                    "MapRunSucceeded" | "MapStateSucceeded"
+                );
+                if !detailless {
                     event[format!("{}EventDetails", camel_to_details_key(&e.event_type))] =
                         e.details.clone();
                 }
