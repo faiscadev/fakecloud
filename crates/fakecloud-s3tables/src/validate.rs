@@ -118,6 +118,11 @@ pub fn validate(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
                     return Err(bad("Invalid nextToken."));
                 }
             }
+            if let Some(arn) = req.query_params.get("tableARN") {
+                if !(1..=2048).contains(&arn.chars().count()) {
+                    return Err(bad("tableARN must be between 1 and 2048 characters."));
+                }
+            }
         }
         "ListTableBuckets" => {
             if let Some(t) = req.query_params.get("type") {

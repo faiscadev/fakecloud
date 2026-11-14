@@ -8088,6 +8088,30 @@ async fn capacity_reservation_modify_requires_a_change_and_consistent_end_date()
 }
 
 #[tokio::test]
+async fn describe_capacity_reservations_bounds_max_records() {
+    let (svc, _id) = service_with_reservation().await;
+    for bad in ["19", "101"] {
+        assert_eq!(
+            call_err(
+                &svc,
+                "DescribeDBCapacityReservations",
+                &[("MaxRecords", bad)]
+            )
+            .await,
+            "InvalidParameterValue",
+            "MaxRecords={bad}"
+        );
+    }
+    let xml = call_ok(
+        &svc,
+        "DescribeDBCapacityReservations",
+        &[("MaxRecords", "20")],
+    )
+    .await;
+    assert!(xml.contains("pg-res"), "{xml}");
+}
+
+#[tokio::test]
 async fn db_instances_hold_and_release_reserved_capacity() {
     let (svc, id) = service_with_reservation().await;
     let id = id.as_str();

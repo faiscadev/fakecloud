@@ -2123,4 +2123,27 @@ mod migration_tests {
         .unwrap_err();
         assert_eq!(err.code(), "BadRequestException");
     }
+
+    #[tokio::test]
+    async fn list_migrations_bounds_the_table_arn_length() {
+        let f = fixture().await;
+        let too_long = "a".repeat(2049);
+        for arn in ["", too_long.as_str()] {
+            let err = call(
+                &f,
+                Method::GET,
+                "/list-table-migrations",
+                &[("tableARN", arn)],
+                Value::Null,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.code(),
+                "BadRequestException",
+                "tableARN len {}",
+                arn.len()
+            );
+        }
+    }
 }

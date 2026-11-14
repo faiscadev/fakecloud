@@ -411,7 +411,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             required_present: &[],
             strings: &[("DBCapacityReservationIdentifier", 1, 63)],
             enums: &[],
-            ranges: &[],
+            ranges: &[("MaxRecords", 20, 100)],
         },
         "ModifyDBCapacityReservation" => OpConstraints {
             required: &["DBCapacityReservationIdentifier"],
