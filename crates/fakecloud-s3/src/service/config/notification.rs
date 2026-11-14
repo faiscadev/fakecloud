@@ -31,12 +31,12 @@ impl S3Service {
         // Auto-generate Id for each configuration element if missing
         let normalized = normalize_notification_ids(&body_str);
         b.notification_config = Some(normalized.clone());
-        let meta = bucket_meta_snapshot(b);
+        let meta = bucket_meta_snapshot(account_id, b);
         self.store
-            .put_bucket_meta(bucket, &meta)
+            .put_bucket_meta(account_id, bucket, &meta)
             .map_err(crate::service::persistence_error)?;
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Notification, &normalized)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Notification, &normalized)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }

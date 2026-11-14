@@ -23,11 +23,12 @@ impl From<&AclGrant> for AclGrantSnapshot {
     }
 }
 
-pub fn bucket_meta_snapshot(b: &S3Bucket) -> BucketMeta {
+pub fn bucket_meta_snapshot(account_id: &str, b: &S3Bucket) -> BucketMeta {
     BucketMeta {
         name: b.name.clone(),
         creation_date: b.creation_date,
         region: b.region.clone(),
+        account_id: account_id.to_string(),
         versioning: b.versioning.clone(),
         mfa_delete: b.mfa_delete.clone(),
         acl: b.acl.clone(),
@@ -597,7 +598,7 @@ mod tests {
         let mut bucket = S3Bucket::new("eu-b", "eu-west-1", "owner");
         bucket.legacy_eu_location = true;
         let snap = BucketSnapshot {
-            meta: bucket_meta_snapshot(&bucket),
+            meta: bucket_meta_snapshot("default-account", &bucket),
             ..Default::default()
         };
         let restored = s3_bucket_from_snapshot("eu-b", snap, "us-east-1").unwrap();
@@ -652,7 +653,7 @@ mod tests {
             subresources.insert(file.to_string(), text.unwrap());
         }
         let snap = BucketSnapshot {
-            meta: bucket_meta_snapshot(&fresh),
+            meta: bucket_meta_snapshot("default-account", &fresh),
             subresources,
             ..Default::default()
         };
@@ -736,7 +737,7 @@ permission = "READ"
     #[test]
     fn bucket_meta_snapshot_copies_fields() {
         let b = S3Bucket::new("my-bucket", "eu-west-1", "owner");
-        let meta = bucket_meta_snapshot(&b);
+        let meta = bucket_meta_snapshot("default-account", &b);
         assert_eq!(meta.name, "my-bucket");
         assert_eq!(meta.region, "eu-west-1");
         assert_eq!(meta.acl_owner_id, "owner");

@@ -39,7 +39,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.policy = Some(body_str.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Policy, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Policy, &body_str)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
@@ -85,7 +85,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.policy = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Policy)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Policy)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }

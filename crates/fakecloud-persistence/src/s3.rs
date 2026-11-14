@@ -58,6 +58,11 @@ pub struct BucketMeta {
     pub creation_date: DateTime<Utc>,
     #[serde(default)]
     pub region: String,
+    /// Account ID that owns this bucket. Persisted since the disk path structure
+    /// includes account scoping to support multi-account namespaces where different
+    /// accounts can have buckets with the same name.
+    #[serde(default)]
+    pub account_id: String,
     #[serde(default)]
     pub versioning: Option<String>,
     /// MFA-Delete status ("Enabled"/"Disabled") set via PutBucketVersioning.
@@ -473,17 +478,21 @@ pub fn remove_detached(path: &Path) -> std::io::Result<()> {
 }
 
 pub trait S3Store: Send + Sync {
-    fn load(&self) -> StoreResult<S3State>;
+    /// Load all S3 state organized by account. Returns a map of account_id → S3State.
+    /// In persistent mode, loads one entry per account directory on disk.
+    /// In memory mode, returns an empty map.
+    fn load(&self) -> StoreResult<std::collections::BTreeMap<String, S3State>>;
 
-    fn put_bucket_meta(&self, bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
+    fn put_bucket_meta(&self, account_id: &str, bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
     fn put_bucket_subresource(
         &self,
+        account_id: &str,
         bucket: &str,
         kind: BucketSubresource,
         payload: &str,
     ) -> StoreResult<()>;
-    fn delete_bucket_subresource(&self, bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
-    fn delete_bucket(&self, bucket: &str) -> StoreResult<()>;
+    fn delete_bucket_subresource(&self, account_id: &str, bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
+    fn delete_bucket(&self, account_id: &str, bucket: &str) -> StoreResult<()>;
 
     /// Move `bucket`'s files out of the store in one atomic rename and return
     /// where they went, for the caller to delete off the hot path with
@@ -491,7 +500,7 @@ pub trait S3Store: Send + Sync {
     /// store, so a bucket created under the name right after is never the
     /// thing the later removal deletes. `None` when there was nothing to move
     /// (or the store holds nothing on disk).
-    fn detach_bucket(&self, _bucket: &str) -> StoreResult<Option<PathBuf>> {
+    fn detach_bucket(&self, _account_id: &str, _bucket: &str) -> StoreResult<Option<PathBuf>> {
         Ok(None)
     }
 
@@ -500,7 +509,7 @@ pub trait S3Store: Send + Sync {
     /// A bucket absent from memory can still have files on disk: from a
     /// create or delete that stopped partway, or a reset whose bucket deletion
     /// failed. Memory-only stores hold nothing, hence the default.
-    fn bucket_state_exists(&self, _bucket: &str) -> bool {
+    fn bucket_state_exists(&self, _account_id: &str, _bucket: &str) -> bool {
         false
     }
 
@@ -515,7 +524,7 @@ pub trait S3Store: Send + Sync {
     ///
     /// Recorded at load, not probed per call, so a caller cannot confuse "the
     /// loader could not read this" with "this is simply not in memory".
-    fn bucket_load_refused(&self, _bucket: &str) -> bool {
+    fn bucket_load_refused(&self, _account_id: &str, _bucket: &str) -> bool {
         false
     }
 
@@ -525,7 +534,7 @@ pub trait S3Store: Send + Sync {
     /// a snapshot reports each such bucket here so it is refused exactly like a
     /// store-level refusal -- otherwise its name looks free and the next
     /// `CreateBucket` clears the directory, objects included.
-    fn mark_bucket_load_refused(&self, _bucket: &str) {}
+    fn mark_bucket_load_refused(&self, _account_id: &str, _bucket: &str) {}
 
     /// Forget that `bucket` was refused at load, because the name now belongs to
     /// a bucket that loaded.
@@ -533,12 +542,13 @@ pub trait S3Store: Send + Sync {
     /// The refusal is recorded at load and consulted long afterwards, so it has
     /// to be dropped when it stops being true, or a name whose unreadable data
     /// is gone stays refused for the life of the process.
-    fn clear_bucket_load_refusal(&self, _bucket: &str) -> StoreResult<()> {
+    fn clear_bucket_load_refusal(&self, _account_id: &str, _bucket: &str) -> StoreResult<()> {
         Ok(())
     }
 
     fn put_object(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
@@ -552,6 +562,7 @@ pub trait S3Store: Send + Sync {
     /// it under another key).
     fn replace_object_body(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
@@ -560,12 +571,13 @@ pub trait S3Store: Send + Sync {
     ) -> StoreResult<BodyRef>;
     fn put_object_meta(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         meta: &ObjectMeta,
     ) -> StoreResult<()>;
-    fn delete_object(&self, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
+    fn delete_object(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
     fn open_object_body(&self, body: &BodyRef) -> StoreResult<Bytes>;
 
     /// Persist one annotation of an object version (creating or replacing
@@ -573,6 +585,7 @@ pub trait S3Store: Send + Sync {
     /// Memory-only stores keep annotations in the runtime state alone.
     fn put_annotation(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _key: &str,
         _version: Option<&str>,
@@ -586,6 +599,7 @@ pub trait S3Store: Send + Sync {
     /// stored succeeds.
     fn delete_annotation(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _key: &str,
         _version: Option<&str>,
@@ -594,7 +608,7 @@ pub trait S3Store: Send + Sync {
         Ok(())
     }
 
-    fn mpu_create(&self, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
+    fn mpu_create(&self, account_id: &str, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
     /// Persist a multipart-upload part body. Returns the [`BodyRef`] the
     /// service should keep in its in-memory part map: `BodyRef::Disk`
     /// for disk-backed stores (so subsequent reads stream from the
@@ -602,6 +616,7 @@ pub trait S3Store: Send + Sync {
     /// `BodyRef::Memory` for memory-mode stores.
     fn mpu_put_part(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         part_number: u32,
@@ -618,9 +633,10 @@ pub trait S3Store: Send + Sync {
     fn spool_dir(&self) -> Option<std::path::PathBuf> {
         None
     }
-    fn mpu_abort(&self, bucket: &str, upload_id: &str) -> StoreResult<()>;
+    fn mpu_abort(&self, account_id: &str, bucket: &str, upload_id: &str) -> StoreResult<()>;
     fn mpu_complete(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         final_key: &str,
@@ -644,15 +660,16 @@ impl Default for MemoryS3Store {
 }
 
 impl S3Store for MemoryS3Store {
-    fn load(&self) -> StoreResult<S3State> {
-        Ok(S3State::default())
+    fn load(&self) -> StoreResult<std::collections::BTreeMap<String, S3State>> {
+        Ok(std::collections::BTreeMap::new())
     }
 
-    fn put_bucket_meta(&self, _bucket: &str, _meta: &BucketMeta) -> StoreResult<()> {
+    fn put_bucket_meta(&self, _account_id: &str, _bucket: &str, _meta: &BucketMeta) -> StoreResult<()> {
         Ok(())
     }
     fn put_bucket_subresource(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _kind: BucketSubresource,
         _payload: &str,
@@ -661,17 +678,19 @@ impl S3Store for MemoryS3Store {
     }
     fn delete_bucket_subresource(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _kind: BucketSubresource,
     ) -> StoreResult<()> {
         Ok(())
     }
-    fn delete_bucket(&self, _bucket: &str) -> StoreResult<()> {
+    fn delete_bucket(&self, _account_id: &str, _bucket: &str) -> StoreResult<()> {
         Ok(())
     }
 
     fn put_object(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _key: &str,
         _version: Option<&str>,
@@ -683,6 +702,7 @@ impl S3Store for MemoryS3Store {
     /// Annotations live in the runtime state alone, which the caller keeps.
     fn replace_object_body(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _key: &str,
         _version: Option<&str>,
@@ -693,6 +713,7 @@ impl S3Store for MemoryS3Store {
     }
     fn put_object_meta(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _key: &str,
         _version: Option<&str>,
@@ -700,7 +721,7 @@ impl S3Store for MemoryS3Store {
     ) -> StoreResult<()> {
         Ok(())
     }
-    fn delete_object(&self, _bucket: &str, _key: &str, _version: Option<&str>) -> StoreResult<()> {
+    fn delete_object(&self, _account_id: &str, _bucket: &str, _key: &str, _version: Option<&str>) -> StoreResult<()> {
         Ok(())
     }
     fn open_object_body(&self, body: &BodyRef) -> StoreResult<Bytes> {
@@ -712,11 +733,12 @@ impl S3Store for MemoryS3Store {
         }
     }
 
-    fn mpu_create(&self, _bucket: &str, _upload_id: &str, _init: &MpuInit) -> StoreResult<()> {
+    fn mpu_create(&self, _account_id: &str, _bucket: &str, _upload_id: &str, _init: &MpuInit) -> StoreResult<()> {
         Ok(())
     }
     fn mpu_put_part(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _upload_id: &str,
         _part_number: u32,
@@ -728,11 +750,12 @@ impl S3Store for MemoryS3Store {
         // produced by the streaming dispatch path here.
         Ok(BodyRef::Memory(read_body_source(body)?))
     }
-    fn mpu_abort(&self, _bucket: &str, _upload_id: &str) -> StoreResult<()> {
+    fn mpu_abort(&self, _account_id: &str, _bucket: &str, _upload_id: &str) -> StoreResult<()> {
         Ok(())
     }
     fn mpu_complete(
         &self,
+        _account_id: &str,
         _bucket: &str,
         _upload_id: &str,
         _final_key: &str,
@@ -760,24 +783,26 @@ impl DiskS3Store {
         }
     }
 
-    fn buckets_dir(&self) -> PathBuf {
-        self.root.join("buckets")
+    fn accounts_dir(&self) -> PathBuf {
+        self.root.join("accounts")
     }
 
     /// Where [`S3Store::detach_bucket`] moves buckets awaiting removal. A
-    /// sibling of the buckets directory, so the loader never sees it and the
+    /// sibling of the accounts directory, so the loader never sees it and the
     /// rename stays on one filesystem.
     fn trash_dir(&self) -> PathBuf {
         self.root.join(".trash")
     }
 
-    fn bucket_dir(&self, bucket: &str) -> PathBuf {
-        self.buckets_dir()
+    fn bucket_dir(&self, account_id: &str, bucket: &str) -> PathBuf {
+        self.accounts_dir()
+            .join(account_id)
+            .join("buckets")
             .join(crate::key_escape::escape_key_segment(bucket))
     }
 
-    fn object_dir(&self, bucket: &str, key: &str) -> PathBuf {
-        self.bucket_dir(bucket)
+    fn object_dir(&self, account_id: &str, bucket: &str, key: &str) -> PathBuf {
+        self.bucket_dir(account_id, bucket)
             .join("objects")
             .join(crate::key_escape::escape_key_segment(key))
     }
@@ -788,11 +813,12 @@ impl DiskS3Store {
 
     fn object_paths(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
     ) -> (PathBuf, PathBuf, PathBuf) {
-        let dir = self.object_dir(bucket, key);
+        let dir = self.object_dir(account_id, bucket, key);
         let tag = Self::version_tag(version);
         let bin = dir.join(format!("{}.bin", tag));
         let toml = dir.join(format!("{}.toml", tag));
@@ -954,8 +980,8 @@ impl DiskS3Store {
     /// Where an object version's annotations live: one `<id>.toml` record and
     /// `<id>.bin` payload per annotation, `<id>` the SHA-256 of the name (a
     /// name can be 512 bytes, too long for a file name once escaped).
-    fn annotation_dir(&self, bucket: &str, key: &str, version: Option<&str>) -> PathBuf {
-        Self::annotation_dir_in(&self.object_dir(bucket, key), &Self::version_tag(version))
+    fn annotation_dir(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> PathBuf {
+        Self::annotation_dir_in(&self.object_dir(account_id, bucket, key), &Self::version_tag(version))
     }
 
     fn annotation_dir_in(key_dir: &std::path::Path, version_tag: &str) -> PathBuf {
@@ -1054,23 +1080,23 @@ impl DiskS3Store {
         let _ = std::fs::remove_dir(dir);
     }
 
-    fn mpu_dir(&self, bucket: &str, upload_id: &str) -> PathBuf {
-        self.bucket_dir(bucket)
+    fn mpu_dir(&self, account_id: &str, bucket: &str, upload_id: &str) -> PathBuf {
+        self.bucket_dir(account_id, bucket)
             .join("mpu")
             .join(crate::key_escape::escape_key_segment(upload_id))
     }
 
-    fn mpu_parts_dir(&self, bucket: &str, upload_id: &str) -> PathBuf {
-        self.mpu_dir(bucket, upload_id).join("parts")
+    fn mpu_parts_dir(&self, account_id: &str, bucket: &str, upload_id: &str) -> PathBuf {
+        self.mpu_dir(account_id, bucket, upload_id).join("parts")
     }
 
-    fn mpu_part_bin(&self, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
-        self.mpu_parts_dir(bucket, upload_id)
+    fn mpu_part_bin(&self, account_id: &str, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
+        self.mpu_parts_dir(account_id, bucket, upload_id)
             .join(format!("{}.bin", part_number))
     }
 
-    fn mpu_part_toml(&self, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
-        self.mpu_parts_dir(bucket, upload_id)
+    fn mpu_part_toml(&self, account_id: &str, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
+        self.mpu_parts_dir(account_id, bucket, upload_id)
             .join(format!("{}.toml", part_number))
     }
 
@@ -1095,7 +1121,7 @@ fn io_other(msg: impl Into<String>) -> StoreError {
 }
 
 impl S3Store for DiskS3Store {
-    fn load(&self) -> StoreResult<S3State> {
+    fn load(&self) -> StoreResult<std::collections::BTreeMap<String, S3State>> {
         // This load decides which buckets are refused, so start clean: carrying
         // entries over would keep a bucket whose bad file was repaired
         // un-creatable.
@@ -1103,22 +1129,82 @@ impl S3Store for DiskS3Store {
         // Buckets detached by a reset the previous process did not finish
         // deleting.
         let _ = std::fs::remove_dir_all(self.trash_dir());
-        let mut state = S3State::default();
-        let buckets_dir = self.buckets_dir();
-        if !buckets_dir.exists() {
-            return Ok(state);
+        let mut all_states: BTreeMap<String, S3State> = BTreeMap::new();
+        let accounts_dir = self.accounts_dir();
+
+        // Handle migration: if accounts/ doesn't exist but buckets/ does,
+        // rename buckets/ to accounts/<primary-account>/buckets/
+        if !accounts_dir.exists() {
+            let old_buckets_dir = self.root.join("buckets");
+            if old_buckets_dir.exists() {
+                // This is a migration case. Since we don't have the account_id passed to load(),
+                // we'll load old buckets to a default account and require the service layer to
+                // run migration to move them to the correct account if needed.
+                // Use the CLI account ID environment variable or fakecloud's default account ID.
+                let primary_account = std::env::var("AWS_ACCOUNT_ID")
+                    .unwrap_or_else(|_| "123456789012".to_string());
+
+                tracing::warn!(
+                    "S3 store migration: found legacy buckets/ directory; migrating to accounts/{}/buckets structure",
+                    primary_account
+                );
+
+                let accounts_path = self.accounts_dir();
+                std::fs::create_dir_all(&accounts_path)?;
+                let account_buckets_dir = accounts_path.join(&primary_account).join("buckets");
+                std::fs::create_dir_all(account_buckets_dir.parent().unwrap())?;
+
+                // Move old buckets to new structure: s3/buckets/* -> s3/accounts/<account>/buckets/*
+                match std::fs::rename(&old_buckets_dir, &account_buckets_dir) {
+                    Ok(_) => {
+                        tracing::info!(
+                            "S3 store migration: successfully migrated legacy buckets to account {}",
+                            primary_account
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // Already migrated; fall through to load it
+                        tracing::debug!("S3 store migration: destination already exists");
+                    }
+                    Err(e) => return Err(StoreError::from(e)),
+                }
+            } else {
+                return Ok(all_states);
+            }
         }
-        for entry in std::fs::read_dir(&buckets_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+
+        // Load each account's buckets
+        for account_entry in std::fs::read_dir(&accounts_dir)? {
+            let account_entry = account_entry?;
+            if !account_entry.file_type()?.is_dir() {
                 continue;
             }
-            let bdir = entry.path();
-            // Isolate per-bucket load so one corrupt/partial bucket is skipped
-            // with a warning instead of aborting the whole store load -- a single
-            // truncated file used to make every bucket inaccessible (bug-audit
-            // 2026-06-20, 4.3).
-            let loaded: StoreResult<Option<BucketSnapshot>> = (|| {
+            let account_path = account_entry.path();
+            let Some(account_id) = account_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let account_id = account_id.to_string();
+
+            let mut state = S3State::default();
+            state.account_id = account_id.clone();
+
+            let buckets_dir = account_path.join("buckets");
+            if !buckets_dir.exists() {
+                all_states.insert(account_id, state);
+                continue;
+            }
+
+            for entry in std::fs::read_dir(&buckets_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let bdir = entry.path();
+                // Isolate per-bucket load so one corrupt/partial bucket is skipped
+                // with a warning instead of aborting the whole store load -- a single
+                // truncated file used to make every bucket inaccessible (bug-audit
+                // 2026-06-20, 4.3).
+                let loaded: StoreResult<Option<BucketSnapshot>> = (|| {
                 let meta_path = bdir.join("meta.toml");
                 if !meta_path.exists() {
                     return Ok(None);
@@ -1365,33 +1451,38 @@ impl S3Store for DiskS3Store {
 
                 Ok(Some(snap))
             })();
-            match loaded {
-                Ok(Some(snap)) => {
-                    state.buckets.insert(snap.meta.name.clone(), snap);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    // Remembered so a later CreateBucket knows this directory
-                    // holds recoverable data rather than state the operator
-                    // discarded.
-                    if let Some(dir_name) = bdir.file_name().and_then(|n| n.to_str()) {
-                        self.load_refused.write().insert(dir_name.to_string());
+                match loaded {
+                    Ok(Some(snap)) => {
+                        state.buckets.insert(snap.meta.name.clone(), snap);
                     }
-                    tracing::warn!(
-                        bucket = %bdir.display(),
-                        error = %e,
-                        "skipping unreadable S3 bucket during load; its name is refused until \
-                         the bad file is repaired and the server restarted, or the bucket's \
-                         directory is removed -- no API call discards it"
-                    );
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Remembered so a later CreateBucket knows this directory
+                        // holds recoverable data rather than state the operator
+                        // discarded. Use a composite key of account_id::bucket_name.
+                        if let Some(dir_name) = bdir.file_name().and_then(|n| n.to_str()) {
+                            self.load_refused
+                                .write()
+                                .insert(format!("{}::{}", &account_id, dir_name));
+                        }
+                        tracing::warn!(
+                            account = %account_id,
+                            bucket = %bdir.display(),
+                            error = %e,
+                            "skipping unreadable S3 bucket during load; its name is refused until \
+                             the bad file is repaired and the server restarted, or the bucket's \
+                             directory is removed -- no API call discards it"
+                        );
+                    }
                 }
             }
+            all_states.insert(account_id, state);
         }
-        Ok(state)
+        Ok(all_states)
     }
 
-    fn put_bucket_meta(&self, bucket: &str, meta: &BucketMeta) -> StoreResult<()> {
-        let dir = self.bucket_dir(bucket);
+    fn put_bucket_meta(&self, account_id: &str, bucket: &str, meta: &BucketMeta) -> StoreResult<()> {
+        let dir = self.bucket_dir(account_id, bucket);
         std::fs::create_dir_all(&dir)?;
         crate::atomic::write_atomic_toml(&dir.join("meta.toml"), meta)?;
         Ok(())
@@ -1399,20 +1490,21 @@ impl S3Store for DiskS3Store {
 
     fn put_bucket_subresource(
         &self,
+        account_id: &str,
         bucket: &str,
         kind: BucketSubresource,
         payload: &str,
     ) -> StoreResult<()> {
-        let dir = self.bucket_dir(bucket);
+        let dir = self.bucket_dir(account_id, bucket);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(Self::subresource_filename(kind));
         crate::atomic::write_atomic_bytes(&path, payload.as_bytes())?;
         Ok(())
     }
 
-    fn delete_bucket_subresource(&self, bucket: &str, kind: BucketSubresource) -> StoreResult<()> {
+    fn delete_bucket_subresource(&self, account_id: &str, bucket: &str, kind: BucketSubresource) -> StoreResult<()> {
         let path = self
-            .bucket_dir(bucket)
+            .bucket_dir(account_id, bucket)
             .join(Self::subresource_filename(kind));
         match std::fs::remove_file(&path) {
             Ok(_) => Ok(()),
@@ -1421,32 +1513,41 @@ impl S3Store for DiskS3Store {
         }
     }
 
-    fn bucket_state_exists(&self, bucket: &str) -> bool {
-        self.bucket_dir(bucket).exists()
+    fn bucket_state_exists(&self, account_id: &str, bucket: &str) -> bool {
+        self.bucket_dir(account_id, bucket).exists()
     }
 
-    fn bucket_load_refused(&self, bucket: &str) -> bool {
-        self.load_refused
-            .read()
-            .contains(&crate::key_escape::escape_key_segment(bucket))
+    fn bucket_load_refused(&self, account_id: &str, bucket: &str) -> bool {
+        let composite_key = format!(
+            "{}::{}",
+            account_id,
+            crate::key_escape::escape_key_segment(bucket)
+        );
+        self.load_refused.read().contains(&composite_key)
     }
 
-    fn mark_bucket_load_refused(&self, bucket: &str) {
-        self.load_refused
-            .write()
-            .insert(crate::key_escape::escape_key_segment(bucket));
+    fn mark_bucket_load_refused(&self, account_id: &str, bucket: &str) {
+        let composite_key = format!(
+            "{}::{}",
+            account_id,
+            crate::key_escape::escape_key_segment(bucket)
+        );
+        self.load_refused.write().insert(composite_key);
     }
 
-    fn clear_bucket_load_refusal(&self, bucket: &str) -> StoreResult<()> {
-        self.load_refused
-            .write()
-            .remove(&crate::key_escape::escape_key_segment(bucket));
+    fn clear_bucket_load_refusal(&self, account_id: &str, bucket: &str) -> StoreResult<()> {
+        let composite_key = format!(
+            "{}::{}",
+            account_id,
+            crate::key_escape::escape_key_segment(bucket)
+        );
+        self.load_refused.write().remove(&composite_key);
         Ok(())
     }
 
-    fn detach_bucket(&self, bucket: &str) -> StoreResult<Option<PathBuf>> {
+    fn detach_bucket(&self, account_id: &str, bucket: &str) -> StoreResult<Option<PathBuf>> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = self.bucket_dir(bucket);
+        let dir = self.bucket_dir(account_id, bucket);
         let trash = self.trash_dir();
         std::fs::create_dir_all(&trash)?;
         let nanos = std::time::SystemTime::now()
@@ -1454,7 +1555,8 @@ impl S3Store for DiskS3Store {
             .map_or(0, |d| d.as_nanos());
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let target = trash.join(format!(
-            "{}-{}-{nanos}-{seq}",
+            "{}_{}-{}-{nanos}-{seq}",
+            account_id,
             crate::key_escape::escape_key_segment(bucket),
             std::process::id()
         ));
@@ -1463,14 +1565,17 @@ impl S3Store for DiskS3Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(StoreError::from(e)),
         }
-        self.load_refused
-            .write()
-            .remove(&crate::key_escape::escape_key_segment(bucket));
+        let composite_key = format!(
+            "{}::{}",
+            account_id,
+            crate::key_escape::escape_key_segment(bucket)
+        );
+        self.load_refused.write().remove(&composite_key);
         Ok(Some(target))
     }
 
-    fn delete_bucket(&self, bucket: &str) -> StoreResult<()> {
-        let dir = self.bucket_dir(bucket);
+    fn delete_bucket(&self, account_id: &str, bucket: &str) -> StoreResult<()> {
+        let dir = self.bucket_dir(account_id, bucket);
         let outcome = match std::fs::remove_dir_all(&dir) {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1480,26 +1585,30 @@ impl S3Store for DiskS3Store {
         // returns Err and the caller reports 500, so dropping the refusal here
         // would leave the next CreateBucket free to discard the remains.
         if outcome.is_ok() {
-            self.load_refused
-                .write()
-                .remove(&crate::key_escape::escape_key_segment(bucket));
+            let composite_key = format!(
+                "{}::{}",
+                account_id,
+                crate::key_escape::escape_key_segment(bucket)
+            );
+            self.load_refused.write().remove(&composite_key);
         }
         outcome
     }
 
     fn put_object(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
-        let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
+        let (dir, bin_path, toml_path) = self.object_paths(account_id, bucket, key, version);
         std::fs::create_dir_all(&dir)?;
         // A new object in this slot starts without annotations; the replaced
         // object's go with it.
-        remove_dir_if_present(&self.annotation_dir(bucket, key, version))?;
+        remove_dir_if_present(&self.annotation_dir(account_id, bucket, key, version))?;
         // A body a replace left in a generation file stops being the slot's
         // once the new sidecar (naming the default file) is in place.
         let previous = Self::recorded_generation_body(&toml_path);
@@ -1520,13 +1629,14 @@ impl S3Store for DiskS3Store {
     /// removed, best effort. The slot's annotation records are not touched.
     fn replace_object_body(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
-        let (dir, default_bin, toml_path) = self.object_paths(bucket, key, version);
+        let (dir, default_bin, toml_path) = self.object_paths(account_id, bucket, key, version);
         std::fs::create_dir_all(&dir)?;
         let tag = Self::version_tag(version);
         let previous = match Self::recorded_generation_body(&toml_path) {
@@ -1552,12 +1662,13 @@ impl S3Store for DiskS3Store {
 
     fn put_object_meta(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         meta: &ObjectMeta,
     ) -> StoreResult<()> {
-        let (dir, _bin, toml_path) = self.object_paths(bucket, key, version);
+        let (dir, _bin, toml_path) = self.object_paths(account_id, bucket, key, version);
         std::fs::create_dir_all(&dir)?;
         // A metadata update does not move the body: the sidecar keeps naming
         // the body file it named.
@@ -1567,8 +1678,8 @@ impl S3Store for DiskS3Store {
         Ok(())
     }
 
-    fn delete_object(&self, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()> {
-        let (dir, default_bin, toml_path) = self.object_paths(bucket, key, version);
+    fn delete_object(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()> {
+        let (dir, default_bin, toml_path) = self.object_paths(account_id, bucket, key, version);
         // The body is whichever file the sidecar names; a default file left
         // beside a generation one goes too.
         let generation = Self::recorded_generation_body(&toml_path).map(|name| dir.join(name));
@@ -1603,7 +1714,7 @@ impl S3Store for DiskS3Store {
         }
         // Annotations without their sidecar are never loaded, so like the
         // body a failure here only leaves residue.
-        let annotations = self.annotation_dir(bucket, key, version);
+        let annotations = self.annotation_dir(account_id, bucket, key, version);
         if let Err(e) = remove_dir_if_present(&annotations) {
             tracing::warn!(
                 path = %annotations.display(),
@@ -1623,23 +1734,25 @@ impl S3Store for DiskS3Store {
 
     fn put_annotation(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         record: &AnnotationRecord,
         payload: &[u8],
     ) -> StoreResult<()> {
-        Self::write_annotation(&self.annotation_dir(bucket, key, version), record, payload)
+        Self::write_annotation(&self.annotation_dir(account_id, bucket, key, version), record, payload)
     }
 
     fn delete_annotation(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         name: &str,
     ) -> StoreResult<()> {
-        let dir = self.annotation_dir(bucket, key, version);
+        let dir = self.annotation_dir(account_id, bucket, key, version);
         let stem = Self::annotation_file_stem(name);
         // Record first: a payload without its record is never loaded.
         for ext in ["toml", "bin"] {
@@ -1675,16 +1788,17 @@ impl S3Store for DiskS3Store {
         }
     }
 
-    fn mpu_create(&self, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()> {
-        let parts_dir = self.mpu_parts_dir(bucket, upload_id);
+    fn mpu_create(&self, account_id: &str, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()> {
+        let parts_dir = self.mpu_parts_dir(account_id, bucket, upload_id);
         std::fs::create_dir_all(&parts_dir)?;
-        let init_path = self.mpu_dir(bucket, upload_id).join("init.toml");
+        let init_path = self.mpu_dir(account_id, bucket, upload_id).join("init.toml");
         crate::atomic::write_atomic_toml(&init_path, init)?;
         Ok(())
     }
 
     fn mpu_put_part(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         part_number: u32,
@@ -1692,10 +1806,10 @@ impl S3Store for DiskS3Store {
         etag: &str,
         checksum: Option<PartChecksum<'_>>,
     ) -> StoreResult<BodyRef> {
-        let parts_dir = self.mpu_parts_dir(bucket, upload_id);
+        let parts_dir = self.mpu_parts_dir(account_id, bucket, upload_id);
         std::fs::create_dir_all(&parts_dir)?;
-        let bin_path = self.mpu_part_bin(bucket, upload_id, part_number);
-        let toml_path = self.mpu_part_toml(bucket, upload_id, part_number);
+        let bin_path = self.mpu_part_bin(account_id, bucket, upload_id, part_number);
+        let toml_path = self.mpu_part_toml(account_id, bucket, upload_id, part_number);
 
         let size: u64 = match body {
             BodySource::Bytes(b) => {
@@ -1750,10 +1864,10 @@ impl S3Store for DiskS3Store {
         Some(dir)
     }
 
-    fn mpu_abort(&self, bucket: &str, upload_id: &str) -> StoreResult<()> {
-        let dir = self.mpu_dir(bucket, upload_id);
+    fn mpu_abort(&self, account_id: &str, bucket: &str, upload_id: &str) -> StoreResult<()> {
+        let dir = self.mpu_dir(account_id, bucket, upload_id);
         // Invalidate any cached part bodies for this upload.
-        if let Ok(entries) = std::fs::read_dir(self.mpu_parts_dir(bucket, upload_id)) {
+        if let Ok(entries) = std::fs::read_dir(self.mpu_parts_dir(account_id, bucket, upload_id)) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
@@ -1775,13 +1889,14 @@ impl S3Store for DiskS3Store {
 
     fn mpu_complete(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         final_key: &str,
         version: Option<&str>,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
-        let parts_dir = self.mpu_parts_dir(bucket, upload_id);
+        let parts_dir = self.mpu_parts_dir(account_id, bucket, upload_id);
         if !parts_dir.exists() {
             return Err(io_other(format!(
                 "mpu_complete: no parts dir for upload {}",
@@ -1799,7 +1914,7 @@ impl S3Store for DiskS3Store {
             };
             if let Some(stem) = fname.strip_suffix(".toml") {
                 if let Ok(n) = stem.parse::<u32>() {
-                    if self.mpu_part_bin(bucket, upload_id, n).exists() {
+                    if self.mpu_part_bin(account_id, bucket, upload_id, n).exists() {
                         part_numbers.push(n);
                     }
                 }
@@ -1813,12 +1928,12 @@ impl S3Store for DiskS3Store {
             )));
         }
 
-        let (dir, bin_path, toml_path) = self.object_paths(bucket, final_key, version);
+        let (dir, bin_path, toml_path) = self.object_paths(account_id, bucket, final_key, version);
         std::fs::create_dir_all(&dir)?;
-        remove_dir_if_present(&self.annotation_dir(bucket, final_key, version))?;
+        remove_dir_if_present(&self.annotation_dir(account_id, bucket, final_key, version))?;
 
         let total_size: u64 = if part_numbers.len() == 1 {
-            let only = self.mpu_part_bin(bucket, upload_id, part_numbers[0]);
+            let only = self.mpu_part_bin(account_id, bucket, upload_id, part_numbers[0]);
             let sz = std::fs::metadata(&only)?.len();
             match std::fs::rename(&only, &bin_path) {
                 Ok(_) => {}
@@ -1851,7 +1966,7 @@ impl S3Store for DiskS3Store {
                     .truncate(true)
                     .open(&tmp)?;
                 for n in &part_numbers {
-                    let part_path = self.mpu_part_bin(bucket, upload_id, *n);
+                    let part_path = self.mpu_part_bin(account_id, bucket, upload_id, *n);
                     let mut input = std::fs::File::open(&part_path)?;
                     total += std::io::copy(&mut input, &mut out)?;
                 }
@@ -1890,7 +2005,7 @@ impl S3Store for DiskS3Store {
             self.cache
                 .invalidate(&Self::mpu_body_key(bucket, upload_id, *n));
         }
-        let mpu_dir = self.mpu_dir(bucket, upload_id);
+        let mpu_dir = self.mpu_dir(account_id, bucket, upload_id);
         let _ = std::fs::remove_dir_all(&mpu_dir);
 
         // The concatenated body is deliberately NOT re-inserted into the cache —
@@ -1932,22 +2047,24 @@ mod disk_tests {
     fn detach_bucket_moves_it_out_and_a_recreate_survives_the_removal() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         let meta = BucketMeta {
             name: "b".into(),
+            account_id: account_id.to_string(),
             ..Default::default()
         };
-        store.put_bucket_meta("b", &meta).unwrap();
-        let detached = store.detach_bucket("b").unwrap().expect("moved");
-        assert!(!store.bucket_state_exists("b"));
+        store.put_bucket_meta(account_id, "b", &meta).unwrap();
+        let detached = store.detach_bucket(account_id, "b").unwrap().expect("moved");
+        assert!(!store.bucket_state_exists(account_id, "b"));
         assert!(detached.exists());
         // Recreated under the same name before the removal runs.
-        store.put_bucket_meta("b", &meta).unwrap();
+        store.put_bucket_meta(account_id, "b", &meta).unwrap();
         remove_detached(&detached).unwrap();
         assert!(!detached.exists());
-        assert!(store.bucket_state_exists("b"));
+        assert!(store.bucket_state_exists(account_id, "b"));
         // Nothing to move the second time round, and removal is idempotent.
-        store.delete_bucket("b").unwrap();
-        assert_eq!(store.detach_bucket("b").unwrap(), None);
+        store.delete_bucket(account_id, "b").unwrap();
+        assert_eq!(store.detach_bucket(account_id, "b").unwrap(), None);
         remove_detached(&detached).unwrap();
     }
 
@@ -1955,10 +2072,16 @@ mod disk_tests {
     fn load_clears_leftover_detached_buckets() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
-        store.put_bucket_meta("b", &BucketMeta::default()).unwrap();
-        let detached = store.detach_bucket("b").unwrap().unwrap();
-        let state = store.load().unwrap();
-        assert!(state.buckets.is_empty());
+        let account_id = "test-account";
+        let mut meta = BucketMeta::default();
+        meta.account_id = account_id.to_string();
+        store.put_bucket_meta(account_id, "b", &meta).unwrap();
+        let detached = store.detach_bucket(account_id, "b").unwrap().unwrap();
+        let states = store.load().unwrap();
+        assert!(states
+            .get(account_id)
+            .map(|s| s.buckets.is_empty())
+            .unwrap_or(true));
         assert!(!detached.exists());
     }
 
@@ -1993,15 +2116,16 @@ mod disk_tests {
     fn a_refusal_is_found_under_the_escaped_directory_name() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
 
         let name = "odd:name";
         let escaped = crate::key_escape::escape_key_segment(name);
         assert_ne!(escaped, name, "pick a name that actually escapes");
 
-        assert!(!store.bucket_load_refused(name));
-        store.mark_bucket_load_refused(name);
+        assert!(!store.bucket_load_refused(account_id, name));
+        store.mark_bucket_load_refused(account_id, name);
         assert!(
-            store.bucket_load_refused(name),
+            store.bucket_load_refused(account_id, name),
             "marked by name, read back by name"
         );
 
@@ -2009,31 +2133,40 @@ mod disk_tests {
         // raw-directory-name insert lands on the same key this reader uses.
         let meta = BucketMeta {
             name: name.to_string(),
+            account_id: account_id.to_string(),
             ..Default::default()
         };
-        store.put_bucket_meta(name, &meta).unwrap();
+        store.put_bucket_meta(account_id, name, &meta).unwrap();
         assert!(
-            tmp.path().join("buckets").join(&escaped).is_dir(),
+            tmp.path()
+                .join("accounts")
+                .join(account_id)
+                .join("buckets")
+                .join(&escaped)
+                .is_dir(),
             "expected the bucket directory under the escaped name"
         );
 
-        store.clear_bucket_load_refusal(name).unwrap();
-        assert!(!store.bucket_load_refused(name));
+        store.clear_bucket_load_refusal(account_id, name).unwrap();
+        assert!(!store.bucket_load_refused(account_id, name));
     }
 
     #[test]
     fn put_bucket_meta_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         let meta = BucketMeta {
             name: "b1".to_string(),
+            account_id: account_id.to_string(),
             region: "us-east-1".to_string(),
             versioning: Some("Enabled".to_string()),
             ..Default::default()
         };
-        store.put_bucket_meta("b1", &meta).unwrap();
+        store.put_bucket_meta(account_id, "b1", &meta).unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b1").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b1").unwrap();
         assert_eq!(snap.meta.name, "b1");
         assert_eq!(snap.meta.region, "us-east-1");
         assert_eq!(snap.meta.versioning.as_deref(), Some("Enabled"));
@@ -2043,11 +2176,14 @@ mod disk_tests {
     fn put_bucket_subresource_each_variant_writes_file() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2072,10 +2208,10 @@ mod disk_tests {
         ];
         for v in variants {
             store
-                .put_bucket_subresource("b", v, "payload=true")
+                .put_bucket_subresource(account_id, "b", v, "payload=true")
                 .unwrap();
             let file = store
-                .bucket_dir("b")
+                .bucket_dir(account_id, "b")
                 .join(DiskS3Store::subresource_filename(v));
             assert!(file.exists(), "{:?}", v);
             assert_eq!(std::fs::read_to_string(&file).unwrap(), "payload=true");
@@ -2086,26 +2222,29 @@ mod disk_tests {
     fn delete_bucket_subresource_removes_file() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Tags, "x=1")
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Tags, "x=1")
             .unwrap();
         store
-            .delete_bucket_subresource("b", BucketSubresource::Tags)
+            .delete_bucket_subresource(account_id, "b", BucketSubresource::Tags)
             .unwrap();
-        let file = store.bucket_dir("b").join("tags.toml");
+        let file = store.bucket_dir(account_id, "b").join("tags.toml");
         assert!(!file.exists());
         // idempotent
         store
-            .delete_bucket_subresource("b", BucketSubresource::Tags)
+            .delete_bucket_subresource(account_id, "b", BucketSubresource::Tags)
             .unwrap();
     }
 
@@ -2113,11 +2252,14 @@ mod disk_tests {
     fn put_object_bytes_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2125,7 +2267,7 @@ mod disk_tests {
         let data = Bytes::from_static(b"hello world");
         let meta = sample_meta("k1", data.len() as u64);
         let body_ref = store
-            .put_object("b", "k1", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(account_id, "b", "k1", None, BodySource::Bytes(data.clone()), &meta)
             .unwrap();
         match &body_ref {
             BodyRef::Disk {
@@ -2143,7 +2285,8 @@ mod disk_tests {
             _ => panic!("expected Disk"),
         }
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let obj = snap.objects.get("k1").unwrap();
         assert_eq!(obj.meta.size, data.len() as u64);
     }
@@ -2152,11 +2295,14 @@ mod disk_tests {
     fn put_object_file_copy_source_leaves_src_in_place() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2166,7 +2312,7 @@ mod disk_tests {
         std::fs::write(&src, b"copied-body").unwrap();
         let meta = sample_meta("k", 11);
         let bref = store
-            .put_object("b", "k", None, BodySource::FileCopy(src.clone()), &meta)
+            .put_object(account_id, "b", "k", None, BodySource::FileCopy(src.clone()), &meta)
             .unwrap();
         match bref {
             BodyRef::Disk { path, size, .. } => {
@@ -2183,11 +2329,14 @@ mod disk_tests {
     fn put_object_file_source() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2196,7 +2345,7 @@ mod disk_tests {
         std::fs::write(&src, b"file-body").unwrap();
         let meta = sample_meta("k", 9);
         let body_ref = store
-            .put_object("b", "k", None, BodySource::File(src.clone()), &meta)
+            .put_object(account_id, "b", "k", None, BodySource::File(src.clone()), &meta)
             .unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, .. } => path,
@@ -2209,11 +2358,14 @@ mod disk_tests {
     fn put_object_meta_only_keeps_bin() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2221,15 +2373,16 @@ mod disk_tests {
         let data = Bytes::from_static(b"abc");
         let mut meta = sample_meta("k", 3);
         store
-            .put_object("b", "k", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(account_id, "b", "k", None, BodySource::Bytes(data.clone()), &meta)
             .unwrap();
-        let (_, bin, _) = store.object_paths("b", "k", None);
+        let (_, bin, _) = store.object_paths(account_id, "b", "k", None);
         let before = std::fs::read(&bin).unwrap();
         meta.tags.insert("x".to_string(), "y".to_string());
-        store.put_object_meta("b", "k", None, &meta).unwrap();
+        store.put_object_meta(account_id, "b", "k", None, &meta).unwrap();
         assert_eq!(std::fs::read(&bin).unwrap(), before);
         let loaded = store.load().unwrap();
-        let obj = loaded.buckets.get("b").unwrap().objects.get("k").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let obj = state.buckets.get("b").unwrap().objects.get("k").unwrap();
         assert_eq!(obj.meta.tags.get("x").map(String::as_str), Some("y"));
     }
 
@@ -2245,17 +2398,21 @@ mod disk_tests {
 
     fn store_with_object(tmp: &TempDir) -> DiskS3Store {
         let store = new_store(tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -2267,8 +2424,10 @@ mod disk_tests {
     }
 
     fn loaded_annotations(store: &DiskS3Store) -> Vec<(String, Vec<u8>)> {
+        let account_id = "test-account";
         let loaded = store.load().unwrap();
-        let obj = &loaded.buckets["b"].objects["k"];
+        let state = loaded.get(account_id).unwrap();
+        let obj = &state.buckets["b"].objects["k"];
         obj.meta
             .annotations
             .iter()
@@ -2280,20 +2439,21 @@ mod disk_tests {
     fn put_annotation_touches_only_that_annotation() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         store
-            .put_annotation("b", "k", None, &annotation("a"), b"first")
+            .put_annotation(account_id, "b", "k", None, &annotation("a"), b"first")
             .unwrap();
         // Overwrite a's stored payload behind the store's back: if putting b
         // rewrote a, this sentinel would be replaced.
         let a_bin = store
-            .annotation_dir("b", "k", None)
+            .annotation_dir(account_id, "b", "k", None)
             .join(format!("{}.bin", DiskS3Store::annotation_file_stem("a")));
         std::fs::write(&a_bin, b"sentinel").unwrap();
-        let (_, _, sidecar) = store.object_paths("b", "k", None);
+        let (_, _, sidecar) = store.object_paths(account_id, "b", "k", None);
         let sidecar_before = std::fs::read(&sidecar).unwrap();
 
         store
-            .put_annotation("b", "k", None, &annotation("b"), b"second")
+            .put_annotation(account_id, "b", "k", None, &annotation("b"), b"second")
             .unwrap();
         assert_eq!(std::fs::read(&a_bin).unwrap(), b"sentinel");
         assert_eq!(std::fs::read(&sidecar).unwrap(), sidecar_before);
@@ -2305,8 +2465,8 @@ mod disk_tests {
             ]
         );
 
-        store.delete_annotation("b", "k", None, "a").unwrap();
-        store.delete_annotation("b", "k", None, "missing").unwrap();
+        store.delete_annotation(account_id, "b", "k", None, "a").unwrap();
+        store.delete_annotation(account_id, "b", "k", None, "missing").unwrap();
         assert_eq!(
             loaded_annotations(&store),
             vec![("b".to_string(), b"second".to_vec())]
@@ -2314,7 +2474,7 @@ mod disk_tests {
         // A 512-byte name still maps to a short file name.
         let long = "n".repeat(512);
         store
-            .put_annotation("b", "k", None, &annotation(&long), b"long")
+            .put_annotation(account_id, "b", "k", None, &annotation(&long), b"long")
             .unwrap();
         assert!(loaded_annotations(&store).iter().any(|(n, _)| *n == long));
     }
@@ -2323,6 +2483,7 @@ mod disk_tests {
     fn legacy_embedded_annotations_move_to_their_own_records() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         let mut meta = sample_meta("k", 3);
         meta.annotations = vec![AnnotationSnapshot {
             name: "old".to_string(),
@@ -2330,18 +2491,18 @@ mod disk_tests {
             etag: "e".to_string(),
             ..Default::default()
         }];
-        store.put_object_meta("b", "k", None, &meta).unwrap();
+        store.put_object_meta(account_id, "b", "k", None, &meta).unwrap();
 
         assert_eq!(
             loaded_annotations(&store),
             vec![("old".to_string(), b"legacy".to_vec())]
         );
         // The sidecar no longer embeds it, so deleting the record is final.
-        let (_, _, sidecar) = store.object_paths("b", "k", None);
+        let (_, _, sidecar) = store.object_paths(account_id, "b", "k", None);
         let rewritten: ObjectMeta =
             toml::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
         assert!(rewritten.annotations.is_empty());
-        store.delete_annotation("b", "k", None, "old").unwrap();
+        store.delete_annotation(account_id, "b", "k", None, "old").unwrap();
         assert!(loaded_annotations(&store).is_empty());
     }
 
@@ -2349,11 +2510,13 @@ mod disk_tests {
     fn replacing_or_deleting_an_object_drops_its_annotations() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         store
-            .put_annotation("b", "k", None, &annotation("a"), b"x")
+            .put_annotation(account_id, "b", "k", None, &annotation("a"), b"x")
             .unwrap();
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -2363,10 +2526,10 @@ mod disk_tests {
             .unwrap();
         assert!(loaded_annotations(&store).is_empty());
         store
-            .put_annotation("b", "k", None, &annotation("a"), b"x")
+            .put_annotation(account_id, "b", "k", None, &annotation("a"), b"x")
             .unwrap();
-        store.delete_object("b", "k", None).unwrap();
-        assert!(!store.annotation_dir("b", "k", None).exists());
+        store.delete_object(account_id, "b", "k", None).unwrap();
+        assert!(!store.annotation_dir(account_id, "b", "k", None).exists());
     }
 
     /// Replacing a slot's body keeps it the same object: the new bytes and
@@ -2376,13 +2539,15 @@ mod disk_tests {
     fn replacing_an_objects_body_keeps_its_annotations() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         store
-            .put_annotation("b", "k", None, &annotation("a"), b"kept")
+            .put_annotation(account_id, "b", "k", None, &annotation("a"), b"kept")
             .unwrap();
         let mut meta = sample_meta("k", 5);
         meta.content_type = "text/x-resealed".to_string();
         let body = store
             .replace_object_body(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -2396,13 +2561,15 @@ mod disk_tests {
             vec![("a".to_string(), b"kept".to_vec())]
         );
         let loaded = store.load().unwrap();
-        let obj = &loaded.buckets["b"].objects["k"];
+        let state = loaded.get(account_id).unwrap();
+        let obj = &state.buckets["b"].objects["k"];
         assert_eq!(obj.meta.content_type, "text/x-resealed");
         assert_eq!(&store.open_object_body(&obj.body).unwrap()[..], b"sealx");
 
         // A version's slot.
         store
             .put_object(
+                account_id,
                 "b",
                 "v",
                 Some("v1"),
@@ -2411,10 +2578,11 @@ mod disk_tests {
             )
             .unwrap();
         store
-            .put_annotation("b", "v", Some("v1"), &annotation("n"), b"note")
+            .put_annotation(account_id, "b", "v", Some("v1"), &annotation("n"), b"note")
             .unwrap();
         store
             .replace_object_body(
+                account_id,
                 "b",
                 "v",
                 Some("v1"),
@@ -2422,7 +2590,7 @@ mod disk_tests {
                 &sample_meta("v", 3),
             )
             .unwrap();
-        let dir = store.annotation_dir("b", "v", Some("v1"));
+        let dir = store.annotation_dir(account_id, "b", "v", Some("v1"));
         assert!(dir
             .join(format!("{}.bin", DiskS3Store::annotation_file_stem("n")))
             .exists());
@@ -2430,7 +2598,8 @@ mod disk_tests {
 
     /// The files in the object directory of `b/k`, sorted.
     fn slot_files(store: &DiskS3Store) -> Vec<String> {
-        let (dir, _, _) = store.object_paths("b", "k", None);
+        let account_id = "test-account";
+        let (dir, _, _) = store.object_paths(account_id, "b", "k", None);
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .map(|entries| {
                 entries
@@ -2447,15 +2616,19 @@ mod disk_tests {
     /// The body `b/k` loads with, read through a fresh store over the same
     /// directory (a restart).
     fn reloaded_body(tmp: &TempDir) -> Vec<u8> {
+        let account_id = "test-account";
         let store = new_store(tmp);
         let loaded = store.load().unwrap();
-        let obj = &loaded.buckets["b"].objects["k"];
+        let state = loaded.get(account_id).unwrap();
+        let obj = &state.buckets["b"].objects["k"];
         store.open_object_body(&obj.body).unwrap().to_vec()
     }
 
     fn replace(store: &DiskS3Store, body: &'static [u8]) {
+        let account_id = "test-account";
         store
             .replace_object_body(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -2480,13 +2653,15 @@ mod disk_tests {
         assert_eq!(DiskS3Store::generation_body_tag(body), Some("null"));
         assert_eq!(reloaded_body(&tmp), b"second");
         // A metadata update keeps the sidecar naming that file.
+        let account_id = "test-account";
         store
-            .put_object_meta("b", "k", None, &sample_meta("k", 6))
+            .put_object_meta(account_id, "b", "k", None, &sample_meta("k", 6))
             .unwrap();
         assert_eq!(reloaded_body(&tmp), b"second");
         // A new object in the slot is back in the default file, alone.
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -2505,7 +2680,8 @@ mod disk_tests {
     fn a_replace_interrupted_before_its_sidecar_keeps_the_old_object() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
-        let (dir, _, _) = store.object_paths("b", "k", None);
+        let account_id = "test-account";
+        let (dir, _, _) = store.object_paths(account_id, "b", "k", None);
         let orphan = dir.join(DiskS3Store::generation_body_name("null"));
         std::fs::write(&orphan, b"sealed but never committed").unwrap();
         assert_eq!(reloaded_body(&tmp), b"abc");
@@ -2519,8 +2695,9 @@ mod disk_tests {
     fn a_replace_interrupted_after_its_sidecar_keeps_the_new_object() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         replace(&store, b"resealed");
-        let (dir, default_bin, _) = store.object_paths("b", "k", None);
+        let (dir, default_bin, _) = store.object_paths(account_id, "b", "k", None);
         // The removals the crash prevented: the default body and an older
         // generation.
         std::fs::write(&default_bin, b"abc").unwrap();
@@ -2539,11 +2716,12 @@ mod disk_tests {
     fn load_removes_temp_files_left_by_interrupted_writes() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         store
-            .put_annotation("b", "k", None, &annotation("a"), b"note")
+            .put_annotation(account_id, "b", "k", None, &annotation("a"), b"note")
             .unwrap();
-        let (dir, _, _) = store.object_paths("b", "k", None);
-        let annotations = store.annotation_dir("b", "k", None);
+        let (dir, _, _) = store.object_paths(account_id, "b", "k", None);
+        let annotations = store.annotation_dir(account_id, "b", "k", None);
         let leftovers = [
             dir.join("null.toml.4242.7.tmp"),
             dir.join("null.bin.4242.8.tmp"),
@@ -2574,12 +2752,14 @@ mod disk_tests {
     fn load_removes_multipart_completion_temp_files() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k2"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k2"))
             .unwrap();
         for (n, body) in [(1u32, &b"AAAA"[..]), (2, &b"BB"[..])] {
             store
                 .mpu_put_part(
+                    account_id,
                     "b",
                     "up",
                     n,
@@ -2590,9 +2770,9 @@ mod disk_tests {
                 .unwrap();
         }
         store
-            .mpu_complete("b", "up", "k2", None, &sample_meta("k2", 6))
+            .mpu_complete(account_id, "b", "up", "k2", None, &sample_meta("k2", 6))
             .unwrap();
-        let (dir, bin_path, _) = store.object_paths("b", "k2", None);
+        let (dir, bin_path, _) = store.object_paths(account_id, "b", "k2", None);
         let names = |dir: &std::path::Path| -> Vec<String> {
             let mut names: Vec<String> = std::fs::read_dir(dir)
                 .unwrap()
@@ -2626,10 +2806,11 @@ mod disk_tests {
     fn deleting_a_resealed_object_leaves_no_files() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
+        let account_id = "test-account";
         replace(&store, b"resealed");
-        let (_, default_bin, _) = store.object_paths("b", "k", None);
+        let (_, default_bin, _) = store.object_paths(account_id, "b", "k", None);
         std::fs::write(&default_bin, b"leftover").unwrap();
-        store.delete_object("b", "k", None).unwrap();
+        store.delete_object(account_id, "b", "k", None).unwrap();
         assert!(slot_files(&store).is_empty(), "{:?}", slot_files(&store));
     }
 
@@ -2639,7 +2820,8 @@ mod disk_tests {
     fn sidecars_without_a_body_file_read_the_default_body() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_object(&tmp);
-        let (_, _, toml_path) = store.object_paths("b", "k", None);
+        let account_id = "test-account";
+        let (_, _, toml_path) = store.object_paths(account_id, "b", "k", None);
         let text = std::fs::read_to_string(&toml_path).unwrap();
         assert!(!text.contains("body_file"), "{text}");
         assert_eq!(reloaded_body(&tmp), b"abc");
@@ -2655,8 +2837,10 @@ mod disk_tests {
     #[test]
     fn memory_store_replaces_a_body() {
         let store = MemoryS3Store::new();
+        let account_id = "test-account";
         let body = store
             .replace_object_body(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -2679,17 +2863,21 @@ mod disk_tests {
         // would have removed the body before reaching it.
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
             .put_object(
+                account_id,
                 "b",
                 "k.txt",
                 None,
@@ -2702,13 +2890,13 @@ mod disk_tests {
             )
             .unwrap();
 
-        let (_dir, bin, toml) = store.object_paths("b", "k.txt", None);
+        let (_dir, bin, toml) = store.object_paths(account_id, "b", "k.txt", None);
         std::fs::remove_file(&toml).unwrap();
         std::fs::create_dir(&toml).unwrap();
         std::fs::write(toml.join("blocker"), b"x").unwrap();
 
         assert!(
-            store.delete_object("b", "k.txt", None).is_err(),
+            store.delete_object(account_id, "b", "k.txt", None).is_err(),
             "a sidecar that cannot be removed must fail the delete: it is the durable record"
         );
         assert!(
@@ -2721,11 +2909,14 @@ mod disk_tests {
     fn delete_object_cleans_up_files_and_cache() {
         let tmp = TempDir::new().unwrap();
         let (store, cache) = new_store_with_cache(&tmp, 1024 * 1024);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2733,12 +2924,12 @@ mod disk_tests {
         let data = Bytes::from_static(b"bye");
         let meta = sample_meta("k", 3);
         store
-            .put_object("b", "k", None, BodySource::Bytes(data), &meta)
+            .put_object(account_id, "b", "k", None, BodySource::Bytes(data), &meta)
             .unwrap();
         let body_key = crate::cache::BodyKey::new("b".to_string(), "k".to_string(), None);
         assert!(cache.get(&body_key).is_some());
-        store.delete_object("b", "k", None).unwrap();
-        let (dir, bin, toml_path) = store.object_paths("b", "k", None);
+        store.delete_object(account_id, "b", "k", None).unwrap();
+        let (dir, bin, toml_path) = store.object_paths(account_id, "b", "k", None);
         assert!(!bin.exists());
         assert!(!toml_path.exists());
         assert!(!dir.exists());
@@ -2749,11 +2940,14 @@ mod disk_tests {
     fn open_object_body_cache_hit_and_refill() {
         let tmp = TempDir::new().unwrap();
         let (store, cache) = new_store_with_cache(&tmp, 1024 * 1024);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2761,7 +2955,7 @@ mod disk_tests {
         let data = Bytes::from_static(b"payload");
         let meta = sample_meta("k", data.len() as u64);
         let body_ref = store
-            .put_object("b", "k", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(account_id, "b", "k", None, BodySource::Bytes(data.clone()), &meta)
             .unwrap();
         // Cache hit.
         let got = store.open_object_body(&body_ref).unwrap();
@@ -2780,11 +2974,14 @@ mod disk_tests {
         let tmp = TempDir::new().unwrap();
         // capacity 1024 → single-object cap 512. Use 800-byte body.
         let (store, cache) = new_store_with_cache(&tmp, 1024);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2792,7 +2989,7 @@ mod disk_tests {
         let data = Bytes::from(vec![7u8; 800]);
         let meta = sample_meta("big", 800);
         let body_ref = store
-            .put_object("b", "big", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(account_id, "b", "big", None, BodySource::Bytes(data.clone()), &meta)
             .unwrap();
         let body_key = crate::cache::BodyKey::new("b".to_string(), "big".to_string(), None);
         assert!(cache.get(&body_key).is_none());
@@ -2807,18 +3004,21 @@ mod disk_tests {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
         let s = store.load().unwrap();
-        assert!(s.buckets.is_empty());
+        assert!(s.is_empty());
     }
 
     #[test]
     fn load_skips_mpu_without_init() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -2826,14 +3026,15 @@ mod disk_tests {
         let data = Bytes::from_static(b"x");
         let meta = sample_meta("k", 1);
         store
-            .put_object("b", "k", None, BodySource::Bytes(data), &meta)
+            .put_object(account_id, "b", "k", None, BodySource::Bytes(data), &meta)
             .unwrap();
         // Directory with no init.toml is skipped by load.
-        let mpu = store.bucket_dir("b").join("mpu").join("upload1");
+        let mpu = store.bucket_dir(account_id, "b").join("mpu").join("upload1");
         std::fs::create_dir_all(&mpu).unwrap();
 
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         assert_eq!(snap.objects.len(), 1);
         assert!(snap.multipart_uploads.is_empty());
     }
@@ -2842,29 +3043,33 @@ mod disk_tests {
     fn load_reads_bucket_subresources() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Lifecycle, "<Lifecycle/>")
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Lifecycle, "<Lifecycle/>")
             .unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Cors, "<Cors/>")
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Cors, "<Cors/>")
             .unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Policy, "{}")
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Policy, "{}")
             .unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Tags, "x=1")
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Tags, "x=1")
             .unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         assert_eq!(
             snap.subresources.get("lifecycle.toml").map(String::as_str),
             Some("<Lifecycle/>"),
@@ -2887,11 +3092,14 @@ mod disk_tests {
     fn versioned_put_load_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -2907,6 +3115,7 @@ mod disk_tests {
             m.last_modified = base + chrono::Duration::seconds(i as i64);
             store
                 .put_object(
+                    account_id,
                     "b",
                     "k",
                     Some(*vid),
@@ -2916,7 +3125,8 @@ mod disk_tests {
                 .unwrap();
         }
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let versions = snap.object_versions.get("k").expect("versions present");
         assert_eq!(versions.len(), 3);
         assert_eq!(versions[0].meta.version_id.as_deref(), Some("v1"));
@@ -2934,11 +3144,14 @@ mod disk_tests {
     fn versioned_load_promotes_latest_live_to_snap_objects() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -2954,6 +3167,7 @@ mod disk_tests {
             m.last_modified = base + chrono::Duration::seconds(i as i64);
             store
                 .put_object(
+                    account_id,
                     "b",
                     "k",
                     Some(*vid),
@@ -2963,7 +3177,8 @@ mod disk_tests {
                 .unwrap();
         }
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let current = snap.objects.get("k").expect("current object promoted");
         assert_eq!(current.meta.version_id.as_deref(), Some("v3"));
     }
@@ -2972,11 +3187,14 @@ mod disk_tests {
     fn versioned_load_trailing_delete_marker_hides_current() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -2992,6 +3210,7 @@ mod disk_tests {
             m.last_modified = base + chrono::Duration::seconds(i as i64);
             store
                 .put_object(
+                    account_id,
                     "b",
                     "k",
                     Some(*vid),
@@ -3006,10 +3225,11 @@ mod disk_tests {
         dm.is_delete_marker = true;
         dm.last_modified = base + chrono::Duration::seconds(10);
         store
-            .put_object("b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &dm)
+            .put_object(account_id, "b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &dm)
             .unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         assert!(
             !snap.objects.contains_key("k"),
             "trailing delete marker must hide current object",
@@ -3023,11 +3243,14 @@ mod disk_tests {
         // see snap.objects reflect the newest live version, not the stale null.
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -3037,6 +3260,7 @@ mod disk_tests {
         null_meta.last_modified = base;
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -3047,9 +3271,11 @@ mod disk_tests {
         // Enable versioning and put two versions, the second a delete.
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -3060,6 +3286,7 @@ mod disk_tests {
         v1.last_modified = base + chrono::Duration::seconds(1);
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 Some("v1"),
@@ -3072,6 +3299,7 @@ mod disk_tests {
         v2.last_modified = base + chrono::Duration::seconds(2);
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 Some("v2"),
@@ -3080,7 +3308,8 @@ mod disk_tests {
             )
             .unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let current = snap
             .objects
             .get("k")
@@ -3093,11 +3322,14 @@ mod disk_tests {
     fn legacy_null_hidden_by_trailing_delete_marker() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -3107,6 +3339,7 @@ mod disk_tests {
         null_meta.last_modified = base;
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 None,
@@ -3116,9 +3349,11 @@ mod disk_tests {
             .unwrap();
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -3129,6 +3364,7 @@ mod disk_tests {
         v1.last_modified = base + chrono::Duration::seconds(1);
         store
             .put_object(
+                account_id,
                 "b",
                 "k",
                 Some("v1"),
@@ -3141,10 +3377,11 @@ mod disk_tests {
         dm.is_delete_marker = true;
         dm.last_modified = base + chrono::Duration::seconds(2);
         store
-            .put_object("b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &dm)
+            .put_object(account_id, "b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &dm)
             .unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         assert!(
             !snap.objects.contains_key("k"),
             "trailing delete marker must hide even a legacy null object",
@@ -3155,11 +3392,14 @@ mod disk_tests {
     fn delete_marker_roundtrip_no_body_file() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -3169,15 +3409,16 @@ mod disk_tests {
         m.version_id = Some("dm1".to_string());
         m.is_delete_marker = true;
         store
-            .put_object("b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &m)
+            .put_object(account_id, "b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &m)
             .unwrap();
         // No .bin file on disk for delete markers.
-        let (_, bin, toml_path) = store.object_paths("b", "k", Some("dm1"));
+        let (_, bin, toml_path) = store.object_paths(account_id, "b", "k", Some("dm1"));
         assert!(!bin.exists(), "delete marker must not have a .bin file");
         assert!(toml_path.exists());
 
         let loaded = store.load().unwrap();
-        let versions = loaded
+        let state = loaded.get(account_id).unwrap();
+        let versions = state
             .buckets
             .get("b")
             .unwrap()
@@ -3196,20 +3437,25 @@ mod disk_tests {
     fn mixed_nonversioned_and_versioned_buckets() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "a",
                 &BucketMeta {
                     name: "a".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     versioning: Some("Enabled".to_string()),
                     ..Default::default()
                 },
@@ -3218,6 +3464,7 @@ mod disk_tests {
         let ma = sample_meta("only", 3);
         store
             .put_object(
+                account_id,
                 "a",
                 "only",
                 None,
@@ -3232,6 +3479,7 @@ mod disk_tests {
             m.last_modified = base + chrono::Duration::seconds(i as i64);
             store
                 .put_object(
+                    account_id,
                     "b",
                     "twice",
                     Some(*vid),
@@ -3241,11 +3489,12 @@ mod disk_tests {
                 .unwrap();
         }
         let loaded = store.load().unwrap();
-        assert_eq!(loaded.buckets.len(), 2);
-        let a = loaded.buckets.get("a").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        assert_eq!(state.buckets.len(), 2);
+        let a = state.buckets.get("a").unwrap();
         assert_eq!(a.objects.len(), 1);
         assert!(a.object_versions.is_empty());
-        let b = loaded.buckets.get("b").unwrap();
+        let b = state.buckets.get("b").unwrap();
         // Fix #5: the latest live version is promoted into objects so
         // unversioned GETs see it post-restart.
         assert_eq!(
@@ -3270,19 +3519,23 @@ mod disk_tests {
     fn mpu_create_then_load_empty_parts() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         let init = sample_mpu_init("up1", "k1");
-        store.mpu_create("b", "up1", &init).unwrap();
+        store.mpu_create(account_id, "b", "up1", &init).unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let m = snap.multipart_uploads.get("up1").expect("upload present");
         assert_eq!(m.init.upload_id, "up1");
         assert_eq!(m.init.key, "k1");
@@ -3293,11 +3546,14 @@ mod disk_tests {
     fn mpu_create_round_trips_the_requested_object_lock() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -3309,9 +3565,10 @@ mod disk_tests {
             lock_legal_hold: Some("ON".to_string()),
             ..sample_mpu_init("up1", "k1")
         };
-        store.mpu_create("b", "up1", &init).unwrap();
+        store.mpu_create(account_id, "b", "up1", &init).unwrap();
         let loaded = store.load().unwrap();
-        let m = &loaded.buckets["b"].multipart_uploads["up1"];
+        let state = loaded.get(account_id).unwrap();
+        let m = &state.buckets["b"].multipart_uploads["up1"];
         assert_eq!(m.init.lock_mode.as_deref(), Some("COMPLIANCE"));
         assert_eq!(m.init.lock_retain_until, Some(until));
         assert_eq!(m.init.lock_legal_hold.as_deref(), Some("ON"));
@@ -3332,17 +3589,20 @@ mod disk_tests {
     fn mpu_put_part_then_load_three_parts() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k"))
             .unwrap();
         let bodies = [
             Bytes::from_static(b"part-one"),
@@ -3353,6 +3613,7 @@ mod disk_tests {
             let n = (i + 1) as u32;
             store
                 .mpu_put_part(
+                    account_id,
                     "b",
                     "up",
                     n,
@@ -3366,7 +3627,8 @@ mod disk_tests {
                 .unwrap();
         }
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let m = snap.multipart_uploads.get("up").unwrap();
         assert_eq!(m.parts.len(), 3);
         for (i, body) in bodies.iter().enumerate() {
@@ -3391,20 +3653,24 @@ mod disk_tests {
     fn mpu_abort_removes_upload() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k"))
             .unwrap();
         store
             .mpu_put_part(
+                account_id,
                 "b",
                 "up",
                 1,
@@ -3413,12 +3679,13 @@ mod disk_tests {
                 None,
             )
             .unwrap();
-        store.mpu_abort("b", "up").unwrap();
-        assert!(!store.mpu_dir("b", "up").exists());
+        store.mpu_abort(account_id, "b", "up").unwrap();
+        assert!(!store.mpu_dir(account_id, "b", "up").exists());
         // Idempotent.
-        store.mpu_abort("b", "up").unwrap();
+        store.mpu_abort(account_id, "b", "up").unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         assert!(snap.multipart_uploads.is_empty());
     }
 
@@ -3426,24 +3693,27 @@ mod disk_tests {
     fn mpu_complete_single_part_fast_path() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k"))
             .unwrap();
         let body = Bytes::from_static(b"only-part-bytes");
         store
-            .mpu_put_part("b", "up", 1, BodySource::Bytes(body.clone()), "et", None)
+            .mpu_put_part(account_id, "b", "up", 1, BodySource::Bytes(body.clone()), "et", None)
             .unwrap();
         let meta = sample_meta("k", body.len() as u64);
-        let body_ref = store.mpu_complete("b", "up", "k", None, &meta).unwrap();
+        let body_ref = store.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
         match &body_ref {
             BodyRef::Disk { path, size, .. } => {
                 assert_eq!(*size, body.len() as u64);
@@ -3451,31 +3721,34 @@ mod disk_tests {
             }
             _ => panic!("expected Disk"),
         }
-        assert!(!store.mpu_dir("b", "up").exists());
+        assert!(!store.mpu_dir(account_id, "b", "up").exists());
     }
 
     #[test]
     fn mpu_complete_multi_part_concat() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k"))
             .unwrap();
         let p1 = Bytes::from_static(b"AAAA");
         let p2 = Bytes::from_static(b"BBBBBB");
         let p3 = Bytes::from_static(b"CC");
         for (n, b) in [(1u32, &p1), (2, &p2), (3, &p3)] {
             store
-                .mpu_put_part("b", "up", n, BodySource::Bytes(b.clone()), "e", None)
+                .mpu_put_part(account_id, "b", "up", n, BodySource::Bytes(b.clone()), "e", None)
                 .unwrap();
         }
         let mut expected = Vec::new();
@@ -3483,7 +3756,7 @@ mod disk_tests {
         expected.extend_from_slice(&p2);
         expected.extend_from_slice(&p3);
         let meta = sample_meta("k", expected.len() as u64);
-        let body_ref = store.mpu_complete("b", "up", "k", None, &meta).unwrap();
+        let body_ref = store.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, size, .. } => {
                 assert_eq!(size, expected.len() as u64);
@@ -3492,24 +3765,27 @@ mod disk_tests {
             _ => panic!("expected Disk"),
         };
         assert_eq!(std::fs::read(&path).unwrap(), expected);
-        assert!(!store.mpu_dir("b", "up").exists());
+        assert!(!store.mpu_dir(account_id, "b", "up").exists());
     }
 
     #[test]
     fn mpu_complete_large_streaming_via_file_source() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k"))
             .unwrap();
 
         // 3 parts of ~1 MiB each (kept small so tests stay fast but still
@@ -3523,11 +3799,11 @@ mod disk_tests {
             std::fs::write(&src, &data).unwrap();
             expected.extend_from_slice(&data);
             store
-                .mpu_put_part("b", "up", (i + 1) as u32, BodySource::File(src), "et", None)
+                .mpu_put_part(account_id, "b", "up", (i + 1) as u32, BodySource::File(src), "et", None)
                 .unwrap();
         }
         let meta = sample_meta("k", expected.len() as u64);
-        let body_ref = store.mpu_complete("b", "up", "k", None, &meta).unwrap();
+        let body_ref = store.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, size, .. } => {
                 assert_eq!(size, expected.len() as u64);
@@ -3538,38 +3814,42 @@ mod disk_tests {
         let actual = std::fs::read(&path).unwrap();
         assert_eq!(actual.len(), expected.len());
         assert_eq!(actual, expected);
-        assert!(!store.mpu_dir("b", "up").exists());
+        assert!(!store.mpu_dir(account_id, "b", "up").exists());
     }
 
     #[test]
     fn mpu_resumable_across_load() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
-            .mpu_create("b", "up", &sample_mpu_init("up", "k"))
+            .mpu_create(account_id, "b", "up", &sample_mpu_init("up", "k"))
             .unwrap();
         let p1 = Bytes::from_static(b"hello-");
         let p2 = Bytes::from_static(b"world-");
         store
-            .mpu_put_part("b", "up", 1, BodySource::Bytes(p1.clone()), "e1", None)
+            .mpu_put_part(account_id, "b", "up", 1, BodySource::Bytes(p1.clone()), "e1", None)
             .unwrap();
         store
-            .mpu_put_part("b", "up", 2, BodySource::Bytes(p2.clone()), "e2", None)
+            .mpu_put_part(account_id, "b", "up", 2, BodySource::Bytes(p2.clone()), "e2", None)
             .unwrap();
 
         // Simulate a restart: re-open the store on the same dir and load.
         let store2 = new_store_with_cache(&tmp, 1024 * 1024).0;
         let loaded = store2.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         let m = snap.multipart_uploads.get("up").unwrap();
         assert_eq!(m.parts.len(), 2);
         assert_eq!(m.parts.get(&1).unwrap().meta.etag, "e1");
@@ -3578,31 +3858,34 @@ mod disk_tests {
         // Continue the upload on the fresh store.
         let p3 = Bytes::from_static(b"again!");
         store2
-            .mpu_put_part("b", "up", 3, BodySource::Bytes(p3.clone()), "e3", None)
+            .mpu_put_part(account_id, "b", "up", 3, BodySource::Bytes(p3.clone()), "e3", None)
             .unwrap();
         let mut expected = Vec::new();
         expected.extend_from_slice(&p1);
         expected.extend_from_slice(&p2);
         expected.extend_from_slice(&p3);
         let meta = sample_meta("k", expected.len() as u64);
-        let body_ref = store2.mpu_complete("b", "up", "k", None, &meta).unwrap();
+        let body_ref = store2.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, .. } => path,
             _ => panic!(),
         };
         assert_eq!(std::fs::read(&path).unwrap(), expected);
-        assert!(!store2.mpu_dir("b", "up").exists());
+        assert!(!store2.mpu_dir(account_id, "b", "up").exists());
     }
 
     #[test]
     fn tags_snapshot_roundtrip_via_store() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -3613,10 +3896,11 @@ mod disk_tests {
         let snap = TagsSnapshot { tags: tags.clone() };
         let payload = toml::to_string(&snap).unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Tags, &payload)
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Tags, &payload)
             .unwrap();
         let loaded = store.load().unwrap();
-        let text = loaded
+        let state = loaded.get(account_id).unwrap();
+        let text = state
             .buckets
             .get("b")
             .unwrap()
@@ -3632,11 +3916,14 @@ mod disk_tests {
     fn acl_snapshot_roundtrip_via_store() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -3664,10 +3951,11 @@ mod disk_tests {
         };
         let payload = toml::to_string(&snap).unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Acl, &payload)
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Acl, &payload)
             .unwrap();
         let loaded = store.load().unwrap();
-        let text = loaded
+        let state = loaded.get(account_id).unwrap();
+        let text = state
             .buckets
             .get("b")
             .unwrap()
@@ -3686,11 +3974,14 @@ mod disk_tests {
     fn inventory_snapshot_roundtrip_via_store() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
@@ -3709,10 +4000,11 @@ mod disk_tests {
         };
         let payload = toml::to_string(&snap).unwrap();
         store
-            .put_bucket_subresource("b", BucketSubresource::Inventory, &payload)
+            .put_bucket_subresource(account_id, "b", BucketSubresource::Inventory, &payload)
             .unwrap();
         let loaded = store.load().unwrap();
-        let text = loaded
+        let state = loaded.get(account_id).unwrap();
+        let text = state
             .buckets
             .get("b")
             .unwrap()
@@ -3728,21 +4020,25 @@ mod disk_tests {
     fn legacy_versioning_file_is_read() {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         // Bucket meta with no versioning field set.
         store
             .put_bucket_meta(
+                account_id,
                 "b",
                 &BucketMeta {
                     name: "b".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         // Legacy sidecar: a bare versioning.toml with "Enabled".
-        let path = store.bucket_dir("b").join("versioning.toml");
+        let path = store.bucket_dir(account_id, "b").join("versioning.toml");
         std::fs::write(&path, "Enabled").unwrap();
         let loaded = store.load().unwrap();
-        let snap = loaded.buckets.get("b").unwrap();
+        let state = loaded.get(account_id).unwrap();
+        let snap = state.buckets.get("b").unwrap();
         assert_eq!(snap.meta.versioning.as_deref(), Some("Enabled"));
     }
 
@@ -3752,17 +4048,21 @@ mod disk_tests {
         // whole store load (bug-audit 2026-06-20, 4.3).
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
+        let account_id = "test-account";
         store
             .put_bucket_meta(
+                account_id,
                 "good",
                 &BucketMeta {
                     name: "good".to_string(),
+                    account_id: account_id.to_string(),
                     ..Default::default()
                 },
             )
             .unwrap();
         store
             .put_object(
+                account_id,
                 "good",
                 "k",
                 None,
@@ -3771,17 +4071,18 @@ mod disk_tests {
             )
             .unwrap();
 
-        let bad_dir = store.buckets_dir().join("bad");
+        let bad_dir = store.accounts_dir().join(account_id).join("buckets").join("bad");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join("meta.toml"), b"not valid toml = = =").unwrap();
 
         let loaded = store.load().unwrap();
+        let state = loaded.get(account_id).unwrap();
         assert!(
-            loaded.buckets.contains_key("good"),
+            state.buckets.contains_key("good"),
             "valid bucket must load"
         );
         assert!(
-            !loaded.buckets.contains_key("bad"),
+            !state.buckets.contains_key("bad"),
             "corrupt bucket must be skipped, not abort the load"
         );
     }

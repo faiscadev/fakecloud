@@ -463,7 +463,7 @@ fn put_delivered_object_guarded<G>(
             effects.as_deref(),
             obj,
             |store, obj, meta| {
-                store.put_object(bucket, &obj.key, meta.version_id.as_deref(), source, meta)
+                store.put_object(account_id, bucket, &obj.key, meta.version_id.as_deref(), source, meta)
             },
         )
         .map_err(|e| format!("failed to persist object {key} to bucket {bucket}: {e}"))?
@@ -560,6 +560,7 @@ mod tests {
             Arc::new(fakecloud_persistence::cache::BodyCache::new(1024)),
         );
         disk.put_bucket_meta(
+            ACCOUNT,
             "logs-bucket",
             &fakecloud_persistence::BucketMeta {
                 name: "logs-bucket".into(),
@@ -620,7 +621,8 @@ mod tests {
             b"encoded payload"[..]
         );
         drop(accounts);
-        let reloaded = disk_store(&tmp).load().unwrap();
+        let reloaded_map = disk_store(&tmp).load().unwrap();
+        let reloaded = reloaded_map.get("default-account").unwrap();
         let object = &reloaded.buckets["logs-bucket"].objects["events.gz"];
         assert_eq!(object.meta.content_encoding.as_deref(), Some("gzip"));
         assert_eq!(object.meta.content_type, "application/octet-stream");
@@ -675,7 +677,7 @@ mod tests {
         assert!(state.read().get(ACCOUNT).unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
-        assert!(disk.load().unwrap().buckets["logs-bucket"]
+        assert!(disk.load().unwrap().get("default-account").unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
         let accounts = state.read();
@@ -744,7 +746,7 @@ mod tests {
             .objects
             .is_empty());
         std::fs::remove_file(tmp.path().join("s3/buckets/logs-bucket/objects")).unwrap();
-        assert!(disk.load().unwrap().buckets["logs-bucket"]
+        assert!(disk.load().unwrap().get("default-account").unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
     }
@@ -762,7 +764,7 @@ mod tests {
         });
         assert!(result.unwrap_err().contains("not found"));
         assert!(!staged.unwrap().exists());
-        assert!(disk.load().unwrap().buckets["logs-bucket"]
+        assert!(disk.load().unwrap().get("default-account").unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
     }
@@ -801,6 +803,7 @@ mod tests {
             Arc::new(fakecloud_persistence::cache::BodyCache::new(1024)),
         );
         disk.put_bucket_meta(
+            ACCOUNT,
             "logs-bucket",
             &BucketMeta {
                 name: "logs-bucket".to_owned(),
@@ -837,7 +840,8 @@ mod tests {
         assert_eq!(disk.open_object_body(&object.body).unwrap(), body);
         drop(accounts);
 
-        let loaded = disk.load().unwrap();
+        let loaded_map = disk.load().unwrap();
+        let loaded = loaded_map.get("default-account").unwrap();
         let object = &loaded.buckets["logs-bucket"].objects["events.gz"];
         assert_eq!(object.meta.content_type, "application/octet-stream");
         assert_eq!(object.meta.content_encoding.as_deref(), Some("gzip"));
@@ -1002,6 +1006,7 @@ mod tests {
         let cache = Arc::new(fakecloud_persistence::cache::BodyCache::new(1024 * 1024));
         let disk: Arc<dyn S3Store> = Arc::new(DiskS3Store::new(tmp.path().join("s3"), cache));
         disk.put_bucket_meta(
+            ACCOUNT,
             "logs-bucket",
             &BucketMeta {
                 name: "logs-bucket".to_string(),
@@ -1043,7 +1048,8 @@ mod tests {
         }
 
         // Reloading the store from disk (as boot does) surfaces the object.
-        let reloaded = disk.load().unwrap();
+        let reloaded_map = disk.load().unwrap();
+        let reloaded = reloaded_map.get(ACCOUNT).unwrap();
         assert!(reloaded
             .buckets
             .get("logs-bucket")
@@ -1326,6 +1332,7 @@ mod tests {
         let cache = Arc::new(fakecloud_persistence::cache::BodyCache::new(1024 * 1024));
         let disk: Arc<dyn S3Store> = Arc::new(DiskS3Store::new(tmp.path().join("s3"), cache));
         disk.put_bucket_meta(
+            ACCOUNT,
             "logs-bucket",
             &BucketMeta {
                 name: "logs-bucket".to_string(),
@@ -1350,7 +1357,7 @@ mod tests {
         let live = bucket(&state);
 
         let reloaded = disk.load().unwrap();
-        let snap = reloaded.buckets.get("logs-bucket").unwrap();
+        let snap = reloaded.get("default-account").unwrap().buckets.get("logs-bucket").unwrap();
         let mut ids: Vec<Option<String>> = snap.object_versions["k"]
             .iter()
             .map(|o| o.meta.version_id.clone())
@@ -1388,36 +1395,40 @@ mod tests {
     impl S3Store for FailingStore {
         fn load(
             &self,
-        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::S3StateSnapshot> {
+        ) -> fakecloud_persistence::StoreResult<std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>> {
             self.inner.load()
         }
         fn put_bucket_meta(
             &self,
+            account_id: &str,
             bucket: &str,
             meta: &fakecloud_persistence::BucketMeta,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.put_bucket_meta(bucket, meta)
+            self.inner.put_bucket_meta(account_id, bucket, meta)
         }
         fn put_bucket_subresource(
             &self,
+            account_id: &str,
             bucket: &str,
             kind: fakecloud_persistence::BucketSubresource,
             payload: &str,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.put_bucket_subresource(bucket, kind, payload)
+            self.inner.put_bucket_subresource(account_id, bucket, kind, payload)
         }
         fn delete_bucket_subresource(
             &self,
+            account_id: &str,
             bucket: &str,
             kind: fakecloud_persistence::BucketSubresource,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.delete_bucket_subresource(bucket, kind)
+            self.inner.delete_bucket_subresource(account_id, bucket, kind)
         }
-        fn delete_bucket(&self, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.delete_bucket(bucket)
+        fn delete_bucket(&self, account_id: &str, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+            self.inner.delete_bucket(account_id, bucket)
         }
         fn put_object(
             &self,
+            account_id: &str,
             bucket: &str,
             key: &str,
             version: Option<&str>,
@@ -1427,10 +1438,11 @@ mod tests {
             if self.only_bucket.is_none_or(|b| b == bucket) {
                 return Err(disk_full());
             }
-            self.inner.put_object(bucket, key, version, body, meta)
+            self.inner.put_object(account_id, bucket, key, version, body, meta)
         }
         fn replace_object_body(
             &self,
+            account_id: &str,
             bucket: &str,
             key: &str,
             version: Option<&str>,
@@ -1441,10 +1453,11 @@ mod tests {
                 return Err(disk_full());
             }
             self.inner
-                .replace_object_body(bucket, key, version, body, meta)
+                .replace_object_body(account_id, bucket, key, version, body, meta)
         }
         fn put_object_meta(
             &self,
+            account_id: &str,
             bucket: &str,
             key: &str,
             version: Option<&str>,
@@ -1453,15 +1466,16 @@ mod tests {
             if self.fail_meta {
                 return Err(disk_full());
             }
-            self.inner.put_object_meta(bucket, key, version, meta)
+            self.inner.put_object_meta(account_id, bucket, key, version, meta)
         }
         fn delete_object(
             &self,
+            account_id: &str,
             bucket: &str,
             key: &str,
             version: Option<&str>,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.delete_object(bucket, key, version)
+            self.inner.delete_object(account_id, bucket, key, version)
         }
         fn open_object_body(
             &self,
@@ -1471,14 +1485,16 @@ mod tests {
         }
         fn mpu_create(
             &self,
+            account_id: &str,
             bucket: &str,
             upload_id: &str,
             init: &fakecloud_persistence::MpuInit,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.mpu_create(bucket, upload_id, init)
+            self.inner.mpu_create(account_id, bucket, upload_id, init)
         }
         fn mpu_put_part(
             &self,
+            account_id: &str,
             bucket: &str,
             upload_id: &str,
             part_number: u32,
@@ -1487,17 +1503,19 @@ mod tests {
             checksum: Option<fakecloud_persistence::PartChecksum<'_>>,
         ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
             self.inner
-                .mpu_put_part(bucket, upload_id, part_number, body, etag, checksum)
+                .mpu_put_part(account_id, bucket, upload_id, part_number, body, etag, checksum)
         }
         fn mpu_abort(
             &self,
+            account_id: &str,
             bucket: &str,
             upload_id: &str,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.mpu_abort(bucket, upload_id)
+            self.inner.mpu_abort(account_id, bucket, upload_id)
         }
         fn mpu_complete(
             &self,
+            account_id: &str,
             bucket: &str,
             upload_id: &str,
             final_key: &str,
@@ -1505,7 +1523,7 @@ mod tests {
             meta: &fakecloud_persistence::ObjectMeta,
         ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
             self.inner
-                .mpu_complete(bucket, upload_id, final_key, version, meta)
+                .mpu_complete(account_id, bucket, upload_id, final_key, version, meta)
         }
     }
 

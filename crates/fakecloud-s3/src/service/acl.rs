@@ -147,7 +147,7 @@ impl S3Service {
             .map(fakecloud_persistence::AclGrantSnapshot::from)
             .collect();
         self.store
-            .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+            .put_object_meta(account_id, bucket, key, meta.version_id.as_deref(), &meta)
             .map_err(super::persistence_error)?;
         obj.acl_grants = proposed_grants.clone();
         // A versioned bucket keeps a second copy of this version in

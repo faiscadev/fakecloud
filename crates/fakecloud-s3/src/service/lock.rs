@@ -172,13 +172,13 @@ impl S3Service {
                 if let Some(obj) = target {
                     let meta = object_meta_snapshot(obj);
                     self.store
-                        .put_object_meta(bucket, key, Some(vid.as_str()), &meta)
+                        .put_object_meta(account_id, bucket, key, Some(vid.as_str()), &meta)
                         .map_err(super::persistence_error)?;
                 }
             } else if let Some(obj) = b2.objects.get(key) {
                 let meta = object_meta_snapshot(obj);
                 self.store
-                    .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+                    .put_object_meta(account_id, bucket, key, meta.version_id.as_deref(), &meta)
                     .map_err(super::persistence_error)?;
             }
         }
@@ -296,13 +296,13 @@ impl S3Service {
                 if let Some(obj) = target {
                     let meta = object_meta_snapshot(obj);
                     self.store
-                        .put_object_meta(bucket, key, Some(vid.as_str()), &meta)
+                        .put_object_meta(account_id, bucket, key, Some(vid.as_str()), &meta)
                         .map_err(super::persistence_error)?;
                 }
             } else if let Some(obj) = b2.objects.get(key) {
                 let meta = object_meta_snapshot(obj);
                 self.store
-                    .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+                    .put_object_meta(account_id, bucket, key, meta.version_id.as_deref(), &meta)
                     .map_err(super::persistence_error)?;
             }
         }

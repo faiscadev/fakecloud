@@ -8763,40 +8763,39 @@ impl RecordingStore {
 }
 
 impl fakecloud_persistence::S3Store for RecordingStore {
-    fn load(&self) -> fakecloud_persistence::StoreResult<fakecloud_persistence::S3StateSnapshot> {
+    fn load(&self) -> fakecloud_persistence::StoreResult<std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>> {
         self.inner.load()
     }
     fn put_bucket_meta(
         &self,
+        account_id: &str,
         bucket: &str,
         meta: &fakecloud_persistence::BucketMeta,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("put_bucket_meta:{bucket}"));
-        self.inner.put_bucket_meta(bucket, meta)
+        self.inner.put_bucket_meta(account_id, bucket, meta)
     }
     fn put_bucket_subresource(
         &self,
+        account_id: &str,
         bucket: &str,
         kind: fakecloud_persistence::BucketSubresource,
         payload: &str,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("put_bucket_subresource:{bucket}:{kind:?}"));
-        self.inner.put_bucket_subresource(bucket, kind, payload)
+        self.inner.put_bucket_subresource(account_id, bucket, kind, payload)
     }
-    fn delete_bucket_subresource(
-        &self,
-        bucket: &str,
-        kind: fakecloud_persistence::BucketSubresource,
-    ) -> fakecloud_persistence::StoreResult<()> {
+    fn delete_bucket_subresource(&self, account_id: &str, bucket: &str, kind: fakecloud_persistence::BucketSubresource) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_bucket_subresource:{bucket}:{kind:?}"));
-        self.inner.delete_bucket_subresource(bucket, kind)
+        self.inner.delete_bucket_subresource(account_id, bucket, kind)
     }
-    fn delete_bucket(&self, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+    fn delete_bucket(&self, account_id: &str, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_bucket:{bucket}"));
-        self.inner.delete_bucket(bucket)
+        self.inner.delete_bucket(account_id, bucket)
     }
     fn put_object(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
@@ -8809,10 +8808,11 @@ impl fakecloud_persistence::S3Store for RecordingStore {
                 "disk full".to_string(),
             ));
         }
-        self.inner.put_object(bucket, key, version, body, meta)
+        self.inner.put_object(account_id, bucket, key, version, body, meta)
     }
     fn replace_object_body(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
@@ -8826,20 +8826,22 @@ impl fakecloud_persistence::S3Store for RecordingStore {
             ));
         }
         self.inner
-            .replace_object_body(bucket, key, version, body, meta)
+            .replace_object_body(account_id, bucket, key, version, body, meta)
     }
     fn put_object_meta(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         meta: &fakecloud_persistence::ObjectMeta,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("put_object_meta:{bucket}/{key}"));
-        self.inner.put_object_meta(bucket, key, version, meta)
+        self.inner.put_object_meta(account_id, bucket, key, version, meta)
     }
     fn put_annotation(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
@@ -8848,26 +8850,22 @@ impl fakecloud_persistence::S3Store for RecordingStore {
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("put_annotation:{bucket}/{key}/{}", record.name));
         self.inner
-            .put_annotation(bucket, key, version, record, payload)
+            .put_annotation(account_id, bucket, key, version, record, payload)
     }
     fn delete_annotation(
         &self,
+        account_id: &str,
         bucket: &str,
         key: &str,
         version: Option<&str>,
         name: &str,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_annotation:{bucket}/{key}/{name}"));
-        self.inner.delete_annotation(bucket, key, version, name)
+        self.inner.delete_annotation(account_id, bucket, key, version, name)
     }
-    fn delete_object(
-        &self,
-        bucket: &str,
-        key: &str,
-        version: Option<&str>,
-    ) -> fakecloud_persistence::StoreResult<()> {
+    fn delete_object(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_object:{bucket}/{key}"));
-        self.inner.delete_object(bucket, key, version)
+        self.inner.delete_object(account_id, bucket, key, version)
     }
     fn open_object_body(
         &self,
@@ -8877,14 +8875,16 @@ impl fakecloud_persistence::S3Store for RecordingStore {
     }
     fn mpu_create(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         init: &fakecloud_persistence::MpuInit,
     ) -> fakecloud_persistence::StoreResult<()> {
-        self.inner.mpu_create(bucket, upload_id, init)
+        self.inner.mpu_create(account_id, bucket, upload_id, init)
     }
     fn mpu_put_part(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         part_number: u32,
@@ -8893,13 +8893,14 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         checksum: Option<fakecloud_persistence::PartChecksum<'_>>,
     ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
         self.inner
-            .mpu_put_part(bucket, upload_id, part_number, body, etag, checksum)
+            .mpu_put_part(account_id, bucket, upload_id, part_number, body, etag, checksum)
     }
-    fn mpu_abort(&self, bucket: &str, upload_id: &str) -> fakecloud_persistence::StoreResult<()> {
-        self.inner.mpu_abort(bucket, upload_id)
+    fn mpu_abort(&self, account_id: &str, bucket: &str, upload_id: &str) -> fakecloud_persistence::StoreResult<()> {
+        self.inner.mpu_abort(account_id, bucket, upload_id)
     }
     fn mpu_complete(
         &self,
+        account_id: &str,
         bucket: &str,
         upload_id: &str,
         final_key: &str,
@@ -8907,7 +8908,7 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         meta: &fakecloud_persistence::ObjectMeta,
     ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
         self.inner
-            .mpu_complete(bucket, upload_id, final_key, version, meta)
+            .mpu_complete(account_id, bucket, upload_id, final_key, version, meta)
     }
 }
 

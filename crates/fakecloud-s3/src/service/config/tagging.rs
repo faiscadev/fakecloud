@@ -64,7 +64,7 @@ impl S3Service {
         };
         let payload = crate::service::toml_or_internal_error(&snap)?;
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Tags, &payload)
             .map_err(crate::service::persistence_error)?;
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,
@@ -88,7 +88,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.tags.clear();
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Tags)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Tags)
             .map_err(crate::service::persistence_error)?;
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,

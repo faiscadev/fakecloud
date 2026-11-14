@@ -287,7 +287,7 @@ impl S3Service {
         // An object without an id and one with the id `null` share the same
         // sidecar slot, so the snapshot's own id addresses it either way.
         self.store
-            .put_object_meta(bucket, key, tagged.version_id.as_deref(), &tagged)
+            .put_object_meta(account_id, bucket, key, tagged.version_id.as_deref(), &tagged)
             .map_err(super::persistence_error)?;
 
         Ok(AwsResponse {
@@ -317,7 +317,7 @@ impl S3Service {
         let (meta, reported_version) =
             replace_object_tags(b, key, version_id.as_deref(), Vec::new(), "DELETE")?;
         self.store
-            .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+            .put_object_meta(account_id, bucket, key, meta.version_id.as_deref(), &meta)
             .map_err(super::persistence_error)?;
         let mut headers = HeaderMap::new();
         if let Some(vid) = reported_version.and_then(|v| v.parse().ok()) {

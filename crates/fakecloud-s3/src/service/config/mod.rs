@@ -226,7 +226,7 @@ impl S3Service {
 
         b.object_lock_config = Some(body_str.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::ObjectLock, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::ObjectLock, &body_str)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -378,7 +378,7 @@ impl S3Service {
             )
         })?;
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Acl, &payload)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Acl, &payload)
             .map_err(crate::service::persistence_error)?;
         b.acl_grants = proposed_grants;
         Ok(AwsResponse {
@@ -464,7 +464,7 @@ impl S3Service {
             b.abac_config = Some(body_str.clone());
         }
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Abac, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Abac, &body_str)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -506,7 +506,7 @@ impl S3Service {
             b.metadata_configuration = Some(body_str.clone());
         }
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration, &body_str)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -543,7 +543,7 @@ impl S3Service {
             b.metadata_configuration = None;
         }
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
@@ -566,6 +566,7 @@ impl S3Service {
         }
         self.store
             .put_bucket_subresource(
+                account_id,
                 bucket,
                 BucketSubresource::MetadataTableConfiguration,
                 &body_str,
@@ -606,7 +607,7 @@ impl S3Service {
             b.metadata_table_configuration = None;
         }
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::MetadataTableConfiguration)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::MetadataTableConfiguration)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
@@ -636,7 +637,7 @@ impl S3Service {
         // path does, so the inventory-table block survives a restart instead
         // of living only in RAM.
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration, &combined)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration, &combined)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -664,7 +665,7 @@ impl S3Service {
         // Persist the updated composite configuration (see the inventory-table
         // sibling above) so the journal-table block survives a restart.
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration, &combined)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration, &combined)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -817,6 +818,7 @@ impl S3Service {
         };
         let new_body = crate::service::objects::run_blocking_io(|| {
             self.store.put_object(
+                account_id,
                 bucket,
                 key,
                 meta.version_id.as_deref(),
@@ -831,6 +833,7 @@ impl S3Service {
             for a in o.annotations.values() {
                 self.store
                     .put_annotation(
+                        account_id,
                         bucket,
                         key,
                         meta.version_id.as_deref(),
@@ -841,7 +844,7 @@ impl S3Service {
             }
         }
         self.store
-            .delete_object(bucket, &source_key, src_version.as_deref())
+            .delete_object(account_id, bucket, &source_key, src_version.as_deref())
             .map_err(crate::service::persistence_error)?;
         if let Some(o) = state
             .buckets
@@ -988,13 +991,14 @@ impl S3Service {
         let new_body = match new_bytes {
             None => {
                 self.store
-                    .put_object_meta(bucket, key, slot, &meta)
+                    .put_object_meta(account_id, bucket, key, slot, &meta)
                     .map_err(crate::service::persistence_error)?;
                 None
             }
             Some(new_bytes) => Some(
                 crate::service::objects::run_blocking_io(|| {
                     self.store.replace_object_body(
+                        account_id,
                         bucket,
                         key,
                         slot,
@@ -1379,7 +1383,7 @@ fn store_named_config(
         crate::service::toml_or_internal_error(config_map(b, kind))?
     };
     svc.store
-        .put_bucket_subresource(bucket, kind.subresource(), &payload)
+        .put_bucket_subresource(account_id, bucket, kind.subresource(), &payload)
         .map_err(crate::service::persistence_error)?;
     Ok(empty_response(StatusCode::OK))
 }
@@ -1466,11 +1470,11 @@ fn delete_named_config(
     };
     if empty {
         svc.store
-            .delete_bucket_subresource(bucket, kind.subresource())
+            .delete_bucket_subresource(account_id, bucket, kind.subresource())
             .map_err(crate::service::persistence_error)?;
     } else {
         svc.store
-            .put_bucket_subresource(bucket, kind.subresource(), &payload)
+            .put_bucket_subresource(account_id, bucket, kind.subresource(), &payload)
             .map_err(crate::service::persistence_error)?;
     }
     Ok(empty_response(StatusCode::NO_CONTENT))
