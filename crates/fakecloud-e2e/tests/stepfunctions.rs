@@ -1253,11 +1253,11 @@ async fn sfn_stop_execution() {
     let server = TestServer::start().await;
     let client = server.sfn_client().await;
 
-    // Use a Succeed state which is still fast but gives us a valid execution
+    // A Wait keeps the execution running long enough to stop it.
     let create = client
         .create_state_machine()
         .name("stop-sm")
-        .definition(simple_definition())
+        .definition(r#"{"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}}"#)
         .role_arn("arn:aws:iam::123456789012:role/test-role")
         .send()
         .await
@@ -1271,25 +1271,24 @@ async fn sfn_stop_execution() {
         .await
         .unwrap();
 
-    // Try to stop it immediately (it may already be done given fast execution)
-    let stop_result = client
+    let stopped = client
         .stop_execution()
         .execution_arn(start.execution_arn())
         .error("UserCancelled")
         .cause("Test cancellation")
         .send()
-        .await;
-
-    // Either it stops successfully or it already finished
-    if stop_result.is_ok() {
-        let desc = client
-            .describe_execution()
-            .execution_arn(start.execution_arn())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(desc.status().as_str(), "ABORTED");
-    }
+        .await
+        .unwrap();
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.status().as_str(), "ABORTED");
+    assert_eq!(desc.error(), Some("UserCancelled"));
+    assert_eq!(desc.cause(), Some("Test cancellation"));
+    assert_eq!(desc.stop_date(), Some(stopped.stop_date()));
 }
 
 #[tokio::test]

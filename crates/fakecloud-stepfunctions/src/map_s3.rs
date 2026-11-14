@@ -453,6 +453,8 @@ pub(crate) struct IterationRecord {
     pub(crate) started: DateTime<Utc>,
     pub(crate) stopped: DateTime<Utc>,
     pub(crate) outcome: IterationOutcome,
+    /// The ARN and name of the child execution that ran it, once it started.
+    pub(crate) execution: Option<(String, String)>,
 }
 
 /// The map run a `ResultWriter` reports on.
@@ -511,9 +513,12 @@ fn iteration_record(run: &MapRunIdentity<'_>, record: &IterationRecord) -> Value
             "Status": "PENDING",
         });
     }
-    let name = uuid::Uuid::new_v4().to_string();
+    let (arn, name) = record.execution.clone().unwrap_or_else(|| {
+        let name = uuid::Uuid::new_v4().to_string();
+        (format!("{}:{name}", run.child_arn_prefix()), name)
+    });
     let mut out = json!({
-        "ExecutionArn": format!("{}:{name}", run.child_arn_prefix()),
+        "ExecutionArn": arn,
         "Input": json_text(&record.input),
         "InputDetails": {"Included": true},
         "Name": name,
@@ -838,6 +843,7 @@ mod tests {
             started: Utc::now(),
             stopped: Utc::now(),
             outcome,
+            execution: None,
         }
     }
 

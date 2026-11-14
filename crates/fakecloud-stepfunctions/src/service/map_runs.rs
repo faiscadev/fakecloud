@@ -64,7 +64,14 @@ impl StepFunctionsService {
                 json!({
                     "mapRunArn": r.map_run_arn,
                     "executionArn": r.execution_arn,
-                    "stateMachineArn": state_machine_arn_from_execution(&r.execution_arn),
+                    // The labeled state machine its children run, as recorded;
+                    // a run persisted before it was kept falls back to the
+                    // parent's.
+                    "stateMachineArn": if r.state_machine_arn.is_empty() {
+                        state_machine_arn_from_execution(&r.execution_arn)
+                    } else {
+                        r.state_machine_arn.clone()
+                    },
                     "startDate": r.start_date.timestamp(),
                     "stopDate": r.stop_date.map(|d| d.timestamp()),
                 })
