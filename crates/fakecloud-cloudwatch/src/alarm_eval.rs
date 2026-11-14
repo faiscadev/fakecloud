@@ -708,6 +708,11 @@ mod tests {
             alarm_configuration_updated_timestamp: Utc::now(),
             metrics: vec![],
             state_manually_set: false,
+            action_configuration: None,
+            warm_up_configuration: None,
+            evaluation_criteria: None,
+            evaluation_window: None,
+            evaluation_interval: None,
         }
     }
 

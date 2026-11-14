@@ -50,6 +50,7 @@ impl CloudWatchService {
         let actions_suppressor_extension_period =
             optional_query_param(req, "ActionsSuppressorExtensionPeriod")
                 .and_then(|s| s.parse().ok());
+        let action_configuration = crate::flat_members::action_configuration(req)?;
 
         let arn = crate::state::alarm_arn(&req.region, &req.account_id, &alarm_name);
         let now = Utc::now();
@@ -83,6 +84,7 @@ impl CloudWatchService {
                 .map(|a| a.state_updated_timestamp)
                 .unwrap_or(now),
             alarm_configuration_updated_timestamp: now,
+            action_configuration,
         };
         composites.insert(alarm_name, alarm);
 
@@ -160,6 +162,9 @@ pub(crate) fn render_composite_alarm(alarm: &CompositeAlarm) -> String {
             .alarm_configuration_updated_timestamp
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     ));
+    if let Some(a) = &alarm.action_configuration {
+        s.push_str(&a.render("ActionConfiguration"));
+    }
     s.push_str("</member>");
     s
 }

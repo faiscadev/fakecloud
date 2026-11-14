@@ -1954,3 +1954,201 @@ async fn list_operations_page_with_next_token() {
     let even = body_of(&call(&svc, "ListAlarmMuteRules", &[("AlarmName", "even")]).await);
     assert_eq!(even.matches("alarm-mute-rule/m").count(), 3, "{even}");
 }
+
+// ---------------------------------------------------------------------
+// ActionConfiguration / WarmUp / EvaluationCriteria / anomaly config
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn metric_alarm_round_trips_nested_configuration_members() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "promql-alarm"),
+            ("EvaluationCriteria.PromQLCriteria.Query", "up == 0"),
+            ("EvaluationCriteria.PromQLCriteria.PendingPeriod", "60"),
+            ("EvaluationInterval", "60"),
+            ("WarmUpConfiguration.WarmUpPeriodDurationInMinutes", "15"),
+            (
+                "WarmUpConfiguration.OnlyStartEvaluatingAfterWarmUpPeriodEnds",
+                "true",
+            ),
+            ("EvaluationWindow.WallClockWindow.Timezone", "Europe/Lisbon"),
+            ("ActionConfiguration.AlarmTagsPropagation.Enabled", "true"),
+            (
+                "ActionConfiguration.AlarmTagsPropagation.IncludedTagKeys.member.1",
+                "team",
+            ),
+            (
+                "ActionConfiguration.AlarmTagsPropagation.IncludedTagKeys.member.2",
+                "env",
+            ),
+        ],
+    )
+    .await;
+    let body = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmNames.member.1", "promql-alarm")],
+        )
+        .await,
+    );
+    for frag in [
+        "<EvaluationCriteria><PromQLCriteria><PendingPeriod>60</PendingPeriod><Query>up == 0</Query></PromQLCriteria></EvaluationCriteria>",
+        "<EvaluationInterval>60</EvaluationInterval>",
+        "<WarmUpConfiguration><OnlyStartEvaluatingAfterWarmUpPeriodEnds>true</OnlyStartEvaluatingAfterWarmUpPeriodEnds><WarmUpPeriodDurationInMinutes>15</WarmUpPeriodDurationInMinutes></WarmUpConfiguration>",
+        "<EvaluationWindow><WallClockWindow><Timezone>Europe/Lisbon</Timezone></WallClockWindow></EvaluationWindow>",
+        "<ActionConfiguration><AlarmTagsPropagation><Enabled>true</Enabled><IncludedTagKeys><member>team</member><member>env</member></IncludedTagKeys></AlarmTagsPropagation></ActionConfiguration>",
+    ] {
+        assert!(body.contains(frag), "missing {frag}: {body}");
+    }
+
+    // Over awsJson the nested members come back typed (bool, int, list).
+    let v = json_body(
+        &call_json(
+            &svc,
+            "DescribeAlarms",
+            serde_json::json!({"AlarmNames": ["promql-alarm"]}),
+        )
+        .await,
+    );
+    let alarm = &v["MetricAlarms"][0];
+    assert_eq!(
+        alarm["ActionConfiguration"]["AlarmTagsPropagation"],
+        serde_json::json!({"Enabled": true, "IncludedTagKeys": ["team", "env"]})
+    );
+    assert_eq!(
+        alarm["WarmUpConfiguration"]["WarmUpPeriodDurationInMinutes"],
+        15
+    );
+    assert_eq!(alarm["EvaluationInterval"], 60);
+}
+
+#[tokio::test]
+async fn nested_configuration_members_are_validated() {
+    let svc = service();
+    let err = call_err(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "bad"),
+            ("WarmUpConfiguration.WarmUpPeriodDurationInMinutes", "3000"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterValue");
+    let err = call_err(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "bad"),
+            ("AlarmRule", "TRUE"),
+            (
+                "ActionConfiguration.AlarmTagsPropagation.ExcludedTagKeys.member.1",
+                "x",
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterValue", "Enabled is required");
+}
+
+#[tokio::test]
+async fn composite_and_log_alarms_round_trip_action_configuration() {
+    let svc = service();
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "comp"),
+            ("AlarmRule", "TRUE"),
+            ("ActionConfiguration.AlarmTagsPropagation.Enabled", "false"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "PutLogAlarm",
+        &log_alarm_params(
+            "log",
+            &[
+                ("ActionConfiguration.AlarmTagsPropagation.Enabled", "true"),
+                (
+                    "ActionConfiguration.AlarmTagsPropagation.ExcludedTagKeys.member.1",
+                    "secret",
+                ),
+                ("WarmUpConfiguration.WarmUpPeriodDurationInMinutes", "5"),
+            ],
+        ),
+    )
+    .await;
+    let comp = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "CompositeAlarm")],
+        )
+        .await,
+    );
+    assert!(
+        comp.contains("<ActionConfiguration><AlarmTagsPropagation><Enabled>false</Enabled></AlarmTagsPropagation></ActionConfiguration>"),
+        "{comp}"
+    );
+    let log = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "LogAlarm")],
+        )
+        .await,
+    );
+    assert!(
+        log.contains("<ExcludedTagKeys><member>secret</member></ExcludedTagKeys>"),
+        "{log}"
+    );
+    assert!(
+        log.contains("<WarmUpPeriodDurationInMinutes>5</WarmUpPeriodDurationInMinutes>"),
+        "{log}"
+    );
+}
+
+#[tokio::test]
+async fn anomaly_detector_round_trips_adaptation_and_outlier_settings() {
+    let svc = service();
+    call(
+        &svc,
+        "PutAnomalyDetector",
+        &[
+            ("SingleMetricAnomalyDetector.Namespace", "AWS/EC2"),
+            ("SingleMetricAnomalyDetector.MetricName", "CPUUtilization"),
+            ("SingleMetricAnomalyDetector.Stat", "Average"),
+            ("Configuration.AdaptationSpeed", "FAST"),
+            ("Configuration.OutlierFilteringStrength", "STRICT"),
+        ],
+    )
+    .await;
+    let body = body_of(&call(&svc, "DescribeAnomalyDetectors", &[]).await);
+    assert!(
+        body.contains("<AdaptationSpeed>FAST</AdaptationSpeed>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<OutlierFilteringStrength>STRICT</OutlierFilteringStrength>"),
+        "{body}"
+    );
+    let err = call_err(
+        &svc,
+        "PutAnomalyDetector",
+        &[
+            ("SingleMetricAnomalyDetector.Namespace", "AWS/EC2"),
+            ("SingleMetricAnomalyDetector.MetricName", "CPUUtilization"),
+            ("SingleMetricAnomalyDetector.Stat", "Average"),
+            ("Configuration.AdaptationSpeed", "LUDICROUS"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterValue");
+}

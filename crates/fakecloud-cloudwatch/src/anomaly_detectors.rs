@@ -8,7 +8,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{
     collect_indexed, collect_member_values, invalid_param, parse_dimensions_query,
-    render_dimensions, validate_len, validate_range_i64, xml_escape, xml_response,
+    render_dimensions, validate_enum, validate_len, validate_range_i64, xml_escape, xml_response,
     CloudWatchService,
 };
 use crate::state::{AnomalyDetector, AnomalyDetectorConfiguration, ExcludedTimeRange};
@@ -17,6 +17,9 @@ use crate::state::{AnomalyDetector, AnomalyDetectorConfiguration, ExcludedTimeRa
 /// off a PutAnomalyDetector request, if present.
 fn parse_configuration(req: &AwsRequest) -> Option<AnomalyDetectorConfiguration> {
     let metric_timezone = optional_query_param(req, "Configuration.MetricTimezone");
+    let adaptation_speed = optional_query_param(req, "Configuration.AdaptationSpeed");
+    let outlier_filtering_strength =
+        optional_query_param(req, "Configuration.OutlierFilteringStrength");
     let excluded_time_ranges: Vec<ExcludedTimeRange> =
         collect_indexed(req, "Configuration.ExcludedTimeRanges")
             .into_iter()
@@ -25,12 +28,18 @@ fn parse_configuration(req: &AwsRequest) -> Option<AnomalyDetectorConfiguration>
                 end_time: m.get("EndTime").cloned(),
             })
             .collect();
-    if metric_timezone.is_none() && excluded_time_ranges.is_empty() {
+    if metric_timezone.is_none()
+        && excluded_time_ranges.is_empty()
+        && adaptation_speed.is_none()
+        && outlier_filtering_strength.is_none()
+    {
         return None;
     }
     Some(AnomalyDetectorConfiguration {
         excluded_time_ranges,
         metric_timezone,
+        adaptation_speed,
+        outlier_filtering_strength,
     })
 }
 
@@ -118,6 +127,17 @@ impl CloudWatchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         validate_len(req, "Namespace", 1, 255)?;
         validate_len(req, "MetricName", 1, 255)?;
+        validate_len(req, "Configuration.MetricTimezone", 0, 50)?;
+        validate_enum(
+            req,
+            "Configuration.AdaptationSpeed",
+            &["FAST", "NORMAL", "SLOW"],
+        )?;
+        validate_enum(
+            req,
+            "Configuration.OutlierFilteringStrength",
+            &["MINIMAL", "MODERATE", "STRICT"],
+        )?;
         let id = resolve_identity(req);
         if id.namespace.is_none() && id.math_id.is_none() {
             return Err(invalid_param(
@@ -284,6 +304,18 @@ fn render_detector(d: &AnomalyDetector) -> String {
             s.push_str(&format!(
                 "<MetricTimezone>{}</MetricTimezone>",
                 xml_escape(tz)
+            ));
+        }
+        if let Some(speed) = &cfg.adaptation_speed {
+            s.push_str(&format!(
+                "<AdaptationSpeed>{}</AdaptationSpeed>",
+                xml_escape(speed)
+            ));
+        }
+        if let Some(strength) = &cfg.outlier_filtering_strength {
+            s.push_str(&format!(
+                "<OutlierFilteringStrength>{}</OutlierFilteringStrength>",
+                xml_escape(strength)
             ));
         }
         s.push_str("</Configuration>");

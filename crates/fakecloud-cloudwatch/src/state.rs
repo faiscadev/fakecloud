@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+pub use crate::flat_members::FlatMembers;
+
 pub type SharedCloudWatchState = Arc<RwLock<CloudWatchAccounts>>;
 
 /// On-disk snapshot envelope for CloudWatch state.
@@ -347,6 +349,21 @@ pub struct MetricAlarm {
     /// transition, never a real threshold crossing.
     #[serde(default)]
     pub state_manually_set: bool,
+    /// `ActionConfiguration`, kept in flat-key form.
+    #[serde(default)]
+    pub action_configuration: Option<FlatMembers>,
+    /// `WarmUpConfiguration`, kept in flat-key form.
+    #[serde(default)]
+    pub warm_up_configuration: Option<FlatMembers>,
+    /// `EvaluationCriteria` (PromQL alarms), kept in flat-key form.
+    #[serde(default)]
+    pub evaluation_criteria: Option<FlatMembers>,
+    /// `EvaluationWindow` (sliding or wall-clock), kept in flat-key form.
+    #[serde(default)]
+    pub evaluation_window: Option<FlatMembers>,
+    /// `EvaluationInterval` in seconds (alarms using `EvaluationCriteria`).
+    #[serde(default)]
+    pub evaluation_interval: Option<i64>,
 }
 
 /// A single `MetricDataQuery` entry in a `PutMetricAlarm` `Metrics` list.
@@ -451,6 +468,9 @@ pub struct CompositeAlarm {
     pub state_reason: String,
     pub state_updated_timestamp: DateTime<Utc>,
     pub alarm_configuration_updated_timestamp: DateTime<Utc>,
+    /// `ActionConfiguration`, kept in flat-key form.
+    #[serde(default)]
+    pub action_configuration: Option<FlatMembers>,
 }
 
 /// A log alarm: evaluates a scheduled CloudWatch Logs query's results against
@@ -485,6 +505,12 @@ pub struct LogAlarm {
     pub state_reason: String,
     pub state_updated_timestamp: DateTime<Utc>,
     pub alarm_configuration_updated_timestamp: DateTime<Utc>,
+    /// `WarmUpConfiguration`, kept in flat-key form.
+    #[serde(default)]
+    pub warm_up_configuration: Option<FlatMembers>,
+    /// `ActionConfiguration`, kept in flat-key form.
+    #[serde(default)]
+    pub action_configuration: Option<FlatMembers>,
 }
 
 /// An anomaly detection model on a metric (single-metric or metric-math).
@@ -515,6 +541,12 @@ pub struct AnomalyDetectorConfiguration {
     pub excluded_time_ranges: Vec<ExcludedTimeRange>,
     #[serde(default)]
     pub metric_timezone: Option<String>,
+    /// `AdaptationSpeed`: `FAST`, `NORMAL` or `SLOW`.
+    #[serde(default)]
+    pub adaptation_speed: Option<String>,
+    /// `OutlierFilteringStrength`: `MINIMAL`, `MODERATE` or `STRICT`.
+    #[serde(default)]
+    pub outlier_filtering_strength: Option<String>,
 }
 
 /// A single `ExcludedTimeRanges` entry (`Range`).
