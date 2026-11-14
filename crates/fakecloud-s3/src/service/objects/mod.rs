@@ -130,14 +130,15 @@ pub(crate) fn replace_null_version(
 /// Returns the version id to report to the writer: the new id on a
 /// versioning-enabled bucket, `None` otherwise.
 pub(crate) fn commit_object_version(
+    account_id: &str,
     b: &mut crate::state::S3Bucket,
     bucket: &str,
     store: Option<&dyn fakecloud_persistence::S3Store>,
     obj: S3Object,
     body: BodySource,
 ) -> fakecloud_persistence::StoreResult<Option<String>> {
-    commit_object_version_with(b, bucket, store, obj, |store, obj, meta| {
-        store.put_object(bucket, &obj.key, meta.version_id.as_deref(), body, meta)
+    commit_object_version_with(account_id, b, bucket, store, obj, |store, obj, meta| {
+        store.put_object(account_id, bucket, &obj.key, meta.version_id.as_deref(), body, meta)
     })
 }
 
@@ -147,6 +148,7 @@ pub(crate) fn commit_object_version(
 /// returns the body ref to keep in memory. CompleteMultipartUpload uses it to assemble
 /// the parts in the store instead of writing the object a second time.
 pub(crate) fn commit_object_version_with<F>(
+    account_id: &str,
     b: &mut crate::state::S3Bucket,
     bucket: &str,
     store: Option<&dyn fakecloud_persistence::S3Store>,
@@ -190,7 +192,7 @@ where
             if let Some(store) = store {
                 let preserved_meta = object_meta_snapshot(&preserved);
                 run_blocking_io(|| {
-                    store.put_object_meta(bucket, &key, Some("null"), &preserved_meta)
+                    store.put_object_meta(account_id, bucket, &key, Some("null"), &preserved_meta)
                 })?;
             }
             record_preserved_null(b, &key, preserved);

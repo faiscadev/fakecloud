@@ -324,7 +324,7 @@ where
         .get_mut(bucket)
         .ok_or_else(|| missing(bucket))?;
     let notification_config = b.notification_config.clone();
-    let version_id = crate::service::commit_object_version_with(b, bucket, store, obj, write_body)?;
+    let version_id = crate::service::commit_object_version_with(account_id, b, bucket, store, obj, write_body)?;
     // The new version is committed: a replication that fails from here on
     // marks it FAILED instead of failing the write.
     crate::service::replication::replicate_through_store(

@@ -23,6 +23,7 @@ impl S3Service {
     /// nothing stale left for these writes to sit on top of.
     fn put_bucket_subresource_if_set(
         &self,
+        account_id: &str,
         bucket: &str,
         kind: BucketSubresource,
         payload: Option<&str>,
@@ -31,7 +32,7 @@ impl S3Service {
             return Ok(());
         };
         self.store
-            .put_bucket_subresource(bucket, kind, text)
+            .put_bucket_subresource(account_id, bucket, kind, text)
             .map_err(super::persistence_error)
     }
 
@@ -339,8 +340,8 @@ impl S3Service {
         // the directory, without restarting -- would otherwise find the name
         // refused for the rest of the process lifetime, with an error telling
         // them to repair something that is gone.
-        if self.store.bucket_load_refused(bucket)
-            && self.store.bucket_state_exists(bucket)
+        if self.store.bucket_load_refused(account_id, bucket)
+            && self.store.bucket_state_exists(account_id, bucket)
             && !accts
                 .iter()
                 .any(|(_, acct)| acct.buckets.contains_key(bucket))
@@ -473,7 +474,7 @@ impl S3Service {
             })
         };
 
-        let meta = bucket_meta_snapshot(&b);
+        let meta = bucket_meta_snapshot(account_id, &b);
         // Persist the create-time subresources before `meta.toml` and before the
         // in-memory insert. None of these three live in `BucketMeta`, and the
         // loader restores `object_lock_config` / `ownership_controls` as `None`
@@ -537,9 +538,9 @@ impl S3Service {
         // stat-and-walk of a possibly huge tree in front of every other S3
         // request on the one create-after-reset that needs it -- and a bare
         // `stat` in front of all the rest.
-        if self.store.bucket_state_exists(bucket) {
+        if self.store.bucket_state_exists(account_id, bucket) {
             self.store
-                .delete_bucket(bucket)
+                .delete_bucket(account_id, bucket)
                 .map_err(super::persistence_error)?;
         }
         // This name now belongs to a bucket that loads, so whatever the last load
@@ -554,22 +555,24 @@ impl S3Service {
         // directory holding nothing but that failed attempt's `meta.toml`. Only
         // reached once the refusal is known not to apply, so dropping it here
         // cannot discard a live one.
-        if self.store.bucket_load_refused(bucket) {
+        if self.store.bucket_load_refused(account_id, bucket) {
             self.store
-                .clear_bucket_load_refusal(bucket)
+                .clear_bucket_load_refusal(account_id, bucket)
                 .map_err(super::persistence_error)?;
         }
         self.store
-            .put_bucket_meta(bucket, &meta)
+            .put_bucket_meta(account_id, bucket, &meta)
             .map_err(super::persistence_error)?;
 
         self.put_bucket_subresource_if_set(
+            account_id,
             bucket,
             BucketSubresource::Tags,
             tags_payload.as_deref(),
         )?;
-        self.put_bucket_subresource_if_set(bucket, BucketSubresource::Acl, acl_payload.as_deref())?;
+        self.put_bucket_subresource_if_set(account_id, bucket, BucketSubresource::Acl, acl_payload.as_deref())?;
         self.put_bucket_subresource_if_set(
+            account_id,
             bucket,
             BucketSubresource::ObjectLock,
             b.object_lock_config.as_deref(),
@@ -578,7 +581,7 @@ impl S3Service {
         // now holds them (the new-bucket defaults with this create's ownership
         // applied) -- the same routine the CloudFormation create persists with.
         for (kind, payload) in b.new_bucket_settings() {
-            self.put_bucket_subresource_if_set(bucket, kind, payload)?;
+            self.put_bucket_subresource_if_set(account_id, bucket, kind, payload)?;
         }
         state.buckets.insert(bucket.to_string(), b);
 
@@ -624,7 +627,7 @@ impl S3Service {
         }
         state.buckets.remove(bucket);
         self.store
-            .delete_bucket(bucket)
+            .delete_bucket(account_id, bucket)
             .map_err(super::persistence_error)?;
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,

@@ -41,9 +41,9 @@ impl S3Service {
             return Ok(empty_response(StatusCode::OK));
         }
         b.accelerate_status = status;
-        let meta = bucket_meta_snapshot(b);
+        let meta = bucket_meta_snapshot(account_id, b);
         self.store
-            .put_bucket_meta(bucket, &meta)
+            .put_bucket_meta(account_id, bucket, &meta)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }

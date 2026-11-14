@@ -31,7 +31,7 @@ impl S3Service {
         let normalized = normalize_replication_xml(&body_str);
         b.replication_config = Some(normalized.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Replication, &normalized)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Replication, &normalized)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -72,7 +72,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.replication_config = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Replication)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Replication)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }

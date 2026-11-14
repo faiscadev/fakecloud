@@ -667,6 +667,7 @@ pub(crate) fn replicate_through_store(
         // A failed store write leaves the destination untouched (the commit
         // records nothing it could not persist).
         if let Err(e) = crate::service::commit_object_version(
+            &dest_account,
             dest_bucket,
             &rule.dest_bucket,
             store,
@@ -741,6 +742,7 @@ pub(crate) fn replicate_delete_marker(
         };
         let marker = crate::service::make_delete_marker(key, marker_version_id);
         if let Err(e) = crate::service::commit_object_version(
+            &dest_account,
             dest_bucket,
             &rule.dest_bucket,
             store,
@@ -793,7 +795,7 @@ fn mark_source_replication_status(
     // The source write already succeeded; a status that cannot be persisted
     // is logged (memory keeps it) rather than failing that write.
     if let (Some(meta), Some(store)) = (meta, store) {
-        if let Err(e) = store.put_object_meta(source_bucket, key, version_id, &meta) {
+        if let Err(e) = store.put_object_meta(source_account, source_bucket, key, version_id, &meta) {
             tracing::warn!(
                 source_bucket,
                 key,

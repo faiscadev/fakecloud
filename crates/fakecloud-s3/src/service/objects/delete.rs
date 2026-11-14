@@ -187,7 +187,7 @@ impl S3Service {
                 resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
             }
             self.store
-                .delete_object(bucket, key, Some(vid.as_str()))
+                .delete_object(account_id, bucket, key, Some(vid.as_str()))
                 .map_err(crate::service::persistence_error)?;
 
             // Permanently deleting a version fires ObjectRemoved:Delete
@@ -257,7 +257,7 @@ impl S3Service {
                     // hides it, losing the version after a restart.
                     let preserved_meta = object_meta_snapshot(&preserved);
                     self.store
-                        .put_object_meta(bucket, key, Some("null"), &preserved_meta)
+                        .put_object_meta(account_id, bucket, key, Some("null"), &preserved_meta)
                         .map_err(crate::service::persistence_error)?;
                     b.object_versions
                         .entry(key.to_string())
@@ -292,13 +292,11 @@ impl S3Service {
                 // slot holds the preserved pre-versioning version, which the
                 // marker must NOT destroy (the store keys `None` as "null").
                 self.store
-                    .delete_object(bucket, key, None)
+                    .delete_object(account_id, bucket, key, None)
                     .map_err(crate::service::persistence_error)?;
             }
             self.store
-                .put_object(
-                    bucket,
-                    key,
+                .put_object(account_id, bucket, key,
                     Some(dm_id.as_str()),
                     BodySource::Bytes(Bytes::new()),
                     &marker_meta,
@@ -359,7 +357,7 @@ impl S3Service {
         // no event, so only notify when something was actually removed.
         let existed = b.objects.remove(key).is_some();
         self.store
-            .delete_object(bucket, key, None)
+            .delete_object(account_id, bucket, key, None)
             .map_err(crate::service::persistence_error)?;
         drop(accts);
 
@@ -571,7 +569,7 @@ impl S3Service {
                         b.objects.remove(key);
                     }
                 }
-                if let Err(e) = self.store.delete_object(bucket, key, Some(vid.as_str())) {
+                if let Err(e) = self.store.delete_object(account_id, bucket, key, Some(vid.as_str())) {
                     persist_error = Some(crate::service::persistence_error(e));
                     break;
                 }
@@ -630,7 +628,7 @@ impl S3Service {
                         let preserved_meta = object_meta_snapshot(&preserved);
                         if let Err(e) =
                             self.store
-                                .put_object_meta(bucket, key, Some("null"), &preserved_meta)
+                                .put_object_meta(account_id, bucket, key, Some("null"), &preserved_meta)
                         {
                             persist_error = Some(crate::service::persistence_error(e));
                             break;
@@ -662,12 +660,13 @@ impl S3Service {
                 // the marker replaces it (suspended), and always persist the
                 // marker itself so a restart does not resurrect the object.
                 if !versioning_enabled {
-                    if let Err(e) = self.store.delete_object(bucket, key, None) {
+                    if let Err(e) = self.store.delete_object(account_id, bucket, key, None) {
                         persist_error = Some(crate::service::persistence_error(e));
                         break;
                     }
                 }
                 if let Err(e) = self.store.put_object(
+                    account_id,
                     bucket,
                     key,
                     Some(dm_id.as_str()),
@@ -711,7 +710,7 @@ impl S3Service {
                     continue;
                 }
                 let existed = b.objects.remove(key).is_some();
-                if let Err(e) = self.store.delete_object(bucket, key, None) {
+                if let Err(e) = self.store.delete_object(account_id, bucket, key, None) {
                     persist_error = Some(crate::service::persistence_error(e));
                     break;
                 }

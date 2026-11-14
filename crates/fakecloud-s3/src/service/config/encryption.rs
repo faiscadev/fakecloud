@@ -55,7 +55,7 @@ impl S3Service {
         };
         b.encryption_config = Some(normalized.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Encryption, &normalized)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Encryption, &normalized)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -103,7 +103,7 @@ impl S3Service {
         // before memory changes, as the other config writes are.
         let reset = b.default_encryption_xml();
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Encryption, reset)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Encryption, reset)
             .map_err(crate::service::persistence_error)?;
         b.encryption_config = Some(reset.to_string());
         Ok(empty_response(StatusCode::NO_CONTENT))
