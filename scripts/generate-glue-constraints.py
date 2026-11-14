@@ -25,8 +25,8 @@ pub(crate) struct FieldConstraint {
     pub field: &'static str,
     pub len_min: Option<u64>,
     pub len_max: Option<u64>,
-    pub range_min: Option<i64>,
-    pub range_max: Option<i64>,
+    pub range_min: Option<f64>,
+    pub range_max: Option<f64>,
     pub enum_values: &'static [&'static str],
 }
 
@@ -72,6 +72,12 @@ def opt(v):
     return f"Some({v})" if v is not None else "None"
 
 
+def opt_f64(v):
+    # `@range` bounds are numbers of any kind (a Double member can be bounded
+    # by 0..1), so the table holds them as f64.
+    return f"Some({float(v)!r})" if v is not None else "None"
+
+
 def main():
     model = json.loads(MODEL.read_text())
     shapes = model["shapes"]
@@ -98,8 +104,8 @@ def main():
             out.append(f'                field: "{member}",\n')
             out.append(f'                len_min: {opt(c["len_min"])},\n')
             out.append(f'                len_max: {opt(c["len_max"])},\n')
-            out.append(f'                range_min: {opt(c["range_min"])},\n')
-            out.append(f'                range_max: {opt(c["range_max"])},\n')
+            out.append(f'                range_min: {opt_f64(c["range_min"])},\n')
+            out.append(f'                range_max: {opt_f64(c["range_max"])},\n')
             if c["enum"]:
                 out.append("                enum_values: &[\n")
                 for v in c["enum"]:

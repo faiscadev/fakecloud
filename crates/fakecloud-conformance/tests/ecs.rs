@@ -155,7 +155,7 @@ async fn ecs_put_cluster_capacity_providers() {
     assert!(resp.cluster().is_some());
 }
 
-#[test_action("ecs", "RegisterTaskDefinition", checksum = "f752354e")]
+#[test_action("ecs", "RegisterTaskDefinition", checksum = "6cfc4ce4")]
 #[tokio::test]
 async fn ecs_register_task_definition() {
     let server = TestServer::start().await;
@@ -176,7 +176,7 @@ async fn ecs_register_task_definition() {
     assert_eq!(resp.task_definition().unwrap().family(), Some("confo-td"));
 }
 
-#[test_action("ecs", "DescribeTaskDefinition", checksum = "54669c17")]
+#[test_action("ecs", "DescribeTaskDefinition", checksum = "313dcc15")]
 #[tokio::test]
 async fn ecs_describe_task_definition() {
     let server = TestServer::start().await;
@@ -206,7 +206,7 @@ async fn ecs_describe_task_definition() {
     );
 }
 
-#[test_action("ecs", "DeregisterTaskDefinition", checksum = "f830a947")]
+#[test_action("ecs", "DeregisterTaskDefinition", checksum = "933d0ff2")]
 #[tokio::test]
 async fn ecs_deregister_task_definition() {
     let server = TestServer::start().await;
@@ -238,7 +238,7 @@ async fn ecs_deregister_task_definition() {
     );
 }
 
-#[test_action("ecs", "DeleteTaskDefinitions", checksum = "181b7b9d")]
+#[test_action("ecs", "DeleteTaskDefinitions", checksum = "aaa7f78b")]
 #[tokio::test]
 async fn ecs_delete_task_definitions() {
     let server = TestServer::start().await;
@@ -480,7 +480,7 @@ async fn register_conformance_task_def(client: &aws_sdk_ecs::Client, family: &st
         .unwrap();
 }
 
-#[test_action("ecs", "RunTask", checksum = "99452d98")]
+#[test_action("ecs", "RunTask", checksum = "ac257001")]
 #[tokio::test]
 async fn ecs_run_task() {
     let server = TestServer::start().await;
@@ -503,7 +503,7 @@ async fn ecs_run_task() {
     assert!(resp.failures().is_empty());
 }
 
-#[test_action("ecs", "StartTask", checksum = "204a75f7")]
+#[test_action("ecs", "StartTask", checksum = "0ae77c9c")]
 #[tokio::test]
 async fn ecs_start_task() {
     let server = TestServer::start().await;
@@ -538,7 +538,7 @@ async fn ecs_start_task() {
     assert_eq!(resp.tasks().len(), 1);
 }
 
-#[test_action("ecs", "DescribeTasks", checksum = "8e16a815")]
+#[test_action("ecs", "DescribeTasks", checksum = "c0470f9b")]
 #[tokio::test]
 async fn ecs_describe_tasks() {
     let server = TestServer::start().await;
@@ -596,7 +596,7 @@ async fn ecs_list_tasks() {
     assert!(!resp.task_arns().is_empty());
 }
 
-#[test_action("ecs", "StopTask", checksum = "bcbdb136")]
+#[test_action("ecs", "StopTask", checksum = "4e25cd79")]
 #[tokio::test]
 async fn ecs_stop_task() {
     let server = TestServer::start().await;
@@ -678,7 +678,7 @@ async fn bootstrap_external_service_fixtures(
         .unwrap();
 }
 
-#[test_action("ecs", "CreateService", checksum = "093ef74c")]
+#[test_action("ecs", "CreateService", checksum = "700f97cb")]
 #[tokio::test]
 async fn ecs_create_service() {
     let server = TestServer::start().await;
@@ -696,7 +696,7 @@ async fn ecs_create_service() {
     assert_eq!(resp.service().unwrap().service_name(), Some("svc-a"));
 }
 
-#[test_action("ecs", "DescribeServices", checksum = "fe13866d")]
+#[test_action("ecs", "DescribeServices", checksum = "7209f0c8")]
 #[tokio::test]
 async fn ecs_describe_services() {
     let server = TestServer::start().await;
@@ -757,7 +757,7 @@ async fn ecs_list_services_by_namespace() {
     resp.service_arns();
 }
 
-#[test_action("ecs", "UpdateService", checksum = "ca062e4e")]
+#[test_action("ecs", "UpdateService", checksum = "ed4d312d")]
 #[tokio::test]
 async fn ecs_update_service() {
     let server = TestServer::start().await;
@@ -783,7 +783,7 @@ async fn ecs_update_service() {
     assert_eq!(resp.service().unwrap().desired_count(), 2);
 }
 
-#[test_action("ecs", "DeleteService", checksum = "55d4cdce")]
+#[test_action("ecs", "DeleteService", checksum = "1341aa43")]
 #[tokio::test]
 async fn ecs_delete_service() {
     let server = TestServer::start().await;
@@ -810,7 +810,7 @@ async fn ecs_delete_service() {
 
 // ── Batch 4: completeness ──────────────────────────────────────────
 
-#[test_action("ecs", "RegisterContainerInstance", checksum = "b5dc02fc")]
+#[test_action("ecs", "RegisterContainerInstance", checksum = "bc109d0c")]
 #[tokio::test]
 async fn ecs_register_container_instance() {
     let server = TestServer::start().await;
@@ -830,7 +830,7 @@ async fn ecs_register_container_instance() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "DeregisterContainerInstance", checksum = "d4260848")]
+#[test_action("ecs", "DeregisterContainerInstance", checksum = "908101b7")]
 #[tokio::test]
 async fn ecs_deregister_container_instance() {
     let server = TestServer::start().await;
@@ -863,7 +863,7 @@ async fn ecs_deregister_container_instance() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "DescribeContainerInstances", checksum = "f97758da")]
+#[test_action("ecs", "DescribeContainerInstances", checksum = "07eac6ac")]
 #[tokio::test]
 async fn ecs_describe_container_instances() {
     let server = TestServer::start().await;
@@ -922,7 +922,7 @@ async fn ecs_list_container_instances() {
     assert!(!resp.container_instance_arns().is_empty());
 }
 
-#[test_action("ecs", "UpdateContainerAgent", checksum = "fde7dd4c")]
+#[test_action("ecs", "UpdateContainerAgent", checksum = "0c267e1e")]
 #[tokio::test]
 async fn ecs_update_container_agent() {
     let server = TestServer::start().await;
@@ -955,7 +955,7 @@ async fn ecs_update_container_agent() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "UpdateContainerInstancesState", checksum = "08210d81")]
+#[test_action("ecs", "UpdateContainerInstancesState", checksum = "6dfac371")]
 #[tokio::test]
 async fn ecs_update_container_instances_state() {
     use aws_sdk_ecs::types::ContainerInstanceStatus;
@@ -1747,7 +1747,7 @@ async fn ecs_continue_service_deployment_rollback_and_errors() {
     assert!(!resp.status().is_success());
 }
 
-#[test_action("ecs", "DescribeServiceRevisions", checksum = "d5f72f0b")]
+#[test_action("ecs", "DescribeServiceRevisions", checksum = "771818ca")]
 #[tokio::test]
 async fn ecs_describe_service_revisions() {
     let server = TestServer::start().await;
@@ -1789,7 +1789,7 @@ async fn register_daemon_td_arn(client: &aws_sdk_ecs::Client, family: &str) -> S
     resp.daemon_task_definition_arn().unwrap().to_string()
 }
 
-#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "b10b17f6")]
+#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "53384b62")]
 #[tokio::test]
 async fn ecs_register_daemon_task_definition() {
     let server = TestServer::start().await;
@@ -1798,7 +1798,7 @@ async fn ecs_register_daemon_task_definition() {
     assert!(arn.contains(":daemon-task-definition/"));
 }
 
-#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "11721ffd")]
+#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "46f06ed8")]
 #[tokio::test]
 async fn ecs_describe_daemon_task_definition() {
     let server = TestServer::start().await;

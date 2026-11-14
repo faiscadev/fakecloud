@@ -11,7 +11,7 @@ use helpers::TestServer;
 // Key lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("kms", "CreateKey", checksum = "c66e4b13")]
+#[test_action("kms", "CreateKey", checksum = "1272147a")]
 #[tokio::test]
 async fn kms_create_key() {
     let server = TestServer::start().await;
@@ -28,7 +28,7 @@ async fn kms_create_key() {
     assert!(meta.arn().unwrap().contains(":key/"));
 }
 
-#[test_action("kms", "GetKeyLastUsage", checksum = "d40a8c5a")]
+#[test_action("kms", "GetKeyLastUsage", checksum = "12968d4a")]
 #[tokio::test]
 async fn kms_get_key_last_usage() {
     let server = TestServer::start().await;
@@ -49,7 +49,7 @@ async fn kms_get_key_last_usage() {
     assert!(resp.key_last_usage().is_none());
 }
 
-#[test_action("kms", "DescribeKey", checksum = "c64650b2")]
+#[test_action("kms", "DescribeKey", checksum = "365acfcb")]
 #[tokio::test]
 async fn kms_describe_key() {
     let server = TestServer::start().await;
@@ -779,7 +779,7 @@ async fn kms_verify() {
     assert!(resp.signature_valid());
 }
 
-#[test_action("kms", "GetPublicKey", checksum = "f70f8357")]
+#[test_action("kms", "GetPublicKey", checksum = "59090f39")]
 #[tokio::test]
 async fn kms_get_public_key() {
     let server = TestServer::start().await;
@@ -807,7 +807,7 @@ async fn kms_get_public_key() {
 // Grants
 // ---------------------------------------------------------------------------
 
-#[test_action("kms", "CreateGrant", checksum = "67adbcc7")]
+#[test_action("kms", "CreateGrant", checksum = "00da9093")]
 #[tokio::test]
 async fn kms_create_grant() {
     let server = TestServer::start().await;
@@ -829,7 +829,7 @@ async fn kms_create_grant() {
     assert!(resp.grant_token().is_some());
 }
 
-#[test_action("kms", "ListGrants", checksum = "a96e800c")]
+#[test_action("kms", "ListGrants", checksum = "d8abd9de")]
 #[tokio::test]
 async fn kms_list_grants() {
     let server = TestServer::start().await;
@@ -851,7 +851,7 @@ async fn kms_list_grants() {
     assert_eq!(resp.grants().len(), 1);
 }
 
-#[test_action("kms", "ListRetirableGrants", checksum = "b77c26b6")]
+#[test_action("kms", "ListRetirableGrants", checksum = "1936f842")]
 #[tokio::test]
 async fn kms_list_retirable_grants() {
     let server = TestServer::start().await;
@@ -995,7 +995,7 @@ async fn kms_verify_mac() {
 // ReplicateKey
 // ---------------------------------------------------------------------------
 
-#[test_action("kms", "ReplicateKey", checksum = "4fdb41bb")]
+#[test_action("kms", "ReplicateKey", checksum = "dae53a0c")]
 #[tokio::test]
 async fn kms_replicate_key() {
     let server = TestServer::start().await;
@@ -1015,7 +1015,7 @@ async fn kms_replicate_key() {
         .ok();
 }
 
-#[test_action("kms", "GenerateDataKeyPair", checksum = "abecf576")]
+#[test_action("kms", "GenerateDataKeyPair", checksum = "f1b6e0b0")]
 #[tokio::test]
 async fn kms_generate_data_key_pair() {
     let server = TestServer::start().await;
@@ -1032,7 +1032,7 @@ async fn kms_generate_data_key_pair() {
     assert!(result.public_key().is_some());
 }
 
-#[test_action("kms", "GenerateDataKeyPairWithoutPlaintext", checksum = "77bf6cb6")]
+#[test_action("kms", "GenerateDataKeyPairWithoutPlaintext", checksum = "24091a13")]
 #[tokio::test]
 async fn kms_generate_data_key_pair_without_plaintext() {
     let server = TestServer::start().await;

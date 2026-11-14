@@ -121,8 +121,8 @@ async fn bedrock_untag_resource() {
 // Guardrails
 // ---------------------------------------------------------------------------
 
-#[test_action("bedrock", "CreateGuardrail", checksum = "22fd9f5c")]
-#[test_action("bedrock", "GetGuardrail", checksum = "f64e7901")]
+#[test_action("bedrock", "CreateGuardrail", checksum = "81a2baef")]
+#[test_action("bedrock", "GetGuardrail", checksum = "e4e55bf0")]
 #[test_action("bedrock", "ListGuardrails", checksum = "69e9f011")]
 #[tokio::test]
 async fn bedrock_create_get_list_guardrail() {
@@ -152,7 +152,7 @@ async fn bedrock_create_get_list_guardrail() {
     assert!(!resp.guardrails().is_empty());
 }
 
-#[test_action("bedrock", "UpdateGuardrail", checksum = "e1a06efa")]
+#[test_action("bedrock", "UpdateGuardrail", checksum = "e74fe638")]
 #[tokio::test]
 async fn bedrock_update_guardrail() {
     let server = TestServer::start().await;

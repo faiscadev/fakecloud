@@ -86,9 +86,9 @@ async fn cloudwatch_metrics() {
         .unwrap();
 }
 
-#[test_action("monitoring", "PutMetricAlarm", checksum = "c853c255")]
-#[test_action("monitoring", "DescribeAlarms", checksum = "2d9b182f")]
-#[test_action("monitoring", "DescribeAlarmsForMetric", checksum = "aebfad2f")]
+#[test_action("monitoring", "PutMetricAlarm", checksum = "3634e96a")]
+#[test_action("monitoring", "DescribeAlarms", checksum = "0c613138")]
+#[test_action("monitoring", "DescribeAlarmsForMetric", checksum = "de259b33")]
 #[test_action("monitoring", "SetAlarmState", checksum = "bd020d12")]
 #[test_action("monitoring", "EnableAlarmActions", checksum = "bf17737e")]
 #[test_action("monitoring", "DisableAlarmActions", checksum = "d9efce2a")]
@@ -240,8 +240,8 @@ async fn cloudwatch_dashboards() {
 // Anomaly detectors.
 // ---------------------------------------------------------------------------
 
-#[test_action("monitoring", "PutAnomalyDetector", checksum = "f35e4e55")]
-#[test_action("monitoring", "DescribeAnomalyDetectors", checksum = "5cab739a")]
+#[test_action("monitoring", "PutAnomalyDetector", checksum = "ae3940ee")]
+#[test_action("monitoring", "DescribeAnomalyDetectors", checksum = "853c5a3d")]
 #[test_action("monitoring", "DeleteAnomalyDetector", checksum = "ce6c5047")]
 #[tokio::test]
 async fn cloudwatch_anomaly_detectors() {
@@ -494,7 +494,7 @@ async fn cloudwatch_get_metric_stream_missing() {
 // Composite alarms.
 // ---------------------------------------------------------------------------
 
-#[test_action("monitoring", "PutCompositeAlarm", checksum = "7e7e53a8")]
+#[test_action("monitoring", "PutCompositeAlarm", checksum = "30b849a3")]
 #[tokio::test]
 async fn cloudwatch_composite_alarm() {
     let server = TestServer::start().await;
@@ -750,7 +750,7 @@ async fn cloudwatch_dataset_kms_key() {
 /// `PutLogAlarm` is absent from the vendored aws-sdk-cloudwatch, so drive it
 /// via a raw awsQuery POST. `DescribeAlarms` reads it back through the typed
 /// client, which already knows the `LogAlarm` alarm type.
-#[test_action("monitoring", "PutLogAlarm", checksum = "bb86a83a")]
+#[test_action("monitoring", "PutLogAlarm", checksum = "b8efa6be")]
 #[tokio::test]
 async fn cloudwatch_log_alarm() {
     let server = TestServer::start().await;

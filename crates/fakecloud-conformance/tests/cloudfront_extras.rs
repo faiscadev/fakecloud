@@ -41,7 +41,7 @@ fn trust_store_bundle() -> CaCertificatesBundleSource {
 
 // ─── VPC Origin ──────────────────────────────────────────────────────
 
-#[test_action("cloudfront", "CreateVpcOrigin", checksum = "ca0b375c")]
+#[test_action("cloudfront", "CreateVpcOrigin", checksum = "49888ce3")]
 #[tokio::test]
 async fn cf_create_vpc_origin() {
     let server = TestServer::start().await;
@@ -53,7 +53,7 @@ async fn cf_create_vpc_origin() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "GetVpcOrigin", checksum = "cd09e929")]
+#[test_action("cloudfront", "GetVpcOrigin", checksum = "9d6c4b63")]
 #[tokio::test]
 async fn cf_get_vpc_origin() {
     let server = TestServer::start().await;
@@ -68,7 +68,7 @@ async fn cf_get_vpc_origin() {
     cf.get_vpc_origin().id(&id).send().await.unwrap();
 }
 
-#[test_action("cloudfront", "UpdateVpcOrigin", checksum = "c1777131")]
+#[test_action("cloudfront", "UpdateVpcOrigin", checksum = "0148ed7e")]
 #[tokio::test]
 async fn cf_update_vpc_origin() {
     let server = TestServer::start().await;
@@ -90,7 +90,7 @@ async fn cf_update_vpc_origin() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "DeleteVpcOrigin", checksum = "418169cb")]
+#[test_action("cloudfront", "DeleteVpcOrigin", checksum = "0b208882")]
 #[tokio::test]
 async fn cf_delete_vpc_origin() {
     let server = TestServer::start().await;
@@ -111,7 +111,7 @@ async fn cf_delete_vpc_origin() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "ListVpcOrigins", checksum = "d12c4719")]
+#[test_action("cloudfront", "ListVpcOrigins", checksum = "1c32af2d")]
 #[tokio::test]
 async fn cf_list_vpc_origins() {
     let server = TestServer::start().await;

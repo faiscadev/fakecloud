@@ -195,7 +195,7 @@ async fn make_capacity_reservation(server: &TestServer, name: &str) {
 
 // ─── Workgroups ────────────────────────────────────────────────────
 
-#[test_action("athena", "CreateWorkGroup", checksum = "a1421529")]
+#[test_action("athena", "CreateWorkGroup", checksum = "b83f575d")]
 #[tokio::test]
 async fn athena_create_work_group() {
     let server = TestServer::start().await;
@@ -209,7 +209,7 @@ async fn athena_create_work_group() {
         .unwrap();
 }
 
-#[test_action("athena", "GetWorkGroup", checksum = "b4b7f16c")]
+#[test_action("athena", "GetWorkGroup", checksum = "58e6e3b8")]
 #[tokio::test]
 async fn athena_get_work_group() {
     let server = TestServer::start().await;
@@ -236,7 +236,7 @@ async fn athena_list_work_groups() {
         .unwrap();
 }
 
-#[test_action("athena", "UpdateWorkGroup", checksum = "da75ec69")]
+#[test_action("athena", "UpdateWorkGroup", checksum = "4689c859")]
 #[tokio::test]
 async fn athena_update_work_group() {
     let server = TestServer::start().await;
@@ -630,7 +630,7 @@ async fn athena_stop_query_execution() {
         .unwrap();
 }
 
-#[test_action("athena", "GetQueryExecution", checksum = "bc94fa2c")]
+#[test_action("athena", "GetQueryExecution", checksum = "a87f4760")]
 #[tokio::test]
 async fn athena_get_query_execution() {
     let server = TestServer::start().await;
@@ -659,7 +659,7 @@ async fn athena_list_query_executions() {
         .unwrap();
 }
 
-#[test_action("athena", "BatchGetQueryExecution", checksum = "effdf281")]
+#[test_action("athena", "BatchGetQueryExecution", checksum = "49c5649b")]
 #[tokio::test]
 async fn athena_batch_get_query_execution() {
     let server = TestServer::start().await;
@@ -847,7 +847,7 @@ async fn athena_create_presigned_notebook_url() {
 
 // ─── Sessions / calculations ───────────────────────────────────────
 
-#[test_action("athena", "StartSession", checksum = "7782ed88")]
+#[test_action("athena", "StartSession", checksum = "b0d15419")]
 #[tokio::test]
 async fn athena_start_session() {
     let server = TestServer::start().await;
@@ -866,7 +866,7 @@ async fn athena_start_session() {
         .unwrap();
 }
 
-#[test_action("athena", "GetSession", checksum = "9b1d0a32")]
+#[test_action("athena", "GetSession", checksum = "8d73b189")]
 #[tokio::test]
 async fn athena_get_session() {
     let server = TestServer::start().await;

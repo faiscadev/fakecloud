@@ -14,9 +14,9 @@ use std::collections::HashMap;
 // Table lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "CreateTable", checksum = "936f2ca5")]
-#[test_action("dynamodb", "DescribeTable", checksum = "12fa1345")]
-#[test_action("dynamodb", "DeleteTable", checksum = "1272b76c")]
+#[test_action("dynamodb", "CreateTable", checksum = "2e19245f")]
+#[test_action("dynamodb", "DescribeTable", checksum = "07639b8e")]
+#[test_action("dynamodb", "DeleteTable", checksum = "ef2e5bd2")]
 #[tokio::test]
 async fn dynamodb_create_describe_delete_table() {
     let server = TestServer::start().await;
@@ -97,7 +97,7 @@ async fn dynamodb_list_tables() {
     assert!(resp.table_names().contains(&"ListMe".to_string()));
 }
 
-#[test_action("dynamodb", "UpdateTable", checksum = "5ceb80eb")]
+#[test_action("dynamodb", "UpdateTable", checksum = "4548eab5")]
 #[tokio::test]
 async fn dynamodb_update_table() {
     let server = TestServer::start().await;
@@ -1024,7 +1024,7 @@ async fn dynamodb_backup_lifecycle() {
         .unwrap();
 }
 
-#[test_action("dynamodb", "RestoreTableFromBackup", checksum = "e421fd42")]
+#[test_action("dynamodb", "RestoreTableFromBackup", checksum = "f0e09d84")]
 #[tokio::test]
 async fn dynamodb_restore_from_backup() {
     let server = TestServer::start().await;
@@ -1071,7 +1071,7 @@ async fn dynamodb_restore_from_backup() {
     assert!(resp.table_description().is_some());
 }
 
-#[test_action("dynamodb", "RestoreTableToPointInTime", checksum = "54ce5f95")]
+#[test_action("dynamodb", "RestoreTableToPointInTime", checksum = "9ec5a04b")]
 #[tokio::test]
 async fn dynamodb_restore_to_pitr() {
     let server = TestServer::start().await;

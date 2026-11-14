@@ -10,8 +10,8 @@ pub(crate) struct FieldConstraint {
     pub field: &'static str,
     pub len_min: Option<u64>,
     pub len_max: Option<u64>,
-    pub range_min: Option<i64>,
-    pub range_max: Option<i64>,
+    pub range_min: Option<f64>,
+    pub range_max: Option<f64>,
     pub enum_values: &'static [&'static str],
 }
 
@@ -239,6 +239,14 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             enum_values: &[],
         }],
         "BatchGetDataQualityResult" => &[FieldConstraint {
+            field: "ResultIds",
+            len_min: Some(1),
+            len_max: Some(100),
+            range_min: None,
+            range_max: None,
+            enum_values: &[],
+        }],
+        "BatchGetDataQualityResultV2" => &[FieldConstraint {
             field: "ResultIds",
             len_min: Some(1),
             len_max: Some(100),
@@ -541,8 +549,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "SampleSize",
                 len_min: None,
                 len_max: None,
-                range_min: Some(0),
-                range_max: Some(100),
+                range_min: Some(0.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -755,7 +763,10 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 len_max: None,
                 range_min: None,
                 range_max: None,
-                enum_values: &["Standard", "G.1X", "G.2X", "G.025X", "G.4X", "G.8X", "Z.2X"],
+                enum_values: &[
+                    "Standard", "G.1X", "G.2X", "G.4X", "G.8X", "G.025X", "Z.2X", "G.12X", "G.16X",
+                    "R.1X", "R.2X", "R.4X", "R.8X",
+                ],
             },
             FieldConstraint {
                 field: "GlueVersion",
@@ -973,7 +984,7 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -1007,7 +1018,10 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 len_max: None,
                 range_min: None,
                 range_max: None,
-                enum_values: &["Standard", "G.1X", "G.2X", "G.025X", "G.4X", "G.8X", "Z.2X"],
+                enum_values: &[
+                    "Standard", "G.1X", "G.2X", "G.4X", "G.8X", "G.025X", "Z.2X", "G.12X", "G.16X",
+                    "R.1X", "R.2X", "R.4X", "R.8X",
+                ],
             },
             FieldConstraint {
                 field: "ExecutionClass",
@@ -1057,13 +1071,16 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 len_max: None,
                 range_min: None,
                 range_max: None,
-                enum_values: &["Standard", "G.1X", "G.2X", "G.025X", "G.4X", "G.8X", "Z.2X"],
+                enum_values: &[
+                    "Standard", "G.1X", "G.2X", "G.4X", "G.8X", "G.025X", "Z.2X", "G.12X", "G.16X",
+                    "R.1X", "R.2X", "R.4X", "R.8X",
+                ],
             },
             FieldConstraint {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -1258,7 +1275,7 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -1266,7 +1283,7 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "IdleTimeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -1284,7 +1301,10 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 len_max: None,
                 range_min: None,
                 range_max: None,
-                enum_values: &["Standard", "G.1X", "G.2X", "G.025X", "G.4X", "G.8X", "Z.2X"],
+                enum_values: &[
+                    "Standard", "G.1X", "G.2X", "G.4X", "G.8X", "G.025X", "Z.2X", "G.12X", "G.16X",
+                    "R.1X", "R.2X", "R.4X", "R.8X",
+                ],
             },
             FieldConstraint {
                 field: "SecurityConfiguration",
@@ -2248,8 +2268,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -2282,8 +2302,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -2299,8 +2319,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetColumnStatisticsForPartition" => &[
@@ -2392,8 +2412,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -2470,8 +2490,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -2496,8 +2516,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -2505,8 +2525,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetCustomEntityType" => &[FieldConstraint {
@@ -2595,6 +2615,14 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             range_max: None,
             enum_values: &[],
         }],
+        "GetDataQualityResultV2" => &[FieldConstraint {
+            field: "ResultId",
+            len_min: Some(1),
+            len_max: Some(255),
+            range_min: None,
+            range_max: None,
+            enum_values: &[],
+        }],
         "GetDataQualityRuleRecommendationRun" => &[FieldConstraint {
             field: "RunId",
             len_min: Some(1),
@@ -2650,8 +2678,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(100),
+                range_min: Some(1.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -2667,8 +2695,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetEntityRecords" => &[
@@ -2724,8 +2752,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "Limit",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -2810,8 +2838,26 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(200),
+                range_min: Some(1.0),
+                range_max: Some(200.0),
+                enum_values: &[],
+            },
+        ],
+        "GetJobUpgradeAnalysis" => &[
+            FieldConstraint {
+                field: "analysisId",
+                len_min: Some(39),
+                len_max: Some(39),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "jobName",
+                len_min: Some(1),
+                len_max: Some(255),
+                range_min: None,
+                range_max: None,
                 enum_values: &[],
             },
         ],
@@ -2819,8 +2865,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetMLTaskRun" => &[
@@ -2854,8 +2900,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -2871,8 +2917,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetMaterializedViewRefreshTaskRun" => &[FieldConstraint {
@@ -2972,8 +3018,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -2997,8 +3043,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetResourcePolicy" => &[FieldConstraint {
@@ -3045,8 +3091,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "GetSession" => &[
@@ -3250,8 +3296,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(100),
+                range_min: Some(1.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
         ],
@@ -3284,8 +3330,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(100),
+                range_min: Some(1.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3334,8 +3380,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(200),
+                range_min: Some(1.0),
+                range_max: Some(200.0),
                 enum_values: &[],
             },
         ],
@@ -3434,8 +3480,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -3568,8 +3614,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(100),
+                range_min: Some(1.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
         ],
@@ -3630,8 +3676,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -3647,8 +3693,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListBlueprints" => &[
@@ -3656,8 +3702,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(25),
+                range_min: Some(1.0),
+                range_max: Some(25.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3673,8 +3719,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListConnectionTypes" => &[
@@ -3682,8 +3728,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(100),
+                range_min: Some(1.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3700,8 +3746,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3726,8 +3772,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -3736,8 +3782,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3753,8 +3799,16 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
+            enum_values: &[],
+        }],
+        "ListDataQualityResultsV2" => &[FieldConstraint {
+            field: "MaxResults",
+            len_min: None,
+            len_max: None,
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListDataQualityRuleRecommendationRuns" => &[
@@ -3762,8 +3816,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3779,8 +3833,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListDataQualityRulesets" => &[
@@ -3788,8 +3842,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3822,8 +3876,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -3848,8 +3902,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -3858,8 +3912,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3909,24 +3963,24 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListGlossaries" => &[FieldConstraint {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListGlossaryTerms" => &[FieldConstraint {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(1000),
+            range_min: Some(1.0),
+            range_max: Some(1000.0),
             enum_values: &[],
         }],
         "ListIntegrationResourceProperties" => &[FieldConstraint {
@@ -3966,8 +4020,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -3976,8 +4030,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -3994,8 +4048,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -4036,8 +4090,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
         ],
@@ -4045,24 +4099,24 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(100),
+            range_min: Some(1.0),
+            range_max: Some(100.0),
             enum_values: &[],
         }],
         "ListSchemaVersions" => &[FieldConstraint {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(100),
+            range_min: Some(1.0),
+            range_max: Some(100.0),
             enum_values: &[],
         }],
         "ListSchemas" => &[FieldConstraint {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(100),
+            range_min: Some(1.0),
+            range_max: Some(100.0),
             enum_values: &[],
         }],
         "ListSessions" => &[
@@ -4078,8 +4132,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -4172,8 +4226,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(200),
+                range_min: Some(1.0),
+                range_max: Some(200.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -4198,8 +4252,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(200),
+                range_min: Some(1.0),
+                range_max: Some(200.0),
                 enum_values: &[],
             },
         ],
@@ -4207,8 +4261,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             field: "MaxResults",
             len_min: None,
             len_max: None,
-            range_min: Some(1),
-            range_max: Some(25),
+            range_min: Some(1.0),
+            range_max: Some(25.0),
             enum_values: &[],
         }],
         "ModifyIntegration" => &[
@@ -4240,6 +4294,96 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "IntegrationName",
                 len_min: Some(1),
                 len_max: Some(128),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+        ],
+        "PublishDataQualityResultV2" => &[
+            FieldConstraint {
+                field: "Dimensions",
+                len_min: Some(1),
+                len_max: Some(10),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "Tags",
+                len_min: Some(1),
+                len_max: Some(5),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "Score",
+                len_min: None,
+                len_max: None,
+                range_min: Some(0.0),
+                range_max: Some(1.0),
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "RuleResults",
+                len_min: Some(0),
+                len_max: Some(2000),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "AnalyzerResults",
+                len_min: Some(0),
+                len_max: Some(2000),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "Observations",
+                len_min: Some(0),
+                len_max: Some(50),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "ClientToken",
+                len_min: Some(1),
+                len_max: Some(64),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "EvaluationContext",
+                len_min: Some(1),
+                len_max: Some(255),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "Descriptors",
+                len_min: Some(0),
+                len_max: Some(10),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "RulesetName",
+                len_min: Some(1),
+                len_max: Some(255),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "DataQualitySecurityConfiguration",
+                len_min: Some(1),
+                len_max: Some(255),
                 range_min: None,
                 range_max: None,
                 enum_values: &[],
@@ -4498,8 +4642,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(50),
+                range_min: Some(1.0),
+                range_max: Some(50.0),
                 enum_values: &[],
             },
         ],
@@ -4610,8 +4754,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(100),
+                range_min: Some(1.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
         ],
@@ -4644,8 +4788,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "MaxResults",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
-                range_max: Some(1000),
+                range_min: Some(1.0),
+                range_max: Some(1000.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -4712,8 +4856,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "SampleSize",
                 len_min: None,
                 len_max: None,
-                range_min: Some(0),
-                range_max: Some(100),
+                range_min: Some(0.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -4780,7 +4924,7 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -4822,7 +4966,7 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -4880,7 +5024,7 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -4898,7 +5042,10 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 len_max: None,
                 range_min: None,
                 range_max: None,
-                enum_values: &["Standard", "G.1X", "G.2X", "G.025X", "G.4X", "G.8X", "Z.2X"],
+                enum_values: &[
+                    "Standard", "G.1X", "G.2X", "G.4X", "G.8X", "G.025X", "Z.2X", "G.12X", "G.16X",
+                    "R.1X", "R.2X", "R.4X", "R.8X",
+                ],
             },
             FieldConstraint {
                 field: "ExecutionClass",
@@ -4915,6 +5062,32 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 range_min: None,
                 range_max: None,
                 enum_values: &[],
+            },
+        ],
+        "StartJobUpgradeAnalysis" => &[
+            FieldConstraint {
+                field: "jobName",
+                len_min: Some(1),
+                len_max: Some(255),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "analysisId",
+                len_min: Some(39),
+                len_max: Some(39),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "upgradeConsent",
+                len_min: None,
+                len_max: None,
+                range_min: None,
+                range_max: None,
+                enum_values: &["APPROVE", "DECLINE"],
             },
         ],
         "StartMLEvaluationTaskRun" => &[FieldConstraint {
@@ -5035,6 +5208,24 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
             range_max: None,
             enum_values: &[],
         }],
+        "StopJobUpgradeAnalysis" => &[
+            FieldConstraint {
+                field: "jobName",
+                len_min: Some(1),
+                len_max: Some(255),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+            FieldConstraint {
+                field: "analysisId",
+                len_min: Some(39),
+                len_max: Some(39),
+                range_min: None,
+                range_max: None,
+                enum_values: &[],
+            },
+        ],
         "StopMaterializedViewRefreshTaskRun" => &[
             FieldConstraint {
                 field: "CatalogId",
@@ -5308,8 +5499,8 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 field: "SampleSize",
                 len_min: None,
                 len_max: None,
-                range_min: Some(0),
-                range_max: Some(100),
+                range_min: Some(0.0),
+                range_max: Some(100.0),
                 enum_values: &[],
             },
             FieldConstraint {
@@ -5682,13 +5873,16 @@ pub(crate) fn constraints_for(action: &str) -> &'static [FieldConstraint] {
                 len_max: None,
                 range_min: None,
                 range_max: None,
-                enum_values: &["Standard", "G.1X", "G.2X", "G.025X", "G.4X", "G.8X", "Z.2X"],
+                enum_values: &[
+                    "Standard", "G.1X", "G.2X", "G.4X", "G.8X", "G.025X", "Z.2X", "G.12X", "G.16X",
+                    "R.1X", "R.2X", "R.4X", "R.8X",
+                ],
             },
             FieldConstraint {
                 field: "Timeout",
                 len_min: None,
                 len_max: None,
-                range_min: Some(1),
+                range_min: Some(1.0),
                 range_max: None,
                 enum_values: &[],
             },
@@ -6008,6 +6202,7 @@ pub(crate) fn declares_invalid_input(action: &str) -> bool {
             | "BatchGetCrawlers"
             | "BatchGetCustomEntityTypes"
             | "BatchGetDataQualityResult"
+            | "BatchGetDataQualityResultV2"
             | "BatchGetDataQualityRulesetEvaluationRun"
             | "BatchGetDevEndpoints"
             | "BatchGetIterableForms"
@@ -6116,6 +6311,7 @@ pub(crate) fn declares_invalid_input(action: &str) -> bool {
             | "GetDataQualityModel"
             | "GetDataQualityModelResult"
             | "GetDataQualityResult"
+            | "GetDataQualityResultV2"
             | "GetDataQualityRuleRecommendationRun"
             | "GetDataQualityRuleset"
             | "GetDataQualityRulesetEvaluationRun"
@@ -6133,6 +6329,7 @@ pub(crate) fn declares_invalid_input(action: &str) -> bool {
             | "GetJobBookmark"
             | "GetJobRun"
             | "GetJobRuns"
+            | "GetJobUpgradeAnalysis"
             | "GetJobs"
             | "GetMLTaskRun"
             | "GetMLTaskRuns"
@@ -6181,6 +6378,7 @@ pub(crate) fn declares_invalid_input(action: &str) -> bool {
             | "ListCrawls"
             | "ListCustomEntityTypes"
             | "ListDataQualityResults"
+            | "ListDataQualityResultsV2"
             | "ListDataQualityRuleRecommendationRuns"
             | "ListDataQualityRulesetEvaluationRuns"
             | "ListDataQualityRulesets"
@@ -6207,6 +6405,7 @@ pub(crate) fn declares_invalid_input(action: &str) -> bool {
             | "ListUsageProfiles"
             | "ListWorkflows"
             | "ModifyIntegration"
+            | "PublishDataQualityResultV2"
             | "PutAsset"
             | "PutAssetType"
             | "PutAttachment"
@@ -6234,12 +6433,14 @@ pub(crate) fn declares_invalid_input(action: &str) -> bool {
             | "StartExportLabelsTaskRun"
             | "StartImportLabelsTaskRun"
             | "StartJobRun"
+            | "StartJobUpgradeAnalysis"
             | "StartMLEvaluationTaskRun"
             | "StartMLLabelingSetGenerationTaskRun"
             | "StartMaterializedViewRefreshTaskRun"
             | "StartTrigger"
             | "StartWorkflowRun"
             | "StopColumnStatisticsTaskRunSchedule"
+            | "StopJobUpgradeAnalysis"
             | "StopMaterializedViewRefreshTaskRun"
             | "StopSession"
             | "StopTrigger"

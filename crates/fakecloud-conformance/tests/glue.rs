@@ -91,17 +91,17 @@ async fn database_lifecycle() {
 }
 
 #[test_action("glue", "CreateTable", checksum = "7c199a41")]
-#[test_action("glue", "GetTable", checksum = "78029ca4")]
-#[test_action("glue", "GetTables", checksum = "15b153e1")]
+#[test_action("glue", "GetTable", checksum = "cfc03219")]
+#[test_action("glue", "GetTables", checksum = "e677866e")]
 #[test_action("glue", "UpdateTable", checksum = "03d09ed7")]
 #[test_action("glue", "DeleteTable", checksum = "6e87f081")]
-#[test_action("glue", "SearchTables", checksum = "bf213b9f")]
-#[test_action("glue", "GetTableVersion", checksum = "f8c663c5")]
-#[test_action("glue", "GetTableVersions", checksum = "5c7e00bd")]
+#[test_action("glue", "SearchTables", checksum = "adf6b78e")]
+#[test_action("glue", "GetTableVersion", checksum = "1732b994")]
+#[test_action("glue", "GetTableVersions", checksum = "88811a8d")]
 #[test_action("glue", "DeleteTableVersion", checksum = "6b333c1a")]
 #[test_action("glue", "BatchDeleteTableVersion", checksum = "4ee84752")]
 #[test_action("glue", "BatchDeleteTable", checksum = "88fe68f8")]
-#[test_action("glue", "GetUnfilteredTableMetadata", checksum = "6c1562be")]
+#[test_action("glue", "GetUnfilteredTableMetadata", checksum = "f31e36a7")]
 #[tokio::test]
 async fn table_lifecycle() {
     let server = TestServer::start().await;
@@ -382,16 +382,16 @@ async fn partition_lifecycle() {
 // Jobs, job runs, bookmarks
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateJob", checksum = "a9db5691")]
-#[test_action("glue", "GetJob", checksum = "77a96892")]
-#[test_action("glue", "GetJobs", checksum = "6851e3e8")]
+#[test_action("glue", "CreateJob", checksum = "cbf57481")]
+#[test_action("glue", "GetJob", checksum = "9e42ed8a")]
+#[test_action("glue", "GetJobs", checksum = "797cf3cb")]
 #[test_action("glue", "ListJobs", checksum = "93e4dce9")]
-#[test_action("glue", "UpdateJob", checksum = "38eb8c22")]
+#[test_action("glue", "UpdateJob", checksum = "78d4bf25")]
 #[test_action("glue", "DeleteJob", checksum = "4083b5e4")]
-#[test_action("glue", "BatchGetJobs", checksum = "7c958799")]
-#[test_action("glue", "StartJobRun", checksum = "838ccbfd")]
-#[test_action("glue", "GetJobRun", checksum = "97d9b62c")]
-#[test_action("glue", "GetJobRuns", checksum = "a6746968")]
+#[test_action("glue", "BatchGetJobs", checksum = "90b9d9de")]
+#[test_action("glue", "StartJobRun", checksum = "7ef76974")]
+#[test_action("glue", "GetJobRun", checksum = "d0b5eb60")]
+#[test_action("glue", "GetJobRuns", checksum = "9d3761a5")]
 #[test_action("glue", "BatchStopJobRun", checksum = "a8bfd43c")]
 #[test_action("glue", "GetJobBookmark", checksum = "0f127a53")]
 #[test_action("glue", "ResetJobBookmark", checksum = "561c3632")]
@@ -899,14 +899,14 @@ async fn trigger_lifecycle() {
 }
 
 #[test_action("glue", "CreateWorkflow", checksum = "ca63809a")]
-#[test_action("glue", "GetWorkflow", checksum = "1b96904c")]
+#[test_action("glue", "GetWorkflow", checksum = "a08ab4b9")]
 #[test_action("glue", "ListWorkflows", checksum = "1e3d60c1")]
-#[test_action("glue", "BatchGetWorkflows", checksum = "f9be7f11")]
+#[test_action("glue", "BatchGetWorkflows", checksum = "f2af3192")]
 #[test_action("glue", "UpdateWorkflow", checksum = "5072ffc0")]
 #[test_action("glue", "DeleteWorkflow", checksum = "e46038d6")]
 #[test_action("glue", "StartWorkflowRun", checksum = "a224cc53")]
-#[test_action("glue", "GetWorkflowRun", checksum = "552d8eb7")]
-#[test_action("glue", "GetWorkflowRuns", checksum = "a1568649")]
+#[test_action("glue", "GetWorkflowRun", checksum = "3064cfb7")]
+#[test_action("glue", "GetWorkflowRuns", checksum = "4f1f8ca5")]
 #[test_action("glue", "GetWorkflowRunProperties", checksum = "c26a6f2d")]
 #[test_action("glue", "PutWorkflowRunProperties", checksum = "322dfba1")]
 #[test_action("glue", "StopWorkflowRun", checksum = "3e38c2d6")]
@@ -1062,11 +1062,11 @@ async fn blueprint_lifecycle() {
     glue.delete_blueprint().name("bp").send().await.unwrap();
 }
 
-#[test_action("glue", "CreateDevEndpoint", checksum = "2b882a55")]
-#[test_action("glue", "GetDevEndpoint", checksum = "16feeac1")]
-#[test_action("glue", "GetDevEndpoints", checksum = "9e57c705")]
+#[test_action("glue", "CreateDevEndpoint", checksum = "627f97c3")]
+#[test_action("glue", "GetDevEndpoint", checksum = "2bddc7cd")]
+#[test_action("glue", "GetDevEndpoints", checksum = "0ed6f407")]
 #[test_action("glue", "ListDevEndpoints", checksum = "12de5690")]
-#[test_action("glue", "BatchGetDevEndpoints", checksum = "355c5c89")]
+#[test_action("glue", "BatchGetDevEndpoints", checksum = "de4501f0")]
 #[test_action("glue", "UpdateDevEndpoint", checksum = "ccd83c9b")]
 #[test_action("glue", "DeleteDevEndpoint", checksum = "8acdc4ae")]
 #[tokio::test]
@@ -1291,9 +1291,9 @@ async fn schema_registry_lifecycle() {
 // Sessions and statements
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateSession", checksum = "ffdec0fb")]
-#[test_action("glue", "GetSession", checksum = "eab70118")]
-#[test_action("glue", "ListSessions", checksum = "45116557")]
+#[test_action("glue", "CreateSession", checksum = "be238621")]
+#[test_action("glue", "GetSession", checksum = "36752880")]
+#[test_action("glue", "ListSessions", checksum = "7e09fd15")]
 #[test_action("glue", "StopSession", checksum = "17e56dd4")]
 #[test_action("glue", "DeleteSession", checksum = "c20b8b75")]
 #[test_action("glue", "RunStatement", checksum = "bac28d6f")]
@@ -1581,11 +1581,11 @@ async fn batch_get_data_quality_ruleset_evaluation_run() {
 // ML transforms, ML task runs
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateMLTransform", checksum = "a55215e9")]
-#[test_action("glue", "GetMLTransform", checksum = "deefb508")]
-#[test_action("glue", "GetMLTransforms", checksum = "c7f0b2e0")]
-#[test_action("glue", "ListMLTransforms", checksum = "f61628fb")]
-#[test_action("glue", "UpdateMLTransform", checksum = "e7245f3c")]
+#[test_action("glue", "CreateMLTransform", checksum = "5f5c0592")]
+#[test_action("glue", "GetMLTransform", checksum = "408a55a7")]
+#[test_action("glue", "GetMLTransforms", checksum = "c868f3ce")]
+#[test_action("glue", "ListMLTransforms", checksum = "fa59ba00")]
+#[test_action("glue", "UpdateMLTransform", checksum = "0d7d644f")]
 #[test_action("glue", "DeleteMLTransform", checksum = "8ca0e796")]
 #[test_action("glue", "StartMLEvaluationTaskRun", checksum = "b6439462")]
 #[test_action("glue", "StartMLLabelingSetGenerationTaskRun", checksum = "6d623d17")]
@@ -1957,10 +1957,10 @@ async fn custom_entity_type_lifecycle() {
         .unwrap();
 }
 
-#[test_action("glue", "CreateUserDefinedFunction", checksum = "9c7feb30")]
-#[test_action("glue", "GetUserDefinedFunction", checksum = "68bc9871")]
-#[test_action("glue", "GetUserDefinedFunctions", checksum = "1df0d804")]
-#[test_action("glue", "UpdateUserDefinedFunction", checksum = "f171b634")]
+#[test_action("glue", "CreateUserDefinedFunction", checksum = "52319c23")]
+#[test_action("glue", "GetUserDefinedFunction", checksum = "079101cb")]
+#[test_action("glue", "GetUserDefinedFunctions", checksum = "4890c4d4")]
+#[test_action("glue", "UpdateUserDefinedFunction", checksum = "b112e629")]
 #[test_action("glue", "DeleteUserDefinedFunction", checksum = "2ee4d9da")]
 #[tokio::test]
 async fn udf_lifecycle() {
@@ -2142,10 +2142,10 @@ async fn table_optimizer_lifecycle() {
 // Integrations, integration resource/table properties, identity center
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateIntegration", checksum = "b6fc9efd")]
-#[test_action("glue", "ModifyIntegration", checksum = "7d0a6f5b")]
-#[test_action("glue", "DescribeIntegrations", checksum = "c21aa1ee")]
-#[test_action("glue", "DescribeInboundIntegrations", checksum = "43d02f1f")]
+#[test_action("glue", "CreateIntegration", checksum = "b417c9af")]
+#[test_action("glue", "ModifyIntegration", checksum = "b3fcfde2")]
+#[test_action("glue", "DescribeIntegrations", checksum = "c13bc862")]
+#[test_action("glue", "DescribeInboundIntegrations", checksum = "fa2bbc63")]
 #[test_action("glue", "DeleteIntegration", checksum = "3f0e1131")]
 #[test_action("glue", "CreateIntegrationResourceProperty", checksum = "deb6c2c9")]
 #[test_action("glue", "GetIntegrationResourceProperty", checksum = "97ca2162")]

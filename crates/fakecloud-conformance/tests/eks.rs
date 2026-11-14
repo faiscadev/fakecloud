@@ -3,11 +3,11 @@ mod helpers;
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
-#[test_action("eks", "CreateCluster", checksum = "4685a2b5")]
-#[test_action("eks", "DescribeCluster", checksum = "6b04bdb1")]
+#[test_action("eks", "CreateCluster", checksum = "0f032bd1")]
+#[test_action("eks", "DescribeCluster", checksum = "a7b8e589")]
 #[test_action("eks", "ListClusters", checksum = "464ec628")]
-#[test_action("eks", "DeleteCluster", checksum = "8867e98f")]
-#[test_action("eks", "UpdateClusterConfig", checksum = "3ad3e6df")]
+#[test_action("eks", "DeleteCluster", checksum = "e2357477")]
+#[test_action("eks", "UpdateClusterConfig", checksum = "3b69ef5f")]
 #[test_action("eks", "UpdateClusterVersion", checksum = "0812412e")]
 #[test_action("eks", "DescribeUpdate", checksum = "9ca7e429")]
 #[test_action("eks", "ListUpdates", checksum = "7e756829")]
@@ -55,8 +55,8 @@ use helpers::TestServer;
 #[test_action("eks", "StartInsightsRefresh", checksum = "2982bc3d")]
 #[test_action("eks", "AssociateEncryptionConfig", checksum = "ee0fb341")]
 #[test_action("eks", "CancelUpdate", checksum = "09b8d13a")]
-#[test_action("eks", "DeregisterCluster", checksum = "971c9eca")]
-#[test_action("eks", "RegisterCluster", checksum = "a5d5a220")]
+#[test_action("eks", "DeregisterCluster", checksum = "f23cded4")]
+#[test_action("eks", "RegisterCluster", checksum = "99a24337")]
 #[test_action("eks", "DescribeClusterVersions", checksum = "14acbe50")]
 #[test_action("eks", "CreateCapability", checksum = "cba5ba6d")]
 #[test_action("eks", "DeleteCapability", checksum = "743e83c4")]

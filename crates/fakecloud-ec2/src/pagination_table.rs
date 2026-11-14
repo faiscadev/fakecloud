@@ -1204,6 +1204,13 @@ pub(crate) const PAGED_OPS: &[PagedOp] = &[
         refusal: MaxResultsRefusal::Generic,
     },
     PagedOp {
+        action: "GetImageFindings",
+        sets: &["imageFindingSet"],
+        layout: SetLayout::Concat,
+        max_results: Some((1, 1000)),
+        refusal: MaxResultsRefusal::Generic,
+    },
+    PagedOp {
         action: "GetInstanceTypesFromInstanceRequirements",
         sets: &["instanceTypeSet"],
         layout: SetLayout::Concat,

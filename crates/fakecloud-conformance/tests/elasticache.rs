@@ -1011,7 +1011,7 @@ async fn elasticache_test_failover() {
     );
 }
 
-#[test_action("elasticache", "CreateServerlessCache", checksum = "5e61acb6")]
+#[test_action("elasticache", "CreateServerlessCache", checksum = "387b7159")]
 #[tokio::test]
 async fn elasticache_create_serverless_cache() {
     let server = TestServer::start().await;
@@ -1039,7 +1039,7 @@ async fn elasticache_create_serverless_cache() {
     assert_eq!(cache.status(), Some("creating"));
 }
 
-#[test_action("elasticache", "DescribeServerlessCaches", checksum = "507b849d")]
+#[test_action("elasticache", "DescribeServerlessCaches", checksum = "634cc9d4")]
 #[tokio::test]
 async fn elasticache_describe_serverless_caches() {
     let server = TestServer::start().await;
@@ -1065,7 +1065,7 @@ async fn elasticache_describe_serverless_caches() {
     assert_eq!(caches[0].serverless_cache_name(), Some("desc-serverless"));
 }
 
-#[test_action("elasticache", "ModifyServerlessCache", checksum = "45677420")]
+#[test_action("elasticache", "ModifyServerlessCache", checksum = "228b847d")]
 #[tokio::test]
 async fn elasticache_modify_serverless_cache() {
     let server = TestServer::start().await;
@@ -1095,7 +1095,7 @@ async fn elasticache_modify_serverless_cache() {
     assert_eq!(cache.snapshot_retention_limit(), Some(9));
 }
 
-#[test_action("elasticache", "DeleteServerlessCache", checksum = "5eadd252")]
+#[test_action("elasticache", "DeleteServerlessCache", checksum = "54290730")]
 #[tokio::test]
 async fn elasticache_delete_serverless_cache() {
     let server = TestServer::start().await;
@@ -1741,9 +1741,9 @@ async fn elasticache_serverless_cache_snapshot_copy_export() {
         .unwrap();
 }
 
-#[test_action("elasticache", "StartMigration", checksum = "1b866746")]
-#[test_action("elasticache", "CompleteMigration", checksum = "ad9548cc")]
-#[test_action("elasticache", "TestMigration", checksum = "a1e60d57")]
+#[test_action("elasticache", "StartMigration", checksum = "7f126907")]
+#[test_action("elasticache", "CompleteMigration", checksum = "279d4e1b")]
+#[test_action("elasticache", "TestMigration", checksum = "7d58e430")]
 #[tokio::test]
 async fn elasticache_migration_lifecycle() {
     let server = TestServer::start().await;
