@@ -664,6 +664,32 @@ fn not_found_and_validation() {
 }
 
 #[test]
+fn list_instances_region_scope_filters_by_calling_region() {
+    let s = svc();
+    new_instance(&s);
+    let mut west = req("CreateInstance", json!({ "Name": "west" }));
+    west.region = "us-west-2".into();
+    dispatch(&s, &west).expect("create in us-west-2");
+
+    // Default and CURRENT_REGION: only the us-east-1 instance.
+    let list = call(&s, "ListInstances", json!({}));
+    assert_eq!(list["Instances"].as_array().unwrap().len(), 1);
+    assert_eq!(list["Instances"][0]["Name"], json!("corp"));
+    let list = call(
+        &s,
+        "ListInstances",
+        json!({ "RegionScope": "CURRENT_REGION" }),
+    );
+    assert_eq!(list["Instances"].as_array().unwrap().len(), 1);
+
+    let list = call(&s, "ListInstances", json!({ "RegionScope": "ALL_REGIONS" }));
+    assert_eq!(list["Instances"].as_array().unwrap().len(), 2);
+
+    let e = err(&s, "ListInstances", json!({ "RegionScope": "EVERYWHERE" }));
+    assert_eq!(e.code(), "ValidationException");
+}
+
+#[test]
 fn list_account_assignments_for_principal_filters_by_principal_type() {
     let s = svc();
     let inst = new_instance(&s);
