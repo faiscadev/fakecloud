@@ -211,10 +211,7 @@ pub fn reconcile_interrupted_executions(state: &SharedStepFunctionsState) -> usi
         }
         // Their map runs can't go on either.
         for run in s.map_runs.values_mut() {
-            if run.status == "RUNNING" {
-                run.status = "ABORTED".to_string();
-                run.stop_date = Some(now);
-            }
+            run.abort(now);
         }
     }
     count
@@ -369,10 +366,9 @@ fn state_machine_alias_to_json(alias: &crate::state::StateMachineAlias) -> Value
 }
 
 fn map_run_to_json(mr: &crate::state::MapRun, children: &[&Execution]) -> Value {
-    let (item_counts, execution_counts) = if children.is_empty() {
-        // A run whose iterations never became child executions (persisted
-        // before they did): its recorded tallies, alike for items and
-        // executions.
+    let (item_counts, execution_counts) = if mr.state_machine_arn.is_empty() {
+        // A run persisted before its iterations became child executions: its
+        // recorded tallies, alike for items and executions.
         let counts = recorded_map_run_counts(mr);
         (counts.clone(), counts)
     } else {
@@ -418,10 +414,11 @@ fn child_counts(
     let failed = tally(ExecutionStatus::Failed);
     let started: i64 = children.iter().map(|c| weight(c)).sum();
     let unstarted = (total - started).max(0);
+    // A run that failed past its tolerance leaves the rest pending, as its
+    // `ResultWriter` reports them; one stopped with its parent, aborted.
     let (pending, aborted_unstarted) = match mr.status.as_str() {
-        "RUNNING" => (unstarted, 0),
         "ABORTED" => (0, unstarted),
-        _ => (0, 0),
+        _ => (unstarted, 0),
     };
     json!({
         "pending": pending,
@@ -3894,6 +3891,16 @@ mod tests {
         let svc = StepFunctionsService::new(state.clone());
         let execution_arn =
             "arn:aws:states:us-east-1:123456789012:execution:dist-sm:exec-1".to_string();
+        // The execution StartExecution records, which its map run's children
+        // run under.
+        state
+            .write()
+            .regional_mut("123456789012", "us-east-1")
+            .executions
+            .insert(
+                execution_arn.clone(),
+                make_execution(&execution_arn, ExecutionStatus::Running),
+            );
 
         let def = json!({
             "StartAt": "M",

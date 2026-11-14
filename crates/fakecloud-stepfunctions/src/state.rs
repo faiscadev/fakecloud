@@ -179,6 +179,18 @@ pub struct MapRun {
     pub item_total: i64,
 }
 
+impl MapRun {
+    /// Stop a running map run with its parent; `false` if it had ended.
+    pub fn abort(&mut self, now: DateTime<Utc>) -> bool {
+        if self.status != "RUNNING" {
+            return false;
+        }
+        self.status = "ABORTED".to_string();
+        self.stop_date = Some(now);
+        true
+    }
+}
+
 fn default_child_type() -> StateMachineType {
     StateMachineType::Standard
 }

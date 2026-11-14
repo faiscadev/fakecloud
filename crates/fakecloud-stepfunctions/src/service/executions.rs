@@ -632,25 +632,28 @@ impl StepFunctionsService {
 }
 
 /// A stopped execution's map runs stop with it, and so do their children
-/// still running: the iterations that finish later leave them as they are.
+/// still running, and theirs in turn: the iterations that finish later leave
+/// them as they are.
 fn abort_map_runs(state: &mut StepFunctionsState, execution_arn: &str, now: chrono::DateTime<Utc>) {
-    let mut aborted = Vec::new();
-    for run in state.map_runs.values_mut() {
-        if run.execution_arn == execution_arn && run.status == "RUNNING" {
-            run.status = "ABORTED".to_string();
-            run.stop_date = Some(now);
-            aborted.push(run.map_run_arn.clone());
+    let mut stopped = vec![execution_arn.to_string()];
+    while let Some(parent) = stopped.pop() {
+        let mut aborted = Vec::new();
+        for run in state.map_runs.values_mut() {
+            if run.execution_arn == parent && run.abort(now) {
+                aborted.push(run.map_run_arn.clone());
+            }
         }
-    }
-    for child in state.executions.values_mut() {
-        let in_run = child
-            .map_run_arn
-            .as_ref()
-            .is_some_and(|arn| aborted.contains(arn));
-        if in_run && child.status == ExecutionStatus::Running {
-            child.status = ExecutionStatus::Aborted;
-            child.stop_date = Some(now);
-            push_aborted_event(child, now);
+        for child in state.executions.values_mut() {
+            let in_run = child
+                .map_run_arn
+                .as_ref()
+                .is_some_and(|arn| aborted.contains(arn));
+            if in_run && child.status == ExecutionStatus::Running {
+                child.status = ExecutionStatus::Aborted;
+                child.stop_date = Some(now);
+                push_aborted_event(child, now);
+                stopped.push(child.execution_arn.clone());
+            }
         }
     }
 }

@@ -1532,7 +1532,19 @@ async fn run_map_iterations(
                             Ok(output) => succeed_execution(&state, &child.arn, output),
                             Err((error, cause)) => fail_execution(&state, &child.arn, error, cause),
                         }
-                        result
+                        let logging = execution_logging_configuration(&state, &arn);
+                        deliver_execution_logs(
+                            &state,
+                            &child.arn,
+                            delivery.as_ref(),
+                            logging.as_ref(),
+                        );
+                        // A child stopped on its own did not succeed, whatever
+                        // its states went on to return.
+                        match aborted_with(&state, &child.arn) {
+                            Some(failure) => Err(failure),
+                            None => result,
+                        }
                     }
                     None => {
                         run_states(&iter_def, item_input, &delivery, &ddb, &reg, &state, &arn).await
@@ -1833,6 +1845,40 @@ fn finish_map_run(
     }
     mr.stop_date = Some(Utc::now());
     true
+}
+
+/// The logging configuration of `execution_arn`'s state machine, which its
+/// map run children log under too.
+fn execution_logging_configuration(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Option<Value> {
+    let accounts = shared_state.read();
+    let state = accounts.by_arn(execution_arn)?;
+    let exec = state.executions.get(execution_arn)?;
+    state
+        .state_machines
+        .get(&exec.state_machine_arn)?
+        .logging_configuration
+        .clone()
+}
+
+/// The error and cause an execution was stopped with, if it was stopped.
+fn aborted_with(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Option<(String, String)> {
+    let accounts = shared_state.read();
+    let exec = accounts
+        .by_arn(execution_arn)?
+        .executions
+        .get(execution_arn)?;
+    (exec.status == ExecutionStatus::Aborted).then(|| {
+        (
+            exec.error.clone().unwrap_or_default(),
+            exec.cause.clone().unwrap_or_default(),
+        )
+    })
 }
 
 /// Whether a map run is still running: not stopped with its parent.

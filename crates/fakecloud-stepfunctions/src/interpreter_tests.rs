@@ -2753,3 +2753,107 @@ fn map_run_arns_hang_off_the_machine_and_label_for_both_types() {
     );
     assert_eq!(name.split(':').count(), 2, "{name}");
 }
+
+#[derive(Default)]
+struct RecordedLogs(parking_lot::Mutex<Vec<(String, String)>>);
+
+impl fakecloud_core::delivery::CloudwatchLogsDelivery for RecordedLogs {
+    fn put_log_events(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        log_group_name: &str,
+        log_stream_name: &str,
+        _events: &[(i64, String)],
+    ) {
+        self.0
+            .lock()
+            .push((log_group_name.to_string(), log_stream_name.to_string()));
+    }
+}
+
+/// A map run's children log under their state machine's logging
+/// configuration, each to a stream of its own, and a log group ARN in AWS's
+/// own `log-group:<name>:*` form names `<name>`.
+#[test]
+fn map_run_children_log_under_the_state_machine() {
+    let state = make_state();
+    let logging = json!({
+        "level": "ALL",
+        "includeExecutionData": false,
+        "destinations": [{"cloudWatchLogsLogGroup": {
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:sfn-dmap:*"
+        }}]
+    });
+    state
+        .write()
+        .regional_mut("123456789012", "us-east-1")
+        .state_machines
+        .insert(
+            "arn:aws:states:us-east-1:123456789012:stateMachine:test".to_string(),
+            crate::state::StateMachine {
+                name: "test".to_string(),
+                arn: "arn:aws:states:us-east-1:123456789012:stateMachine:test".to_string(),
+                definition: String::new(),
+                role_arn: String::new(),
+                machine_type: crate::state::StateMachineType::Standard,
+                status: crate::state::StateMachineStatus::Active,
+                creation_date: Utc::now(),
+                update_date: Utc::now(),
+                tags: Default::default(),
+                revision_id: String::new(),
+                logging_configuration: Some(logging.clone()),
+                tracing_configuration: None,
+                description: String::new(),
+                encryption_configuration: None,
+            },
+        );
+    let logs = Arc::new(RecordedLogs::default());
+    let delivery = Arc::new(DeliveryBus::new().with_cloudwatch_logs(logs.clone()));
+    let arn = arn_for("logged");
+    create_execution(&state, &arn, Some("[1]".to_string()));
+    let fut = execute_state_machine(
+        state.clone(),
+        arn.clone(),
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"P","States":{"P":{"Type":"Pass","End":true}}
+            },
+            "End":true
+        }}})
+        .to_string(),
+        Some("[1]".to_string()),
+        Some(delivery),
+        None,
+        None,
+        Some(logging),
+    );
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(fut);
+    let child = {
+        let accounts = state.read();
+        accounts
+            .default_regional()
+            .unwrap()
+            .executions
+            .values()
+            .find(|e| e.map_run_arn.is_some())
+            .expect("a child execution")
+            .name
+            .clone()
+    };
+    let delivered = logs.0.lock().clone();
+    assert!(
+        delivered.contains(&("sfn-dmap".to_string(), child.clone())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&("sfn-dmap".to_string(), "exec-1".to_string())),
+        "{delivered:?}"
+    );
+}
