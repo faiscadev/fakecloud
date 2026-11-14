@@ -1748,3 +1748,138 @@ async fn dynamodb_vector_search() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["Item"]["pk"]["S"], "near");
 }
+
+/// Bulk put from S3. The vendored `aws-sdk-dynamodb` predates the bulk
+/// operations, so drive them over a raw awsJson1.0 POST.
+#[test_action("dynamodb", "StartBulkPutItems", checksum = "4aa14d7c")]
+#[test_action("dynamodb", "DescribeBulkOperation", checksum = "29791fb5")]
+#[test_action("dynamodb", "ListBulkOperations", checksum = "42b5ff23")]
+#[test_action("dynamodb", "CancelBulkOperation", checksum = "73f9bd5c")]
+#[tokio::test]
+async fn dynamodb_bulk_put_items() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    for bucket in ["bulk-in", "bulk-out"] {
+        s3.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    s3.put_object()
+        .bucket("bulk-in")
+        .key("items/part-1.json")
+        .body(
+            "{\"Item\":{\"pk\":{\"S\":\"a\"}}}\n{\"Item\":{\"pk\":{\"S\":\"b\"}}}\n"
+                .as_bytes()
+                .to_vec()
+                .into(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=0";
+    let http = reqwest::Client::new();
+    let call = |target: &str, body: serde_json::Value| {
+        let url = server.endpoint().to_string();
+        let target = format!("DynamoDB_20120810.{target}");
+        let http = http.clone();
+        async move {
+            let resp = http
+                .post(&url)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", target)
+                .header("Content-Type", "application/x-amz-json-1.0")
+                .body(body.to_string())
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            (status, resp.json::<serde_json::Value>().await.unwrap())
+        }
+    };
+
+    let (status, _) = call(
+        "CreateTable",
+        serde_json::json!({
+            "TableName": "conf-bulk",
+            "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+            "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }],
+            "BillingMode": "PAY_PER_REQUEST",
+        }),
+    )
+    .await;
+    assert!(status.is_success());
+
+    let (status, started) = call(
+        "StartBulkPutItems",
+        serde_json::json!({
+            "TableName": "conf-bulk",
+            "ClientToken": "conf-token",
+            "InputS3Configuration": {
+                "S3Bucket": "bulk-in",
+                "S3KeyPrefix": "items/",
+                "InputFormat": "DYNAMODB_JSON",
+            },
+            "OutputS3Configuration": { "S3Bucket": "bulk-out", "OutputType": ["ERROR"] },
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{started}");
+    let arn = started["BulkOperationDescription"]["BulkOperationArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The operation is a background job: poll until it settles.
+    let mut description = serde_json::Value::Null;
+    for _ in 0..200 {
+        let (status, d) = call(
+            "DescribeBulkOperation",
+            serde_json::json!({ "BulkOperationArn": arn }),
+        )
+        .await;
+        assert!(status.is_success(), "{d}");
+        description = d["BulkOperationDescription"].clone();
+        if !matches!(
+            description["BulkOperationStatus"].as_str(),
+            Some("IN_PROGRESS" | "CANCELLING")
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(description["BulkOperationStatus"], "COMPLETED");
+    assert_eq!(description["ProcessedItemCount"], 2);
+    assert_eq!(description["FailedItemCount"], 0);
+
+    let (_, got) = call(
+        "GetItem",
+        serde_json::json!({ "TableName": "conf-bulk", "Key": { "pk": { "S": "b" } } }),
+    )
+    .await;
+    assert_eq!(got["Item"]["pk"]["S"], "b");
+
+    let (status, listed) = call("ListBulkOperations", serde_json::json!({})).await;
+    assert!(status.is_success());
+    assert_eq!(
+        listed["BulkOperationsSummaryList"][0]["BulkOperationArn"],
+        arn.as_str()
+    );
+
+    // A settled operation can no longer be cancelled; an unknown one is not
+    // found.
+    let (status, _) = call(
+        "CancelBulkOperation",
+        serde_json::json!({ "BulkOperationArn": arn }),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 400);
+    let (status, err) = call(
+        "CancelBulkOperation",
+        serde_json::json!({ "BulkOperationArn": format!("{arn}-missing") }),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 400);
+    assert!(err["__type"]
+        .as_str()
+        .unwrap()
+        .ends_with("ResourceNotFoundException"));
+}

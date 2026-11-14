@@ -235,6 +235,9 @@ pub(crate) fn build_table_description(table: &DynamoTable) -> Value {
                 .map(|region| json!({ "RegionName": region, "ReplicaStatus": "ACTIVE" }))
                 .collect(),
         );
+        // The local replica's own disassociation protection (enabled unless
+        // turned off with UpdateTable).
+        desc["DisassociationProtectionEnabled"] = json!(table.disassociation_protection_enabled);
     }
 
     // Vector indexes are only present once the table declares one, matching

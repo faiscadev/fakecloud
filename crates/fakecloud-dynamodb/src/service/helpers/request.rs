@@ -40,6 +40,8 @@ pub(crate) fn is_mutating_action(action: &str) -> bool {
             | "UpdateContributorInsights"
             | "ExportTableToPointInTime"
             | "ImportTable"
+            | "StartBulkPutItems"
+            | "CancelBulkOperation"
     )
 }
 
