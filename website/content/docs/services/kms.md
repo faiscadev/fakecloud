@@ -4,7 +4,7 @@ description = "Encryption, key management, aliases, grants, real ECDH, key impor
 weight = 12
 +++
 
-fakecloud implements **54 of 54** KMS operations at 100% Smithy conformance.
+fakecloud implements **56 of 56** KMS operations at 100% Smithy conformance.
 
 ## Supported features
 

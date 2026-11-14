@@ -119,6 +119,7 @@ fn referenced_arns(action: &str, body: &Value) -> Vec<(String, &'static str)> {
     push(&body["BackupArn"], "BackupNotFoundException");
     push(&body["ExportArn"], "ExportNotFoundException");
     push(&body["ImportArn"], "ImportNotFoundException");
+    push(&body["BulkOperationArn"], "ResourceNotFoundException");
     if let Some(items) = body["RequestItems"].as_object() {
         for name in items.keys() {
             push(&Value::String(name.clone()), table_code);

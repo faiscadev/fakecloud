@@ -102,6 +102,65 @@ pub struct EcsState {
     /// real configuration snapshot instead of an empty stub.
     #[serde(default)]
     pub service_revisions: BTreeMap<String, ServiceRevision>,
+    /// ECS gateways keyed by gateway ARN. A deleted gateway stays here with
+    /// status `DELETED` so it remains describable and listable by status.
+    #[serde(default)]
+    pub gateways: BTreeMap<String, Gateway>,
+    /// Gateway-to-cluster associations keyed by
+    /// [`EcsState::gateway_association_key`].
+    #[serde(default)]
+    pub gateway_cluster_associations: BTreeMap<String, GatewayClusterAssociation>,
+}
+
+/// An ECS gateway: shared, gateway-managed ingress (host-routed Application
+/// Load Balancers) that services in associated clusters attach to through
+/// their `gatewayConnectors`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Gateway {
+    pub name: String,
+    /// The 32-hex-character identifier that makes the ARN unique across
+    /// gateways that reuse a deleted gateway's name.
+    pub gateway_id: String,
+    pub gateway_arn: String,
+    pub status: String,
+    #[serde(default)]
+    pub status_reason: Option<String>,
+    pub infrastructure_role_arn: String,
+    #[serde(default)]
+    pub deletion_protection: bool,
+    /// The `hostSharedAlb` configuration with defaults applied.
+    pub host_shared_alb: Value,
+    /// `PUBLIC` for an internet-facing gateway, `PRIVATE` for an internal one.
+    pub access_type: String,
+    #[serde(default)]
+    pub propagate_tags: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+    #[serde(default)]
+    pub client_token: Option<String>,
+    /// The Application Load Balancers the gateway manages.
+    #[serde(default)]
+    pub load_balancers: Vec<GatewayLoadBalancer>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One gateway-managed Application Load Balancer and its shared listener.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GatewayLoadBalancer {
+    pub load_balancer_arn: String,
+    pub listener_arn: String,
+    pub security_group_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GatewayClusterAssociation {
+    pub gateway_arn: String,
+    pub cluster_arn: String,
+    pub cluster_name: String,
+    /// `ACTIVE`, `DISASSOCIATING` or `INACTIVE`.
+    pub status: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A point-in-time snapshot of a service's configuration, addressable by
@@ -134,6 +193,8 @@ pub struct ServiceRevision {
     pub volume_configurations: Vec<Value>,
     #[serde(default)]
     pub vpc_lattice_configurations: Vec<Value>,
+    #[serde(default)]
+    pub gateway_connectors: Vec<Value>,
 }
 
 impl EcsState {
@@ -159,6 +220,8 @@ impl EcsState {
             daemon_deployments: BTreeMap::new(),
             express_gateway_services: BTreeMap::new(),
             service_revisions: BTreeMap::new(),
+            gateways: BTreeMap::new(),
+            gateway_cluster_associations: BTreeMap::new(),
         }
     }
 
@@ -181,6 +244,8 @@ impl EcsState {
         self.daemon_deployments.clear();
         self.express_gateway_services.clear();
         self.service_revisions.clear();
+        self.gateways.clear();
+        self.gateway_cluster_associations.clear();
     }
 
     /// Mint and store a new service revision for `service`, numbered by how
@@ -228,9 +293,15 @@ impl EcsState {
                 service_connect_configuration: service.service_connect_configuration.clone(),
                 volume_configurations: service.volume_configurations.clone(),
                 vpc_lattice_configurations: service.vpc_lattice_configurations.clone(),
+                gateway_connectors: service.gateway_connectors.clone(),
             },
         );
         arn
+    }
+
+    /// Storage key for a gateway/cluster association.
+    pub fn gateway_association_key(gateway_arn: &str, cluster_arn: &str) -> String {
+        format!("{gateway_arn}|{cluster_arn}")
     }
 
     /// Services are uniquely identified by `(cluster, name)` within an
@@ -602,6 +673,10 @@ pub struct Container {
     /// is running. `None` until the runtime resolves it post-pull.
     #[serde(default)]
     pub image_digest: Option<String>,
+    /// The GPU `sharingStrategy` the container's GPU resource requirement
+    /// names, reported on the task's container.
+    #[serde(default)]
+    pub gpu_sharing_strategy: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -712,6 +787,10 @@ pub struct Service {
     /// service revisions.
     #[serde(default)]
     pub vpc_lattice_configurations: Vec<Value>,
+    /// `gatewayConnectors` (at most one) attaching the service to the
+    /// gateways associated with its cluster; each yields gateway routes.
+    #[serde(default)]
+    pub gateway_connectors: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

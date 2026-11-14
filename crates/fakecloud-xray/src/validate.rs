@@ -264,6 +264,30 @@ pub fn validate_input(action: &str, body: &Value) -> Result<(), AwsServiceError>
         }
         "UpdateTraceSegmentDestination" => {
             enum_req(body, "Destination", TRACE_SEGMENT_DESTINATION)?;
+            if let Some(cfg) = body
+                .get("CloudWatchLogsConfiguration")
+                .filter(|v| !v.is_null())
+            {
+                if body.get("Destination").and_then(Value::as_str) != Some("CloudWatchLogs") {
+                    return Err(invalid(
+                        "CloudWatchLogsConfiguration can be specified only when Destination is CloudWatchLogs.",
+                    ));
+                }
+                if let Some(key) = cfg.get("SpansLogGroupKmsKeyId").and_then(Value::as_str) {
+                    let len = key.chars().count();
+                    if !(1..=256).contains(&len) {
+                        return Err(invalid(
+                            "SpansLogGroupKmsKeyId must be between 1 and 256 characters.",
+                        ));
+                    }
+                    // Only a key ARN is accepted: key IDs and alias ARNs are not.
+                    if !(key.starts_with("arn:") && key.contains(":key/")) {
+                        return Err(invalid(
+                            "SpansLogGroupKmsKeyId must be the ARN of a KMS key; key IDs and alias ARNs are not supported.",
+                        ));
+                    }
+                }
+            }
         }
         _ => {}
     }

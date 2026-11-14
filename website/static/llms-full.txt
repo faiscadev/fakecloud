@@ -6,10 +6,10 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~130 MB, ~300ms startup, ~30 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 107 services (7,657 operations) are shipped today, all at true 100% conformance — 257,522/257,522 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 107 services (7,729 operations) are shipped today, all at true 100% conformance — 260,001/260,001 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
-- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 257,522/257,522 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 260,001/260,001 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
 - **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
 - **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 31 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
 - **Zero friction**: no auth tokens, no accounts, no config files needed
@@ -242,7 +242,7 @@ Protocol: REST + JSON
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### SSM (152 actions)
+### SSM (154 actions)
 
 **Parameters:** PutParameter, GetParameter, GetParameters, GetParametersByPath, DeleteParameter, DeleteParameters, DescribeParameters, GetParameterHistory, LabelParameterVersion, UnlabelParameterVersion
 **Tags:** AddTagsToResource, RemoveTagsFromResource, ListTagsForResource
@@ -267,7 +267,7 @@ Features: path-style addressing, prefix/delimiter listing, pagination (including
 
 Protocol: REST (HTTP method + path-based routing, XML responses)
 
-### DynamoDB (58 actions)
+### DynamoDB (62 actions)
 
 Tables, items, transactions (TransactWriteItems, TransactGetItems), PartiQL (ExecuteStatement, BatchExecuteStatement), backups, global tables, streams, secondary indexes. Standard DynamoDB JSON wire format. Under `--iam strict`/`soft` every DynamoDB and DynamoDB Streams operation is authorized with the actions and resource ARNs AWS uses: table, index, stream, backup, export and import ARNs; the batch action on every table of a batch; per-item actions on each table of a transaction; `dynamodb:PartiQL*` actions for PartiQL; `aws:ResourceTag` / `aws:RequestTag` / `aws:TagKeys` conditions on table tags; fine-grained `dynamodb:LeadingKeys` / `Attributes` / `Select` / `ReturnValues` / `ReturnConsumedCapacity` / `EnclosingOperation` / `FullTableScan` condition keys; table and stream resource-based policies.
 
@@ -297,7 +297,7 @@ Features: log groups with log streams, event storage and retrieval, filter patte
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### KMS (54 actions)
+### KMS (56 actions)
 
 Full key management with encryption, aliases, grants, real ECDH, and key import.
 
@@ -347,7 +347,7 @@ Features: stream creation and deletion, shard iterators and record reads, batche
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### RDS (164 actions)
+### RDS (168 actions)
 
 AddTagsToResource, CreateDBInstance, CreateDBInstanceReadReplica, CreateDBParameterGroup, CreateDBSnapshot, CreateDBSubnetGroup, DeleteDBInstance, DeleteDBParameterGroup, DeleteDBSnapshot, DeleteDBSubnetGroup, DescribeDBEngineVersions, DescribeDBInstances, DescribeDBParameterGroups, DescribeDBSnapshots, DescribeDBSubnetGroups, DescribeOrderableDBInstanceOptions, ListTagsForResource, ModifyDBInstance, ModifyDBParameterGroup, RebootDBInstance, RemoveTagsFromResource, RestoreDBInstanceFromDBSnapshot
 
@@ -355,7 +355,7 @@ Features: DB instance lifecycle (PostgreSQL, MySQL, MariaDB via Docker), read re
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### ElastiCache (75 actions)
+### ElastiCache (77 actions)
 
 AddTagsToResource, CreateCacheCluster, CreateGlobalReplicationGroup, CreateCacheSubnetGroup, CreateReplicationGroup, CreateServerlessCache, CreateServerlessCacheSnapshot, CreateSnapshot, CreateUser, CreateUserGroup, DecreaseReplicaCount, DeleteCacheCluster, DeleteGlobalReplicationGroup, DeleteCacheSubnetGroup, DeleteReplicationGroup, DeleteServerlessCache, DeleteServerlessCacheSnapshot, DeleteSnapshot, DeleteUser, DeleteUserGroup, DescribeCacheClusters, DescribeCacheEngineVersions, DescribeGlobalReplicationGroups, DescribeCacheParameterGroups, DescribeReservedCacheNodes, DescribeReservedCacheNodesOfferings, DescribeCacheSubnetGroups, DescribeEngineDefaultParameters, DescribeReplicationGroups, DescribeServerlessCaches, DescribeServerlessCacheSnapshots, DescribeSnapshots, DescribeUserGroups, DescribeUsers, DisassociateGlobalReplicationGroup, FailoverGlobalReplicationGroup, IncreaseReplicaCount, ListTagsForResource, ModifyCacheSubnetGroup, ModifyGlobalReplicationGroup, ModifyReplicationGroup, ModifyServerlessCache, RemoveTagsFromResource, TestFailover
 
@@ -427,13 +427,13 @@ Features: cross-service tag reads and writes from one endpoint. `GetResources` r
 
 Protocol: awsJson1.1 (`X-Amz-Target: ResourceGroupsTaggingAPI_20170126.<Operation>`)
 
-### ECR (58 actions)
+### ECR (62 actions)
 
 Full registry surface — repositories, images (real OCI v2 push/pull via `docker push`/`pull`), lifecycle policies and evaluation, image scanning, pull-through cache rules, registry settings, replication, signing.
 
 Protocol: REST/JSON (control plane) + OCI v2 Distribution (data plane)
 
-### ECS (77 actions)
+### ECS (88 actions)
 
 Clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, task sets (EXTERNAL deployment controller), container instances, capacity providers, attributes, task protection, ECS Exec via `docker exec`, the agent-side Submit*/DiscoverPollEndpoint surface, awslogs forwarding to CloudWatch Logs, secrets[] resolution against SecretsManager + SSM Parameter Store, task role credentials served from /_fakecloud/ecs/creds/{taskId}, tagging.
 
@@ -637,7 +637,7 @@ Features: REGIONAL + CLOUDFRONT scope segmentation; ARN segment reflects scope (
 
 Protocol: JSON 1.1 (`X-Amz-Target: AWSWAF_20190729.<Action>`)
 
-### Athena (70 actions)
+### Athena (75 actions)
 
 **Workgroups:** CreateWorkGroup, GetWorkGroup, ListWorkGroups, UpdateWorkGroup, DeleteWorkGroup
 **Data Catalogs:** CreateDataCatalog, GetDataCatalog, ListDataCatalogs, UpdateDataCatalog, DeleteDataCatalog, GetDatabase, ListDatabases, GetTableMetadata, ListTableMetadata
@@ -653,7 +653,7 @@ Features: `primary` workgroup + `AwsDataCatalog` GLUE catalog auto-seeded on fir
 
 Protocol: JSON 1.1 (`X-Amz-Target: AmazonAthena.<Action>`)
 
-### EC2 (807 actions)
+### EC2 (811 actions)
 
 The complete EC2 control plane — the largest service surface in AWS, all at true 100% Smithy conformance.
 
@@ -675,7 +675,7 @@ Org tree (roots / OUs / accounts), `CreateAccount` real async `IN_PROGRESS -> SU
 
 Protocol: JSON 1.1
 
-### Glue (302 actions)
+### Glue (309 actions)
 
 Full Data Catalog (databases, tables, partitions with `GetPartitions` `Expression` pruning), jobs, crawlers, classifiers, connections, triggers, workflows, blueprints, dev endpoints, schema registry, interactive sessions, ML transforms, data quality, user-defined functions, usage profiles, column statistics, tagging. Real status transitions (crawler READY<->RUNNING, trigger/workflow/run lifecycles). Job/crawler/Spark execution itself is synthesized — fakecloud is not a Spark engine.
 

@@ -8,6 +8,38 @@ use super::{dd_config_json, infer_delivery_destination_type};
 use super::{require_str, LogsService};
 use crate::state::{Delivery, DeliveryDestination, DeliverySource};
 
+/// Page a key-ordered listing for the `Describe*` delivery operations:
+/// `nextToken` is the last key returned, `limit` defaults to 50.
+fn page_by_key<'a, T: 'a>(
+    items: impl Iterator<Item = (&'a String, &'a T)>,
+    body: &Value,
+) -> (Vec<&'a T>, Option<String>) {
+    let limit = body["limit"].as_i64().unwrap_or(50).max(1) as usize;
+    let token = body["nextToken"].as_str();
+    let mut rest = items.filter(|(k, _)| token.is_none_or(|t| k.as_str() > t));
+    let mut page = Vec::new();
+    let mut last_key = None;
+    for (k, v) in rest.by_ref().take(limit) {
+        page.push(v);
+        last_key = Some(k.clone());
+    }
+    let next = if rest.next().is_some() {
+        last_key
+    } else {
+        None
+    };
+    (page, next)
+}
+
+/// Wrap a described page as `{ <field>: [...], nextToken? }`.
+fn describe_page(field: &str, items: Vec<Value>, next: Option<String>) -> AwsResponse {
+    let mut out = json!({ field: items });
+    if let Some(token) = next {
+        out["nextToken"] = json!(token);
+    }
+    AwsResponse::json(StatusCode::OK, serde_json::to_string(&out).unwrap())
+}
+
 /// Render a stored `Delivery` to the wire `delivery` shape, echoing every
 /// persisted optional member (`recordFields` / `fieldDelimiter` /
 /// `s3DeliveryConfiguration`) so `GetDelivery` and `DescribeDeliveries` agree.
@@ -219,22 +251,22 @@ impl LogsService {
         let body = req.json_body();
         validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        let names = optional_string_list(&body, "names", 1, 20)?;
 
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts
             .regional(&req.account_id, &req.region)
             .unwrap_or(&empty);
-        let dds: Vec<Value> = state
-            .delivery_destinations
-            .values()
-            .map(delivery_destination_to_json)
-            .collect();
-
-        Ok(AwsResponse::json(
-            StatusCode::OK,
-            serde_json::to_string(&json!({ "deliveryDestinations": dds })).unwrap(),
-        ))
+        let (page, next) = page_by_key(
+            state
+                .delivery_destinations
+                .iter()
+                .filter(|(name, _)| names.as_ref().is_none_or(|n| n.contains(name))),
+            &body,
+        );
+        let dds = page.into_iter().map(delivery_destination_to_json).collect();
+        Ok(describe_page("deliveryDestinations", dds, next))
     }
 
     pub(crate) fn delete_delivery_destination(
@@ -587,15 +619,23 @@ impl LogsService {
         let body = req.json_body();
         validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        let resource_arns = optional_string_list(&body, "resourceArns", 1, 20)?;
 
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts
             .regional(&req.account_id, &req.region)
             .unwrap_or(&empty);
-        let sources: Vec<Value> = state
-            .delivery_sources
-            .values()
+        let (page, next) = page_by_key(
+            state.delivery_sources.iter().filter(|(_, ds)| {
+                resource_arns
+                    .as_ref()
+                    .is_none_or(|arns| ds.resource_arns.iter().any(|a| arns.contains(a)))
+            }),
+            &body,
+        );
+        let sources: Vec<Value> = page
+            .into_iter()
             .map(|ds| {
                 json!({
                     "name": ds.name,
@@ -607,11 +647,7 @@ impl LogsService {
                 })
             })
             .collect();
-
-        Ok(AwsResponse::json(
-            StatusCode::OK,
-            serde_json::to_string(&json!({ "deliverySources": sources })).unwrap(),
-        ))
+        Ok(describe_page("deliverySources", sources, next))
     }
 
     pub(crate) fn delete_delivery_source(
@@ -828,18 +864,23 @@ impl LogsService {
         let body = req.json_body();
         validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        let source_names = optional_string_list(&body, "deliverySourceNames", 1, 20)?;
 
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts
             .regional(&req.account_id, &req.region)
             .unwrap_or(&empty);
-        let deliveries: Vec<Value> = state.deliveries.values().map(delivery_to_json).collect();
-
-        Ok(AwsResponse::json(
-            StatusCode::OK,
-            serde_json::to_string(&json!({ "deliveries": deliveries })).unwrap(),
-        ))
+        let (page, next) = page_by_key(
+            state.deliveries.iter().filter(|(_, d)| {
+                source_names
+                    .as_ref()
+                    .is_none_or(|n| n.contains(&d.delivery_source_name))
+            }),
+            &body,
+        );
+        let deliveries = page.into_iter().map(delivery_to_json).collect();
+        Ok(describe_page("deliveries", deliveries, next))
     }
 
     pub(crate) fn delete_delivery(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1550,5 +1591,115 @@ mod tests {
         assert_eq!(delivery.delivery_source_name, "intro-src");
         assert_eq!(delivery.record_fields, vec!["timestamp", "message"]);
         assert_eq!(delivery.field_delimiter.as_deref(), Some("|"));
+    }
+
+    fn names_of(body: &Value, list: &str, field: &str) -> Vec<String> {
+        body[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v[field].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn describe_filters_by_names_resource_arns_and_source_names() {
+        let svc = make_service();
+        let mut group_arns = Vec::new();
+        for (i, grp) in ["flt-a", "flt-b"].iter().enumerate() {
+            create_group(&svc, grp);
+            let resp = svc
+                .describe_log_groups(&make_request(
+                    "DescribeLogGroups",
+                    json!({ "logGroupNamePrefix": grp }),
+                ))
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            let arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+            svc.put_delivery_source(&make_request(
+                "PutDeliverySource",
+                json!({ "name": format!("src-{i}"), "resourceArn": arn, "logType": "APPLICATION_LOGS" }),
+            ))
+            .unwrap();
+            group_arns.push(arn);
+            let resp = svc
+                .put_delivery_destination(&make_request(
+                    "PutDeliveryDestination",
+                    json!({
+                        "name": format!("dst-{i}"),
+                        "deliveryDestinationConfiguration": {
+                            "destinationResourceArn": format!("arn:aws:s3:::flt-bucket-{i}")
+                        }
+                    }),
+                ))
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            svc.create_delivery(&make_request(
+                "CreateDelivery",
+                json!({
+                    "deliverySourceName": format!("src-{i}"),
+                    "deliveryDestinationArn": body["deliveryDestination"]["arn"],
+                }),
+            ))
+            .unwrap();
+        }
+
+        let resp = svc
+            .describe_delivery_destinations(&make_request(
+                "DescribeDeliveryDestinations",
+                json!({ "names": ["dst-1", "missing"] }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(names_of(&body, "deliveryDestinations", "name"), ["dst-1"]);
+
+        let resp = svc
+            .describe_delivery_sources(&make_request(
+                "DescribeDeliverySources",
+                json!({ "resourceArns": [group_arns[0]] }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(names_of(&body, "deliverySources", "name"), ["src-0"]);
+
+        let resp = svc
+            .describe_deliveries(&make_request(
+                "DescribeDeliveries",
+                json!({ "deliverySourceNames": ["src-1"] }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            names_of(&body, "deliveries", "deliverySourceName"),
+            ["src-1"]
+        );
+
+        // Unfiltered + paginated: limit 1 walks both deliveries.
+        let resp = svc
+            .describe_deliveries(&make_request("DescribeDeliveries", json!({ "limit": 1 })))
+            .unwrap();
+        let first: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(first["deliveries"].as_array().unwrap().len(), 1);
+        let token = first["nextToken"].as_str().unwrap().to_string();
+        let resp = svc
+            .describe_deliveries(&make_request(
+                "DescribeDeliveries",
+                json!({ "limit": 1, "nextToken": token }),
+            ))
+            .unwrap();
+        let second: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(second["deliveries"].as_array().unwrap().len(), 1);
+        assert!(second.get("nextToken").is_none());
+        assert_ne!(first["deliveries"][0]["id"], second["deliveries"][0]["id"]);
+
+        // An empty filter list violates the model's length >= 1.
+        let err = svc
+            .describe_deliveries(&make_request(
+                "DescribeDeliveries",
+                json!({ "deliverySourceNames": [] }),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidParameterException");
     }
 }

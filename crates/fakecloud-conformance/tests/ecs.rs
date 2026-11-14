@@ -155,7 +155,7 @@ async fn ecs_put_cluster_capacity_providers() {
     assert!(resp.cluster().is_some());
 }
 
-#[test_action("ecs", "RegisterTaskDefinition", checksum = "f752354e")]
+#[test_action("ecs", "RegisterTaskDefinition", checksum = "6cfc4ce4")]
 #[tokio::test]
 async fn ecs_register_task_definition() {
     let server = TestServer::start().await;
@@ -176,7 +176,7 @@ async fn ecs_register_task_definition() {
     assert_eq!(resp.task_definition().unwrap().family(), Some("confo-td"));
 }
 
-#[test_action("ecs", "DescribeTaskDefinition", checksum = "54669c17")]
+#[test_action("ecs", "DescribeTaskDefinition", checksum = "313dcc15")]
 #[tokio::test]
 async fn ecs_describe_task_definition() {
     let server = TestServer::start().await;
@@ -206,7 +206,7 @@ async fn ecs_describe_task_definition() {
     );
 }
 
-#[test_action("ecs", "DeregisterTaskDefinition", checksum = "f830a947")]
+#[test_action("ecs", "DeregisterTaskDefinition", checksum = "933d0ff2")]
 #[tokio::test]
 async fn ecs_deregister_task_definition() {
     let server = TestServer::start().await;
@@ -238,7 +238,7 @@ async fn ecs_deregister_task_definition() {
     );
 }
 
-#[test_action("ecs", "DeleteTaskDefinitions", checksum = "181b7b9d")]
+#[test_action("ecs", "DeleteTaskDefinitions", checksum = "aaa7f78b")]
 #[tokio::test]
 async fn ecs_delete_task_definitions() {
     let server = TestServer::start().await;
@@ -480,7 +480,7 @@ async fn register_conformance_task_def(client: &aws_sdk_ecs::Client, family: &st
         .unwrap();
 }
 
-#[test_action("ecs", "RunTask", checksum = "99452d98")]
+#[test_action("ecs", "RunTask", checksum = "ac257001")]
 #[tokio::test]
 async fn ecs_run_task() {
     let server = TestServer::start().await;
@@ -503,7 +503,7 @@ async fn ecs_run_task() {
     assert!(resp.failures().is_empty());
 }
 
-#[test_action("ecs", "StartTask", checksum = "204a75f7")]
+#[test_action("ecs", "StartTask", checksum = "0ae77c9c")]
 #[tokio::test]
 async fn ecs_start_task() {
     let server = TestServer::start().await;
@@ -538,7 +538,7 @@ async fn ecs_start_task() {
     assert_eq!(resp.tasks().len(), 1);
 }
 
-#[test_action("ecs", "DescribeTasks", checksum = "8e16a815")]
+#[test_action("ecs", "DescribeTasks", checksum = "c0470f9b")]
 #[tokio::test]
 async fn ecs_describe_tasks() {
     let server = TestServer::start().await;
@@ -596,7 +596,7 @@ async fn ecs_list_tasks() {
     assert!(!resp.task_arns().is_empty());
 }
 
-#[test_action("ecs", "StopTask", checksum = "bcbdb136")]
+#[test_action("ecs", "StopTask", checksum = "4e25cd79")]
 #[tokio::test]
 async fn ecs_stop_task() {
     let server = TestServer::start().await;
@@ -678,7 +678,7 @@ async fn bootstrap_external_service_fixtures(
         .unwrap();
 }
 
-#[test_action("ecs", "CreateService", checksum = "093ef74c")]
+#[test_action("ecs", "CreateService", checksum = "700f97cb")]
 #[tokio::test]
 async fn ecs_create_service() {
     let server = TestServer::start().await;
@@ -696,7 +696,7 @@ async fn ecs_create_service() {
     assert_eq!(resp.service().unwrap().service_name(), Some("svc-a"));
 }
 
-#[test_action("ecs", "DescribeServices", checksum = "fe13866d")]
+#[test_action("ecs", "DescribeServices", checksum = "7209f0c8")]
 #[tokio::test]
 async fn ecs_describe_services() {
     let server = TestServer::start().await;
@@ -757,7 +757,7 @@ async fn ecs_list_services_by_namespace() {
     resp.service_arns();
 }
 
-#[test_action("ecs", "UpdateService", checksum = "ca062e4e")]
+#[test_action("ecs", "UpdateService", checksum = "ed4d312d")]
 #[tokio::test]
 async fn ecs_update_service() {
     let server = TestServer::start().await;
@@ -783,7 +783,7 @@ async fn ecs_update_service() {
     assert_eq!(resp.service().unwrap().desired_count(), 2);
 }
 
-#[test_action("ecs", "DeleteService", checksum = "55d4cdce")]
+#[test_action("ecs", "DeleteService", checksum = "1341aa43")]
 #[tokio::test]
 async fn ecs_delete_service() {
     let server = TestServer::start().await;
@@ -810,7 +810,7 @@ async fn ecs_delete_service() {
 
 // ── Batch 4: completeness ──────────────────────────────────────────
 
-#[test_action("ecs", "RegisterContainerInstance", checksum = "b5dc02fc")]
+#[test_action("ecs", "RegisterContainerInstance", checksum = "bc109d0c")]
 #[tokio::test]
 async fn ecs_register_container_instance() {
     let server = TestServer::start().await;
@@ -830,7 +830,7 @@ async fn ecs_register_container_instance() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "DeregisterContainerInstance", checksum = "d4260848")]
+#[test_action("ecs", "DeregisterContainerInstance", checksum = "908101b7")]
 #[tokio::test]
 async fn ecs_deregister_container_instance() {
     let server = TestServer::start().await;
@@ -863,7 +863,7 @@ async fn ecs_deregister_container_instance() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "DescribeContainerInstances", checksum = "f97758da")]
+#[test_action("ecs", "DescribeContainerInstances", checksum = "07eac6ac")]
 #[tokio::test]
 async fn ecs_describe_container_instances() {
     let server = TestServer::start().await;
@@ -922,7 +922,7 @@ async fn ecs_list_container_instances() {
     assert!(!resp.container_instance_arns().is_empty());
 }
 
-#[test_action("ecs", "UpdateContainerAgent", checksum = "fde7dd4c")]
+#[test_action("ecs", "UpdateContainerAgent", checksum = "0c267e1e")]
 #[tokio::test]
 async fn ecs_update_container_agent() {
     let server = TestServer::start().await;
@@ -955,7 +955,7 @@ async fn ecs_update_container_agent() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "UpdateContainerInstancesState", checksum = "08210d81")]
+#[test_action("ecs", "UpdateContainerInstancesState", checksum = "6dfac371")]
 #[tokio::test]
 async fn ecs_update_container_instances_state() {
     use aws_sdk_ecs::types::ContainerInstanceStatus;
@@ -1747,7 +1747,7 @@ async fn ecs_continue_service_deployment_rollback_and_errors() {
     assert!(!resp.status().is_success());
 }
 
-#[test_action("ecs", "DescribeServiceRevisions", checksum = "d5f72f0b")]
+#[test_action("ecs", "DescribeServiceRevisions", checksum = "771818ca")]
 #[tokio::test]
 async fn ecs_describe_service_revisions() {
     let server = TestServer::start().await;
@@ -1789,7 +1789,7 @@ async fn register_daemon_td_arn(client: &aws_sdk_ecs::Client, family: &str) -> S
     resp.daemon_task_definition_arn().unwrap().to_string()
 }
 
-#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "b10b17f6")]
+#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "53384b62")]
 #[tokio::test]
 async fn ecs_register_daemon_task_definition() {
     let server = TestServer::start().await;
@@ -1798,7 +1798,7 @@ async fn ecs_register_daemon_task_definition() {
     assert!(arn.contains(":daemon-task-definition/"));
 }
 
-#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "11721ffd")]
+#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "46f06ed8")]
 #[tokio::test]
 async fn ecs_describe_daemon_task_definition() {
     let server = TestServer::start().await;
@@ -2099,4 +2099,349 @@ async fn ecs_delete_express_gateway_service() {
         .await
         .unwrap();
     assert!(resp.service().is_some());
+}
+
+// ── Gateways (2026 ops) ─────────────────────────────────────────────────
+//
+// aws-sdk-ecs 1.x predates the gateway operations, so they are driven over
+// raw awsJson1.1 with their exact model wire names.
+
+async fn create_test_gateway(http: &reqwest::Client, ep: &str, name: &str) -> String {
+    let resp = ecs_json(
+        http,
+        ep,
+        "CreateGateway",
+        serde_json::json!({
+            "name": name,
+            "infrastructureRoleArn": "arn:aws:iam::123456789012:role/ecsInfrastructureRole",
+            "configuration": {"hostSharedAlb": {
+                "networkConfiguration": {"subnets": ["subnet-0123456789abcdef0"]},
+                "scheme": "internet-facing",
+                "protocol": "HTTPS",
+                "port": 443,
+                "maxAlbCount": 10,
+            }},
+            "tags": [{"key": "team", "value": "web"}],
+            "propagateTags": "GATEWAY",
+        }),
+    )
+    .await;
+    resp["gatewayArn"].as_str().unwrap().to_string()
+}
+
+/// Cluster + gateway associated with it + a service whose gateway connector
+/// targets the task definition's `web` port, so the gateway has one route.
+/// Returns `(gateway_arn, service_arn)`.
+async fn gateway_with_route(http: &reqwest::Client, ep: &str, prefix: &str) -> (String, String) {
+    let cluster = format!("{prefix}-cluster");
+    ecs_json(
+        http,
+        ep,
+        "CreateCluster",
+        serde_json::json!({"clusterName": cluster}),
+    )
+    .await;
+    ecs_json(
+        http,
+        ep,
+        "RegisterTaskDefinition",
+        serde_json::json!({
+            "family": format!("{prefix}-td"),
+            "containerDefinitions": [{
+                "name": "app",
+                "image": "nginx:latest",
+                "memory": 128,
+                "portMappings": [{"containerPort": 80, "name": "web"}],
+            }],
+        }),
+    )
+    .await;
+    let gateway_arn = create_test_gateway(http, ep, &format!("{prefix}-gw")).await;
+    ecs_json(
+        http,
+        ep,
+        "AssociateGatewayWithCluster",
+        serde_json::json!({"gateway": gateway_arn, "cluster": cluster}),
+    )
+    .await;
+    let svc = ecs_json(
+        http,
+        ep,
+        "CreateService",
+        serde_json::json!({
+            "cluster": cluster,
+            "serviceName": format!("{prefix}-svc"),
+            "taskDefinition": format!("{prefix}-td"),
+            "desiredCount": 0,
+            "gatewayConnectors": [{"portName": "web", "filters": {"accessTypes": ["PUBLIC"]}}],
+        }),
+    )
+    .await;
+    let service_arn = svc["service"]["serviceArn"].as_str().unwrap().to_string();
+    (gateway_arn, service_arn)
+}
+
+#[test_action("ecs", "CreateGateway", checksum = "e9610747")]
+#[tokio::test]
+async fn ecs_create_gateway() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let arn = create_test_gateway(&http, ep, "conf-gw-create").await;
+    assert!(arn.contains(":gateway/conf-gw-create/"));
+    let described = ecs_json(
+        &http,
+        ep,
+        "DescribeGateway",
+        serde_json::json!({"gateway": "conf-gw-create"}),
+    )
+    .await;
+    assert_eq!(described["gateway"]["status"], "ACTIVE");
+}
+
+#[test_action("ecs", "DescribeGateway", checksum = "45de2400")]
+#[tokio::test]
+async fn ecs_describe_gateway() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let arn = create_test_gateway(&http, ep, "conf-gw-describe").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "DescribeGateway",
+        serde_json::json!({"gateway": arn}),
+    )
+    .await;
+    let gw = &resp["gateway"];
+    assert_eq!(gw["name"], "conf-gw-describe");
+    assert_eq!(gw["accessType"], "PUBLIC");
+    assert_eq!(gw["configuration"]["hostSharedAlb"]["currentAlbCount"], 1);
+    assert_eq!(gw["tags"][0]["key"], "team");
+}
+
+#[test_action("ecs", "UpdateGateway", checksum = "331d57d2")]
+#[tokio::test]
+async fn ecs_update_gateway() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    create_test_gateway(&http, ep, "conf-gw-update").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "UpdateGateway",
+        serde_json::json!({
+            "gateway": "conf-gw-update",
+            "configuration": {"hostSharedAlb": {"maxAlbCount": 20, "httpDesync": "strictest"}},
+        }),
+    )
+    .await;
+    assert_eq!(resp["status"], "UPDATE_IN_PROGRESS");
+    let described = ecs_json(
+        &http,
+        ep,
+        "DescribeGateway",
+        serde_json::json!({"gateway": "conf-gw-update"}),
+    )
+    .await;
+    let alb = &described["gateway"]["configuration"]["hostSharedAlb"];
+    assert_eq!(alb["maxAlbCount"], 20);
+    assert_eq!(alb["httpDesync"], "strictest");
+}
+
+#[test_action("ecs", "DeleteGateway", checksum = "fe06124f")]
+#[tokio::test]
+async fn ecs_delete_gateway() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let arn = create_test_gateway(&http, ep, "conf-gw-delete").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "DeleteGateway",
+        serde_json::json!({"gateway": "conf-gw-delete"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "DELETED");
+    assert_eq!(resp["gatewayArn"], arn);
+}
+
+#[test_action("ecs", "ListGateways", checksum = "28d38054")]
+#[tokio::test]
+async fn ecs_list_gateways() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    create_test_gateway(&http, ep, "conf-gw-list-a").await;
+    create_test_gateway(&http, ep, "conf-gw-list-b").await;
+    let first = ecs_json(
+        &http,
+        ep,
+        "ListGateways",
+        serde_json::json!({"status": ["ACTIVE"], "maxResults": 1}),
+    )
+    .await;
+    assert_eq!(first["gateways"].as_array().unwrap().len(), 1);
+    let token = first["nextToken"].as_str().unwrap();
+    let second = ecs_json(
+        &http,
+        ep,
+        "ListGateways",
+        serde_json::json!({"status": ["ACTIVE"], "maxResults": 1, "nextToken": token}),
+    )
+    .await;
+    assert_eq!(second["gateways"][0]["name"], "conf-gw-list-b");
+    assert!(second.get("nextToken").is_none());
+}
+
+#[test_action("ecs", "AssociateGatewayWithCluster", checksum = "ee55b6fe")]
+#[tokio::test]
+async fn ecs_associate_gateway_with_cluster() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    ecs_json(
+        &http,
+        ep,
+        "CreateCluster",
+        serde_json::json!({"clusterName": "conf-gw-assoc"}),
+    )
+    .await;
+    let arn = create_test_gateway(&http, ep, "conf-gw-assoc").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "AssociateGatewayWithCluster",
+        serde_json::json!({"gateway": "conf-gw-assoc", "cluster": "conf-gw-assoc"}),
+    )
+    .await;
+    assert_eq!(resp["gatewayArn"], arn);
+    assert_eq!(resp["status"], "ACTIVE");
+    assert!(resp["clusterArn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":cluster/conf-gw-assoc"));
+}
+
+#[test_action("ecs", "DisassociateGatewayFromCluster", checksum = "ffea9d60")]
+#[tokio::test]
+async fn ecs_disassociate_gateway_from_cluster() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let (gateway_arn, _) = gateway_with_route(&http, ep, "conf-gw-disassoc").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "DisassociateGatewayFromCluster",
+        serde_json::json!({"gateway": gateway_arn, "cluster": "conf-gw-disassoc-cluster"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "DISASSOCIATING");
+    let routes = ecs_json(
+        &http,
+        ep,
+        "ListGatewayRoutes",
+        serde_json::json!({"gateway": gateway_arn}),
+    )
+    .await;
+    assert!(routes["gatewayRoutes"].as_array().unwrap().is_empty());
+}
+
+#[test_action("ecs", "ListGatewayClusterAssociations", checksum = "35668912")]
+#[tokio::test]
+async fn ecs_list_gateway_cluster_associations() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let (gateway_arn, _) = gateway_with_route(&http, ep, "conf-gw-lassoc").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "ListGatewayClusterAssociations",
+        serde_json::json!({"gateway": "conf-gw-lassoc-gw"}),
+    )
+    .await;
+    let rows = resp["gatewayClusterAssociations"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["gatewayArn"], gateway_arn);
+    assert_eq!(rows[0]["status"], "ACTIVE");
+}
+
+#[test_action("ecs", "ListGatewayRoutes", checksum = "d09f96fd")]
+#[tokio::test]
+async fn ecs_list_gateway_routes() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let (gateway_arn, service_arn) = gateway_with_route(&http, ep, "conf-gw-lroutes").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "ListGatewayRoutes",
+        serde_json::json!({"gateway": gateway_arn, "cluster": "conf-gw-lroutes-cluster"}),
+    )
+    .await;
+    let routes = resp["gatewayRoutes"].as_array().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0]["serviceArn"], service_arn);
+    assert_eq!(routes[0]["serviceContainerPortName"], "web");
+    assert_eq!(routes[0]["status"], "ACTIVE");
+}
+
+#[test_action("ecs", "DescribeGatewayRoute", checksum = "c98ce7cd")]
+#[tokio::test]
+async fn ecs_describe_gateway_route() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let (gateway_arn, service_arn) = gateway_with_route(&http, ep, "conf-gw-droute").await;
+    let listed = ecs_json(
+        &http,
+        ep,
+        "ListGatewayRoutes",
+        serde_json::json!({"gateway": gateway_arn}),
+    )
+    .await;
+    let route_arn = listed["gatewayRoutes"][0]["gatewayRouteArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = ecs_json(
+        &http,
+        ep,
+        "DescribeGatewayRoute",
+        serde_json::json!({"gatewayRouteArn": route_arn}),
+    )
+    .await;
+    let route = &resp["gatewayRoute"];
+    assert_eq!(route["serviceArn"], service_arn);
+    assert!(route["serviceUrl"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://"));
+    assert!(route["resources"]["hostSharedAlb"][0]["listenerRuleArn"].is_string());
+}
+
+#[test_action("ecs", "DescribeGatewayResources", checksum = "ca15541a")]
+#[tokio::test]
+async fn ecs_describe_gateway_resources() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+    let (gateway_arn, _) = gateway_with_route(&http, ep, "conf-gw-res").await;
+    let resp = ecs_json(
+        &http,
+        ep,
+        "DescribeGatewayResources",
+        serde_json::json!({"gateway": gateway_arn}),
+    )
+    .await;
+    let res = &resp["gatewayResources"];
+    assert_eq!(res["gatewayArn"], gateway_arn);
+    let albs = res["resources"]["hostSharedAlb"].as_array().unwrap();
+    assert_eq!(albs.len(), 1);
+    assert_eq!(albs[0]["gatewayRouteArns"].as_array().unwrap().len(), 1);
 }

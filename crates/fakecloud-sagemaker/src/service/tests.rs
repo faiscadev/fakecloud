@@ -2504,3 +2504,315 @@ fn describe_cluster_renders_instance_group_details() {
             == "ResourceNotFound"
     );
 }
+
+fn training_session_body(name: &str) -> Value {
+    json!({
+        "TrainingSessionName": name,
+        "RoleArn": "arn:aws:iam::000000000000:role/ts",
+        "LoraConfig": {"Rank": 16, "Alpha": 32},
+        "ModelConfig": {
+            "BaseModelArn": "arn:aws:sagemaker:us-east-1:aws:hub-content/SageMakerPublicHub/Model/llama/1.0.0",
+            "AcceptEula": true
+        },
+        "OutputConfig": {"S3Location": {"Path": "s3://bucket/out"}},
+        "VpcConfig": {"SecurityGroupIds": ["sg-1"], "Subnets": ["subnet-1"]},
+        "Tags": [{"Key": "team", "Value": "ml"}]
+    })
+}
+
+#[test]
+fn training_session_lifecycle() {
+    let s = svc();
+    let created =
+        resp_json(&run(&s, "CreateTrainingSession", training_session_body("ts1")).unwrap());
+    let arn = created["TrainingSessionArn"].as_str().unwrap().to_string();
+    assert!(arn.ends_with(":training-session/ts1"), "{arn}");
+    assert_eq!(
+        expect_err(run(
+            &s,
+            "CreateTrainingSession",
+            training_session_body("ts1")
+        ))
+        .code(),
+        "ResourceInUse"
+    );
+
+    let detail = resp_json(
+        &run(
+            &s,
+            "DescribeTrainingSession",
+            json!({"TrainingSessionName": "ts1"}),
+        )
+        .unwrap(),
+    )["TrainingSessionDetail"]
+        .clone();
+    assert_eq!(detail["TrainingSessionArn"], arn.as_str());
+    assert_eq!(detail["TrainingSessionName"], "ts1");
+    assert_eq!(detail["TrainingSessionStatus"], "Created");
+    assert_eq!(detail["LoraConfig"], json!({"Rank": 16, "Alpha": 32}));
+    assert_eq!(detail["ModelConfig"]["AcceptEula"], true);
+    assert_eq!(
+        detail["OutputConfig"]["S3Location"]["Path"],
+        "s3://bucket/out"
+    );
+    assert_eq!(detail["VpcConfig"]["Subnets"], json!(["subnet-1"]));
+    assert_eq!(detail["RoleArn"], "arn:aws:iam::000000000000:role/ts");
+    assert_eq!(detail["Tags"], json!([{"Key": "team", "Value": "ml"}]));
+    assert_eq!(detail["BillableTokenUsage"]["TrainingTokenCount"], 0);
+    assert!(detail.get("EndTime").is_none(), "{detail}");
+
+    // An active session cannot be deleted.
+    assert_eq!(
+        expect_err(run(
+            &s,
+            "DeleteTrainingSession",
+            json!({"TrainingSessionName": "ts1"})
+        ))
+        .code(),
+        "ResourceInUse"
+    );
+
+    let listed = resp_json(
+        &run(
+            &s,
+            "ListTrainingSessions",
+            json!({"StatusEquals": "Created"}),
+        )
+        .unwrap(),
+    );
+    let summaries = listed["TrainingSessionSummaries"].as_array().unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0]["TrainingSessionArn"], arn.as_str());
+    assert_eq!(summaries[0]["TrainingSessionStatus"], "Created");
+
+    run(
+        &s,
+        "StopTrainingSession",
+        json!({"TrainingSessionName": "ts1"}),
+    )
+    .unwrap();
+    let detail = resp_json(
+        &run(
+            &s,
+            "DescribeTrainingSession",
+            json!({"TrainingSessionName": "ts1"}),
+        )
+        .unwrap(),
+    )["TrainingSessionDetail"]
+        .clone();
+    assert_eq!(detail["TrainingSessionStatus"], "Stopped");
+    assert!(detail["EndTime"].is_number(), "{detail}");
+    assert_eq!(
+        expect_err(run(
+            &s,
+            "StopTrainingSession",
+            json!({"TrainingSessionName": "ts1"})
+        ))
+        .code(),
+        "ValidationException"
+    );
+    let listed = resp_json(
+        &run(
+            &s,
+            "ListTrainingSessions",
+            json!({"StatusEquals": "Created"}),
+        )
+        .unwrap(),
+    );
+    assert!(listed["TrainingSessionSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    run(
+        &s,
+        "DeleteTrainingSession",
+        json!({"TrainingSessionName": "ts1"}),
+    )
+    .unwrap();
+    for op in [
+        "DescribeTrainingSession",
+        "StopTrainingSession",
+        "DeleteTrainingSession",
+    ] {
+        assert_eq!(
+            expect_err(run(&s, op, json!({"TrainingSessionName": "ts1"}))).code(),
+            "ResourceNotFound",
+            "{op}"
+        );
+    }
+    let tags = resp_json(&run(&s, "ListTags", json!({"ResourceArn": arn})).unwrap());
+    assert!(
+        tags["Tags"].as_array().is_none_or(|t| t.is_empty()),
+        "{tags}"
+    );
+}
+
+#[test]
+fn create_training_session_validates_nested_config_and_model_package_group() {
+    let s = svc();
+    let mut bad_rank = training_session_body("ts2");
+    bad_rank["LoraConfig"]["Rank"] = json!(512);
+    assert_eq!(
+        expect_err(run(&s, "CreateTrainingSession", bad_rank)).code(),
+        "ValidationException"
+    );
+    let mut no_path = training_session_body("ts2");
+    no_path["OutputConfig"] = json!({"S3Location": {}});
+    assert_eq!(
+        expect_err(run(&s, "CreateTrainingSession", no_path)).code(),
+        "ValidationException"
+    );
+    let mut empty_subnets = training_session_body("ts2");
+    empty_subnets["VpcConfig"]["Subnets"] = json!([]);
+    assert_eq!(
+        expect_err(run(&s, "CreateTrainingSession", empty_subnets)).code(),
+        "ValidationException"
+    );
+
+    let group_arn = "arn:aws:sagemaker:us-east-1:000000000000:model-package-group/g1";
+    let mut with_group = training_session_body("ts2");
+    with_group["ModelPackageGroupArn"] = json!(group_arn);
+    assert_eq!(
+        expect_err(run(&s, "CreateTrainingSession", with_group.clone())).code(),
+        "ResourceNotFound"
+    );
+    run(
+        &s,
+        "CreateModelPackageGroup",
+        json!({"ModelPackageGroupName": "g1"}),
+    )
+    .unwrap();
+    run(&s, "CreateTrainingSession", with_group).unwrap();
+    let detail = resp_json(
+        &run(
+            &s,
+            "DescribeTrainingSession",
+            json!({"TrainingSessionName": "ts2"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        detail["TrainingSessionDetail"]["ModelPackageGroupArn"],
+        group_arn
+    );
+}
+
+#[test]
+fn describe_endpoint_reports_the_deployed_config_variants() {
+    let s = svc();
+    let layouts = json!([{"AcceleratorPartitionTypes": ["mig-3g.40gb", "mig-3g.40gb"]}]);
+    run(
+        &s,
+        "CreateEndpointConfig",
+        json!({
+            "EndpointConfigName": "cfg1",
+            "ProductionVariants": [{
+                "VariantName": "v1",
+                "ModelName": "m",
+                "InitialInstanceCount": 2,
+                "InstanceType": "ml.p4d.24xlarge",
+                "InitialVariantWeight": 0.5,
+                "AcceleratorPartitionLayouts": layouts
+            }]
+        }),
+    )
+    .unwrap();
+    run(
+        &s,
+        "CreateEndpoint",
+        json!({"EndpointName": "ep1", "EndpointConfigName": "cfg1"}),
+    )
+    .unwrap();
+    let ep = resp_json(&run(&s, "DescribeEndpoint", json!({"EndpointName": "ep1"})).unwrap());
+    let v = &ep["ProductionVariants"][0];
+    assert_eq!(v["VariantName"], "v1");
+    assert_eq!(v["CurrentInstanceCount"], 2);
+    assert_eq!(v["DesiredInstanceCount"], 2);
+    assert_eq!(v["CurrentWeight"], 0.5);
+    assert_eq!(v["AcceleratorPartitionLayouts"], layouts);
+
+    // The endpoint config echoes the layouts too.
+    let cfg = resp_json(
+        &run(
+            &s,
+            "DescribeEndpointConfig",
+            json!({"EndpointConfigName": "cfg1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        cfg["ProductionVariants"][0]["AcceleratorPartitionLayouts"],
+        layouts
+    );
+
+    // Updating to another config deploys its variants; retaining keeps the
+    // running weight / count.
+    run(
+        &s,
+        "CreateEndpointConfig",
+        json!({
+            "EndpointConfigName": "cfg2",
+            "ProductionVariants": [{
+                "VariantName": "v1",
+                "ModelName": "m",
+                "InitialInstanceCount": 4,
+                "InstanceType": "ml.p4d.24xlarge"
+            }]
+        }),
+    )
+    .unwrap();
+    run(
+        &s,
+        "UpdateEndpoint",
+        json!({"EndpointName": "ep1", "EndpointConfigName": "cfg2", "RetainAllVariantProperties": true}),
+    )
+    .unwrap();
+    let ep = resp_json(&run(&s, "DescribeEndpoint", json!({"EndpointName": "ep1"})).unwrap());
+    let v = &ep["ProductionVariants"][0];
+    assert_eq!(v["CurrentInstanceCount"], 2);
+    assert!(v.get("AcceleratorPartitionLayouts").is_none(), "{v}");
+    run(
+        &s,
+        "UpdateEndpoint",
+        json!({"EndpointName": "ep1", "EndpointConfigName": "cfg2"}),
+    )
+    .unwrap();
+    let ep = resp_json(&run(&s, "DescribeEndpoint", json!({"EndpointName": "ep1"})).unwrap());
+    assert_eq!(ep["ProductionVariants"][0]["CurrentInstanceCount"], 4);
+}
+
+#[test]
+fn inference_component_reports_accelerator_partition_type() {
+    let s = svc();
+    run(
+        &s,
+        "CreateInferenceComponent",
+        json!({
+            "InferenceComponentName": "ic1",
+            "EndpointName": "ep",
+            "VariantName": "v1",
+            "Specification": {
+                "ModelName": "m",
+                "ComputeResourceRequirements": {
+                    "MinMemoryRequiredInMb": 1024,
+                    "AcceleratorPartitionType": "mig-3g.40gb"
+                }
+            },
+            "RuntimeConfig": {"CopyCount": 1}
+        }),
+    )
+    .unwrap();
+    let ic = resp_json(
+        &run(
+            &s,
+            "DescribeInferenceComponent",
+            json!({"InferenceComponentName": "ic1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        ic["Specification"]["ComputeResourceRequirements"]["AcceleratorPartitionType"],
+        "mig-3g.40gb"
+    );
+}

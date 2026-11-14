@@ -27,17 +27,17 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | Startup | ~300ms | ~3s | ~3s |
 | Idle memory | ~30 MiB | ~150 MiB | ~150 MiB |
 | Install size | ~130 MB | ~1 GB Docker image | ~1 GB Docker image |
-| Conformance methodology | Smithy-validated, 257,522/257,522 test variants pass on every commit | Not published | Not published |
+| Conformance methodology | Smithy-validated, 260,001/260,001 test variants pass on every commit | Not published | Not published |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) | Not published | Not published |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust, .NET | Python, Java | Python, Java |
 | Cognito User Pools | 132 ops, full auth flows | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | SES v2 | 116 ops, send + templates + DKIM | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | SES inbound email | Real receipt rule action execution | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) | Stored but never executed |
-| RDS | 164 ops, real PostgreSQL/MySQL/MariaDB | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
-| ElastiCache | 75 ops, real Redis/Valkey/Memcached | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
+| RDS | 168 ops, real PostgreSQL/MySQL/MariaDB | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
+| ElastiCache | 77 ops, real Redis/Valkey/Memcached | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | API Gateway v1 | 124 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | API Gateway v2 | 103 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
-| ECR | 58 ops + real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/) (and push is [flaky](https://github.com/localstack/localstack/issues/8128) when paid) | Yes |
+| ECR | 62 ops + real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/) (and push is [flaky](https://github.com/localstack/localstack/issues/8128) when paid) | Yes |
 | Bedrock | 222 ops across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime | Not available | Not available |
 | SCPs / multi-account | Yes (Organizations control plane + ceiling enforcement) | No | Partial |
 | Lambda real code execution | Yes (31 runtimes) | Paywall required | Yes |

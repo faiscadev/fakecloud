@@ -78,6 +78,44 @@ pub struct EcrState {
     /// Registry-wide signing configuration.
     #[serde(default)]
     pub signing_configuration: Option<SigningConfiguration>,
+    /// Replication backfills keyed by `replicationBackfillId`.
+    #[serde(default)]
+    pub replication_backfills: BTreeMap<String, ReplicationBackfill>,
+}
+
+/// A replication backfill: the registry's existing images that match its
+/// replication rules for `destination`, replicated there on demand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicationBackfill {
+    pub id: String,
+    pub destination: ReplicationDestination,
+    /// `PREPARING`, `IN_PROGRESS`, `COMPLETE`, `FAILED`, `STOPPING`, `STOPPED`.
+    pub status: String,
+    pub failure_code: Option<String>,
+    /// `None` until the set of images to replicate is prepared.
+    pub progress: Option<ReplicationBackfillProgress>,
+    /// One per image and tag combination, once the backfill is terminal.
+    pub results: Vec<ReplicationBackfillResult>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReplicationBackfillProgress {
+    pub total_replication_count: u32,
+    pub completed_replication_count: u32,
+    pub failed_replication_count: u32,
+    pub failure_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicationBackfillResult {
+    pub repository_name: String,
+    pub image_digest: String,
+    pub image_tag: Option<String>,
+    /// `COMPLETE` or `FAILED`.
+    pub status: String,
+    pub failure_code: Option<String>,
 }
 
 impl EcrState {
@@ -95,6 +133,7 @@ impl EcrState {
             pull_through_cache_rules: BTreeMap::new(),
             repository_creation_templates: BTreeMap::new(),
             signing_configuration: None,
+            replication_backfills: BTreeMap::new(),
         }
     }
 
@@ -109,6 +148,7 @@ impl EcrState {
         self.pull_through_cache_rules.clear();
         self.repository_creation_templates.clear();
         self.signing_configuration = None;
+        self.replication_backfills.clear();
     }
 
     // ARN carries the request's credential-scope region (req.region), not the

@@ -327,7 +327,7 @@ impl EmrService {
         let Some(arr) = steps_in.and_then(Value::as_array) else {
             return Vec::new();
         };
-        arr.iter().map(|s| build_step(s, created)).collect()
+        arr.iter().map(|s| build_step(s, created, None)).collect()
     }
 
     pub(crate) fn describe_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -486,10 +486,15 @@ impl EmrService {
         let body = req.json_body();
         let id = sf(&body, "JobFlowId").unwrap_or_default().to_string();
         let created = now_epoch();
+        let execution_role = sf(&body, "ExecutionRoleArn");
         let new_steps: Vec<Value> = body
             .get("Steps")
             .and_then(Value::as_array)
-            .map(|a| a.iter().map(|s| build_step(s, created)).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|s| build_step(s, created, execution_role))
+                    .collect()
+            })
             .unwrap_or_default();
         let step_ids: Vec<String> = new_steps
             .iter()
@@ -1487,7 +1492,29 @@ fn identity_key(identity_id: &str, identity_name: &str) -> String {
     }
 }
 
-fn build_step(cfg: &Value, created: f64) -> Value {
+/// Build a stored `Step`. `ExecutionRoleArn` comes from `AddJobFlowSteps`;
+/// `LogUri` / `EncryptionKeyArn` from the step's
+/// `StepMonitoringConfiguration.S3MonitoringConfiguration`. Steps settle as
+/// COMPLETED without running on a YARN cluster, so no `AdditionalInfo`
+/// (YARN application IDs / resource manager) is ever produced.
+fn build_step(cfg: &Value, created: f64, execution_role: Option<&str>) -> Value {
+    let mut step = build_step_core(cfg, created);
+    if let Some(obj) = step.as_object_mut() {
+        if let Some(role) = execution_role {
+            obj.insert("ExecutionRoleArn".into(), json!(role));
+        }
+        if let Some(s3) = cfg.pointer("/StepMonitoringConfiguration/S3MonitoringConfiguration") {
+            for key in ["LogUri", "EncryptionKeyArn"] {
+                if let Some(v) = sf(s3, key) {
+                    obj.insert(key.into(), json!(v));
+                }
+            }
+        }
+    }
+    step
+}
+
+fn build_step_core(cfg: &Value, created: f64) -> Value {
     let hadoop = cfg.get("HadoopJarStep").cloned().unwrap_or(json!({}));
     let mut config = serde_json::Map::new();
     if let Some(jar) = sf(&hadoop, "Jar") {
@@ -1611,7 +1638,16 @@ fn cluster_summary(c: &Value) -> Value {
 
 fn step_summary(s: &Value) -> Value {
     let mut out = serde_json::Map::new();
-    for key in ["Id", "Name", "Config", "ActionOnFailure", "Status", "LogUri", "EncryptionKeyArn"] {
+    for key in [
+        "Id",
+        "Name",
+        "Config",
+        "ActionOnFailure",
+        "Status",
+        "LogUri",
+        "EncryptionKeyArn",
+        "AdditionalInfo",
+    ] {
         if let Some(v) = s.get(key) {
             out.insert(key.into(), v.clone());
         }
@@ -1737,6 +1773,61 @@ mod run_job_flow_tests {
             .filter_map(|x| x.pointer("/Name").and_then(Value::as_str))
             .collect();
         assert_eq!(names, vec!["B", "A"], "newest-first: {names:?}");
+    }
+
+    #[test]
+    fn steps_keep_execution_role_and_monitoring_configuration() {
+        let s = svc();
+        let id = json_of(
+            s.run_job_flow(&req(
+                "RunJobFlow",
+                json!({"Name": "c", "Instances": {"KeepJobFlowAliveWhenNoSteps": true}}),
+            ))
+            .unwrap(),
+        )["JobFlowId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let added = json_of(
+            s.add_job_flow_steps(&req(
+                "AddJobFlowSteps",
+                json!({
+                    "JobFlowId": id,
+                    "ExecutionRoleArn": "arn:aws:iam::000000000000:role/step",
+                    "Steps": [{
+                        "Name": "A",
+                        "HadoopJarStep": {"Jar": "command-runner.jar"},
+                        "StepMonitoringConfiguration": {"S3MonitoringConfiguration": {
+                            "LogUri": "s3://logs/steps/",
+                            "EncryptionKeyArn": "arn:aws:kms:us-east-1:000000000000:key/k"
+                        }}
+                    }]
+                }),
+            ))
+            .unwrap(),
+        );
+        let step_id = added["StepIds"][0].as_str().unwrap();
+        let step = json_of(
+            s.describe_step(&req(
+                "DescribeStep",
+                json!({"ClusterId": id, "StepId": step_id}),
+            ))
+            .unwrap(),
+        )["Step"]
+            .clone();
+        assert_eq!(step["ExecutionRoleArn"], "arn:aws:iam::000000000000:role/step");
+        assert_eq!(step["LogUri"], "s3://logs/steps/");
+        assert_eq!(
+            step["EncryptionKeyArn"],
+            "arn:aws:kms:us-east-1:000000000000:key/k"
+        );
+        // No YARN cluster runs the step, so no AdditionalInfo is reported.
+        assert!(step.get("AdditionalInfo").is_none());
+        let summary = json_of(s.list_steps(&req("ListSteps", json!({"ClusterId": id}))).unwrap())
+            ["Steps"][0]
+            .clone();
+        assert_eq!(summary["LogUri"], "s3://logs/steps/");
+        assert!(summary.get("ExecutionRoleArn").is_none());
     }
 
     #[test]

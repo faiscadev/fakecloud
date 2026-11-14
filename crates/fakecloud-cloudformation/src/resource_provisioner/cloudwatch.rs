@@ -192,6 +192,11 @@ impl ResourceProvisioner {
             alarm_configuration_updated_timestamp: now,
             metrics: parse_cfn_alarm_metrics(props),
             state_manually_set: false,
+            action_configuration: None,
+            warm_up_configuration: None,
+            evaluation_criteria: None,
+            evaluation_window: None,
+            evaluation_interval: None,
         };
         let region_alarms = state.alarms_in_mut(&self.region);
         if region_alarms.contains_key(&alarm_name) {

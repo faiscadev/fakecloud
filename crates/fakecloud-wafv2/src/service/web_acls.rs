@@ -32,6 +32,7 @@ impl Wafv2Service {
         let data_protection_config = body.get("DataProtectionConfig").cloned();
         let on_source_d_do_s_protection_config = body.get("OnSourceDDoSProtectionConfig").cloned();
         let application_config = body.get("ApplicationConfig").cloned();
+        let monetization_config = super::monetization::parse_monetization_config(&body)?;
         let tags = parse_tags(body.get("Tags"))?;
 
         let key = (scope.clone(), name.clone());
@@ -66,6 +67,7 @@ impl Wafv2Service {
             data_protection_config,
             on_source_d_do_s_protection_config,
             application_config,
+            monetization_config,
             retrofitted_by_firewall_manager: false,
             pre_process_firewall_manager_rule_groups: Vec::new(),
             post_process_firewall_manager_rule_groups: Vec::new(),
@@ -201,6 +203,7 @@ impl Wafv2Service {
             .get("Description")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let monetization_config = super::monetization::parse_monetization_config(&body)?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id, &req.region);
         let acl = account
@@ -228,6 +231,7 @@ impl Wafv2Service {
         acl.data_protection_config = body.get("DataProtectionConfig").cloned();
         acl.on_source_d_do_s_protection_config = body.get("OnSourceDDoSProtectionConfig").cloned();
         acl.application_config = body.get("ApplicationConfig").cloned();
+        acl.monetization_config = monetization_config;
         acl.lock_token = synth_uuid();
         Ok(AwsResponse::ok_json(
             json!({ "NextLockToken": acl.lock_token }),

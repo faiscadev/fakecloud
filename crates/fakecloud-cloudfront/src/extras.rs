@@ -22,6 +22,8 @@ pub struct VpcOriginEndpointConfig {
     pub origin_protocol_policy: String,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub origin_ssl_protocols: Option<OriginSslProtocols>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub ip_address_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

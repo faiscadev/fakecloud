@@ -34,6 +34,7 @@ mod shape_tests;
 mod special;
 #[cfg(test)]
 mod tests;
+mod training_sessions;
 
 /// Every operation name in the Amazon SageMaker Smithy model.
 pub use crate::generated::ACTIONS as SAGEMAKER_ACTIONS;

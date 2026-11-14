@@ -195,7 +195,7 @@ async fn make_capacity_reservation(server: &TestServer, name: &str) {
 
 // ─── Workgroups ────────────────────────────────────────────────────
 
-#[test_action("athena", "CreateWorkGroup", checksum = "a1421529")]
+#[test_action("athena", "CreateWorkGroup", checksum = "b83f575d")]
 #[tokio::test]
 async fn athena_create_work_group() {
     let server = TestServer::start().await;
@@ -209,7 +209,7 @@ async fn athena_create_work_group() {
         .unwrap();
 }
 
-#[test_action("athena", "GetWorkGroup", checksum = "b4b7f16c")]
+#[test_action("athena", "GetWorkGroup", checksum = "58e6e3b8")]
 #[tokio::test]
 async fn athena_get_work_group() {
     let server = TestServer::start().await;
@@ -236,7 +236,7 @@ async fn athena_list_work_groups() {
         .unwrap();
 }
 
-#[test_action("athena", "UpdateWorkGroup", checksum = "da75ec69")]
+#[test_action("athena", "UpdateWorkGroup", checksum = "4689c859")]
 #[tokio::test]
 async fn athena_update_work_group() {
     let server = TestServer::start().await;
@@ -630,7 +630,7 @@ async fn athena_stop_query_execution() {
         .unwrap();
 }
 
-#[test_action("athena", "GetQueryExecution", checksum = "bc94fa2c")]
+#[test_action("athena", "GetQueryExecution", checksum = "a87f4760")]
 #[tokio::test]
 async fn athena_get_query_execution() {
     let server = TestServer::start().await;
@@ -659,7 +659,7 @@ async fn athena_list_query_executions() {
         .unwrap();
 }
 
-#[test_action("athena", "BatchGetQueryExecution", checksum = "effdf281")]
+#[test_action("athena", "BatchGetQueryExecution", checksum = "49c5649b")]
 #[tokio::test]
 async fn athena_batch_get_query_execution() {
     let server = TestServer::start().await;
@@ -847,7 +847,7 @@ async fn athena_create_presigned_notebook_url() {
 
 // ─── Sessions / calculations ───────────────────────────────────────
 
-#[test_action("athena", "StartSession", checksum = "7782ed88")]
+#[test_action("athena", "StartSession", checksum = "b0d15419")]
 #[tokio::test]
 async fn athena_start_session() {
     let server = TestServer::start().await;
@@ -866,7 +866,7 @@ async fn athena_start_session() {
         .unwrap();
 }
 
-#[test_action("athena", "GetSession", checksum = "9b1d0a32")]
+#[test_action("athena", "GetSession", checksum = "8d73b189")]
 #[tokio::test]
 async fn athena_get_session() {
     let server = TestServer::start().await;
@@ -1308,4 +1308,110 @@ async fn athena_get_resource_dashboard() {
         .send()
         .await
         .unwrap();
+}
+
+// The system table operations are newer than the workspace's aws-sdk-athena,
+// so they are driven over raw awsJson1.1 (x-amz-target: AmazonAthena.<Op>).
+async fn athena_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("AmazonAthena.{op}"))
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/athena/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[test_action("athena", "CreateSystemTableConfiguration", checksum = "78927b66")]
+#[test_action("athena", "GetSystemTableConfiguration", checksum = "0195dec3")]
+#[test_action("athena", "UpdateSystemTableConfiguration", checksum = "76be4da7")]
+#[test_action("athena", "ListSystemTableStatuses", checksum = "5cde31ec")]
+#[test_action("athena", "DeleteSystemTableConfiguration", checksum = "47f30ad2")]
+#[tokio::test]
+async fn athena_system_table_configuration_lifecycle() {
+    use serde_json::json;
+    let server = TestServer::start().await;
+    let key = "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+    let (status, out) = athena_raw(
+        &server,
+        "CreateSystemTableConfiguration",
+        json!({"TableName": "ALL", "KmsKeyArn": key, "Tags": [{"Key": "team", "Value": "data"}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["TableName"], "ALL");
+    assert_eq!(out["KmsKeyArn"], key);
+    assert!(out["CreatedAt"].is_number());
+
+    let (status, out) = athena_raw(
+        &server,
+        "GetSystemTableConfiguration",
+        json!({"TableName": "ALL"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["KmsKeyArn"], key);
+
+    let (status, out) = athena_raw(&server, "ListSystemTableStatuses", json!({})).await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(
+        out["Items"],
+        json!([{"TableName": "QUERY_EXECUTIONS", "Enabled": true}])
+    );
+
+    // Workgroups report the account's system table statuses.
+    let wg = server
+        .athena_client()
+        .await
+        .get_work_group()
+        .work_group("primary")
+        .send()
+        .await
+        .unwrap();
+    assert!(wg.work_group().unwrap().configuration().is_some());
+
+    let (status, out) = athena_raw(
+        &server,
+        "UpdateSystemTableConfiguration",
+        json!({"TableName": "ALL"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert!(out.get("KmsKeyArn").is_none());
+
+    let (status, out) = athena_raw(
+        &server,
+        "DeleteSystemTableConfiguration",
+        json!({"TableName": "ALL"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+
+    let (status, out) = athena_raw(
+        &server,
+        "GetSystemTableConfiguration",
+        json!({"TableName": "ALL"}),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(out["__type"], "ResourceNotFoundException");
+
+    let (_, out) = athena_raw(&server, "ListSystemTableStatuses", json!({})).await;
+    assert_eq!(out["Items"][0]["Enabled"], false);
 }

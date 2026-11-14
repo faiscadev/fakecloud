@@ -4,7 +4,7 @@ description = "Real PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, and Db2 inst
 weight = 17
 +++
 
-fakecloud implements **164 of 164** RDS operations at 100% Smithy conformance. DB instances run in **real Docker containers** — your code connects to a real database, not a mock.
+fakecloud implements **168 of 168** RDS operations at 100% Smithy conformance. DB instances run in **real Docker containers** — your code connects to a real database, not a mock.
 
 ## Supported features
 

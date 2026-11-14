@@ -817,10 +817,26 @@ impl SsoAdminService {
     fn list_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         validate_common(&b)?;
+        check_enum(&b, "RegionScope", &["CURRENT_REGION", "ALL_REGIONS"])?;
+        // CURRENT_REGION (the default) lists only instances enabled in the
+        // calling Region; ALL_REGIONS lists every instance the caller owns.
+        let all_regions = b["RegionScope"].as_str() == Some("ALL_REGIONS");
+        let in_scope = |inst: &&StoredInstance| {
+            all_regions
+                || inst.primary_region.as_deref() == Some(req.region.as_str())
+                || inst.regions.iter().any(|r| r.region_name == req.region)
+                || (inst.primary_region.is_none() && inst.regions.is_empty())
+        };
         let guard = self.state.read();
         let rows: Vec<Value> = guard
             .get(&req.account_id)
-            .map(|a| a.instances.values().map(build_instance_metadata).collect())
+            .map(|a| {
+                a.instances
+                    .values()
+                    .filter(in_scope)
+                    .map(build_instance_metadata)
+                    .collect()
+            })
             .unwrap_or_default();
         list_response("Instances", rows, &b)
     }

@@ -317,6 +317,18 @@ fn repository_filters_match_honours_wildcard() {
 }
 
 #[test]
+fn repository_filters_match_honours_prefix_match() {
+    use super::repository_filters_match;
+    use crate::state::RepositoryFilter;
+    let filters = vec![RepositoryFilter {
+        filter: "team-a".to_string(),
+        filter_type: "PREFIX_MATCH".to_string(),
+    }];
+    assert!(repository_filters_match(&filters, "team-a/svc"));
+    assert!(!repository_filters_match(&filters, "team-b/svc"));
+}
+
+#[test]
 fn replicate_image_copies_to_destination_account() {
     use super::EcrService;
     use crate::state::{

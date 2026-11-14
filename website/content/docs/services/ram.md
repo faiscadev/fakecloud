@@ -1,11 +1,11 @@
 +++
 title = "AWS Resource Access Manager"
-description = "AWS Resource Access Manager (ram) on fakecloud: a complete 35-operation implementation (100% conformance) — resource shares, principal/resource associations, cross-account share invitations, managed + customer permissions with versions, resource-type catalogue, and tagging. restJson1."
+description = "AWS Resource Access Manager (ram) on fakecloud: a complete 36-operation implementation (100% conformance) — resource shares, principal/resource associations, cross-account share invitations, managed + customer permissions with versions, resource-type catalogue, and tagging. restJson1."
 weight = 61
 +++
 
 fakecloud implements **AWS Resource Access Manager (RAM)** as a restJson1
-service. All **35 operations** ship with **100% conformance** against AWS's
+service. All **36 operations** ship with **100% conformance** against AWS's
 own Smithy model, backed by account-partitioned state that persists across
 restarts in persistent mode.
 

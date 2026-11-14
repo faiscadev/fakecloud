@@ -26,7 +26,8 @@ use fakecloud_persistence::SnapshotStore;
 use crate::state::{
     invitation_arn, managed_permission_arn, managed_permission_name, permission_arn,
     resource_share_arn, AssociationRecord, InvitationRecord, PermissionRecord,
-    PermissionVersionRecord, ResourceShareRecord, SharedRamState, TagMap,
+    PermissionVersionRecord, RamState, ResourceShareRecord, SharedRamState, TagMap,
+    TemplateParameterDeclaration, TemplateParameterValue,
 };
 use crate::validate;
 
@@ -65,6 +66,7 @@ pub const RAM_ACTIONS: &[&str] = &[
     "SetDefaultPermissionVersion",
     "TagResource",
     "UntagResource",
+    "UpdatePermission",
     "UpdateResourceShare",
 ];
 
@@ -90,6 +92,7 @@ const MUTATING: &[&str] = &[
     "SetDefaultPermissionVersion",
     "TagResource",
     "UntagResource",
+    "UpdatePermission",
     "UpdateResourceShare",
 ];
 
@@ -225,6 +228,7 @@ impl RamService {
             (&Method::POST, "setdefaultpermissionversion") => "SetDefaultPermissionVersion",
             (&Method::POST, "tagresource") => "TagResource",
             (&Method::POST, "untagresource") => "UntagResource",
+            (&Method::POST, "updatepermission") => "UpdatePermission",
             (&Method::POST, "updateresourceshare") => "UpdateResourceShare",
             _ => return None,
         };
@@ -505,8 +509,11 @@ fn managed_summary(region: &str, name: &str, resource_type: &str, now: DateTime<
     })
 }
 
-fn customer_summary(p: &PermissionRecord) -> Value {
-    json!({
+/// A customer-managed permission as a `ResourceSharePermissionSummary`. Its
+/// `permissionTemplateParameters` are the default version's declarations,
+/// with the values of an association when `values` is one.
+fn customer_summary(p: &PermissionRecord, values: Option<&[TemplateParameterValue]>) -> Value {
+    let mut v = json!({
         "arn": p.arn,
         "version": p.default_version.to_string(),
         "defaultVersion": true,
@@ -519,11 +526,18 @@ fn customer_summary(p: &PermissionRecord) -> Value {
         "permissionType": "CUSTOMER_MANAGED",
         "featureSet": p.feature_set,
         "tags": tag_list_value(&p.tags),
-    })
+        // Customer-managed permissions live in their owner's account.
+        "resourceOwner": "SELF",
+    });
+    let decls = default_declarations(p);
+    if !decls.is_empty() {
+        v["permissionTemplateParameters"] = template_parameters_value(decls, values);
+    }
+    v
 }
 
 fn customer_detail(p: &PermissionRecord, v: &PermissionVersionRecord) -> Value {
-    json!({
+    let mut out = json!({
         "arn": p.arn,
         "version": v.version.to_string(),
         "defaultVersion": v.is_default,
@@ -537,7 +551,337 @@ fn customer_detail(p: &PermissionRecord, v: &PermissionVersionRecord) -> Value {
         "featureSet": p.feature_set,
         "status": p.status,
         "tags": tag_list_value(&p.tags),
-    })
+        "resourceOwner": "SELF",
+    });
+    if !v.template_parameters.is_empty() {
+        out["permissionTemplateParameters"] = Value::Array(
+            v.template_parameters
+                .iter()
+                .map(declaration_value)
+                .collect(),
+        );
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Permission template parameters
+// ---------------------------------------------------------------------------
+
+const TEMPLATE_PARAMETER_TYPES: &[&str] = &["STRING", "STRING_LIST"];
+
+/// The template parameters the default version of `p` declares.
+fn default_declarations(p: &PermissionRecord) -> &[TemplateParameterDeclaration] {
+    p.versions
+        .iter()
+        .find(|v| v.version == p.default_version)
+        .map(|v| v.template_parameters.as_slice())
+        .unwrap_or(&[])
+}
+
+/// The declarations of the permission `arn` names in `st`, at `version` (its
+/// default version when `None`). AWS-managed permissions declare none.
+fn declarations_of(
+    st: &RamState,
+    arn: &str,
+    version: Option<u32>,
+) -> Vec<TemplateParameterDeclaration> {
+    let Some(p) = st.permissions.get(arn) else {
+        return Vec::new();
+    };
+    let version = version.unwrap_or(p.default_version);
+    p.versions
+        .iter()
+        .find(|v| v.version == version)
+        .map(|v| v.template_parameters.clone())
+        .unwrap_or_default()
+}
+
+/// A `PermissionTemplateParameterDeclaration`.
+fn declaration_value(d: &TemplateParameterDeclaration) -> Value {
+    let mut v = json!({ "name": d.name, "type": d.parameter_type });
+    if let Some(desc) = &d.description {
+        v["description"] = json!(desc);
+    }
+    v
+}
+
+/// `PermissionTemplateParameterList`: each declaration, with its `values`
+/// when given an association's values.
+fn template_parameters_value(
+    decls: &[TemplateParameterDeclaration],
+    values: Option<&[TemplateParameterValue]>,
+) -> Value {
+    Value::Array(
+        decls
+            .iter()
+            .map(|d| {
+                let mut v = declaration_value(d);
+                if let Some(given) = values.and_then(|vals| vals.iter().find(|x| x.name == d.name))
+                {
+                    v["values"] = json!(given.values);
+                }
+                v
+            })
+            .collect(),
+    )
+}
+
+/// The `@{name}` placeholders of a policy template, in order of appearance.
+fn template_placeholders(policy: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = policy;
+    while let Some(start) = rest.find("@{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else { break };
+        let name = &after[..end];
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// Parse and check the `permissionTemplateParameters` declarations of a
+/// CreatePermission / CreatePermissionVersion request against its policy
+/// template: each has a unique name and a `STRING` / `STRING_LIST` type, and
+/// the template's `@{name}` placeholders are exactly the declared names.
+fn parse_declarations(
+    body: &Value,
+    policy: &str,
+) -> Result<Vec<TemplateParameterDeclaration>, AwsServiceError> {
+    let mut out: Vec<TemplateParameterDeclaration> = Vec::new();
+    for item in body
+        .get("permissionTemplateParameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| invalid_param("Each template parameter requires a name."))?;
+        let parameter_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|t| TEMPLATE_PARAMETER_TYPES.contains(t))
+            .ok_or_else(|| {
+                invalid_param(format!(
+                    "Template parameter {name} requires a type of STRING or STRING_LIST."
+                ))
+            })?;
+        if out.iter().any(|d| d.name == name) {
+            return Err(invalid_param(format!(
+                "Template parameter {name} is declared more than once."
+            )));
+        }
+        out.push(TemplateParameterDeclaration {
+            name: name.to_string(),
+            parameter_type: parameter_type.to_string(),
+            description: item
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    let placeholders = template_placeholders(policy);
+    if let Some(undeclared) = placeholders
+        .iter()
+        .find(|p| !out.iter().any(|d| &d.name == *p))
+    {
+        return Err(aws_err(
+            "MalformedPolicyTemplateException",
+            format!(
+                "The policy template uses the undeclared template parameter @{{{undeclared}}}."
+            ),
+        ));
+    }
+    if let Some(unused) = out.iter().find(|d| !placeholders.contains(&d.name)) {
+        return Err(aws_err(
+            "MalformedPolicyTemplateException",
+            format!(
+                "The template parameter {} is not used in the policy template.",
+                unused.name
+            ),
+        ));
+    }
+    Ok(out)
+}
+
+/// Parse a `PermissionTemplateParameterInputList`.
+fn parse_values(v: Option<&Value>) -> Vec<TemplateParameterValue> {
+    v.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|item| TemplateParameterValue {
+            name: item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            values: item
+                .get("values")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Check the values given for a permission's template parameters: every
+/// declared parameter gets a value (one for `STRING`, at least one for
+/// `STRING_LIST`), and no value names an undeclared parameter.
+fn check_values(
+    permission_arn: &str,
+    decls: &[TemplateParameterDeclaration],
+    values: &[TemplateParameterValue],
+) -> Result<(), AwsServiceError> {
+    if decls.is_empty() {
+        if values.is_empty() {
+            return Ok(());
+        }
+        return Err(invalid_param(format!(
+            "The permission {permission_arn} declares no template parameters."
+        )));
+    }
+    for v in values {
+        if !decls.iter().any(|d| d.name == v.name) {
+            return Err(invalid_param(format!(
+                "The permission {permission_arn} declares no template parameter named {}.",
+                v.name
+            )));
+        }
+        if values.iter().filter(|x| x.name == v.name).count() > 1 {
+            return Err(invalid_param(format!(
+                "Template parameter {} is given more than once.",
+                v.name
+            )));
+        }
+    }
+    for d in decls {
+        let given = values.iter().find(|v| v.name == d.name).ok_or_else(|| {
+            invalid_param(format!(
+                "A value is required for the template parameter {} of permission {permission_arn}.",
+                d.name
+            ))
+        })?;
+        let count_ok = if d.parameter_type == "STRING" {
+            given.values.len() == 1
+        } else {
+            !given.values.is_empty()
+        };
+        if !count_ok {
+            return Err(invalid_param(format!(
+                "Template parameter {} of type {} requires {} value.",
+                d.name,
+                d.parameter_type,
+                if d.parameter_type == "STRING" {
+                    "exactly one"
+                } else {
+                    "at least one"
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Render a policy template with its parameter values: a `STRING` value is
+/// substituted directly into the template, a `STRING_LIST` expands to an
+/// array (`"@{name}"` becomes `["a","b"]`).
+fn render_template(
+    policy: &str,
+    decls: &[TemplateParameterDeclaration],
+    values: &[TemplateParameterValue],
+) -> String {
+    let mut out = policy.to_string();
+    for d in decls {
+        let Some(given) = values.iter().find(|v| v.name == d.name) else {
+            continue;
+        };
+        let placeholder = format!("@{{{}}}", d.name);
+        if d.parameter_type == "STRING_LIST" {
+            let array = serde_json::to_string(&given.values).unwrap_or_default();
+            out = out.replace(&format!("\"{placeholder}\""), &array);
+            out = out.replace(&placeholder, &array);
+        } else {
+            let escaped = serde_json::to_string(&given.values[0]).unwrap_or_default();
+            out = out.replace(&placeholder, &escaped[1..escaped.len() - 1]);
+        }
+    }
+    out
+}
+
+/// CreateResourceShare's `permissionTemplateParameters`
+/// (`[{permissionArn, permissionTemplateParameters}]`): the values for each
+/// of the share's permissions that declares template parameters, checked
+/// against its declarations. Every permission must be attachable.
+fn share_permission_parameters(
+    st: &RamState,
+    permission_arns: &[String],
+    body: &Value,
+) -> Result<std::collections::BTreeMap<String, Vec<TemplateParameterValue>>, AwsServiceError> {
+    let mut given: std::collections::BTreeMap<String, Vec<TemplateParameterValue>> =
+        std::collections::BTreeMap::new();
+    for entry in body
+        .get("permissionTemplateParameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let arn = entry
+            .get("permissionArn")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                invalid_param("Each permissionTemplateParameters entry requires a permissionArn.")
+            })?;
+        if !permission_arns.iter().any(|p| p == arn) {
+            return Err(invalid_param(format!(
+                "Template parameters were given for {arn}, which is not in permissionArns."
+            )));
+        }
+        if given.contains_key(arn) {
+            return Err(invalid_param(format!(
+                "Template parameters for {arn} are given more than once."
+            )));
+        }
+        given.insert(
+            arn.to_string(),
+            parse_values(entry.get("permissionTemplateParameters")),
+        );
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for arn in permission_arns {
+        require_attachable(st, arn)?;
+        let decls = declarations_of(st, arn, None);
+        let values = given.remove(arn).unwrap_or_default();
+        check_values(arn, &decls, &values)?;
+        if !decls.is_empty() {
+            out.insert(arn.clone(), values);
+        }
+    }
+    Ok(out)
+}
+
+/// The status a new association with the permission `arn` sees: a
+/// `DEPRECATED` permission can't be associated with resource shares.
+fn require_attachable(st: &RamState, arn: &str) -> Result<(), AwsServiceError> {
+    match st.permissions.get(arn) {
+        Some(p) if p.status != "ATTACHABLE" => Err(aws_err(
+            "OperationNotPermittedException",
+            format!(
+                "The permission {arn} is {} and can't be associated with resource shares.",
+                p.status
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn managed_detail(region: &str, name: &str, resource_type: &str, now: DateTime<Utc>) -> Value {
@@ -615,6 +959,7 @@ impl RamService {
             "GetResourcePolicies" => self.get_resource_policies(req, &body),
             "TagResource" => self.tag_resource(req, &body),
             "UntagResource" => self.untag_resource(req, &body),
+            "UpdatePermission" => self.update_permission(req, &body),
             _ => Err(AwsServiceError::action_not_implemented("ram", action)),
         }
     }
@@ -675,6 +1020,12 @@ impl RamService {
             }
         }
 
+        let permission_arns = string_list(body, "permissionArns");
+        let mut accounts = self.state.write();
+        let permission_parameters = {
+            let st = accounts.get_or_create(&req.account_id);
+            share_permission_parameters(st, &permission_arns, body)?
+        };
         let record = ResourceShareRecord {
             arn: arn.clone(),
             name,
@@ -689,11 +1040,11 @@ impl RamService {
             retain_sharing: retain,
             resource_associations,
             principal_associations,
-            permission_arns: string_list(body, "permissionArns"),
+            permission_arns,
+            permission_parameters,
         };
         let value = share_to_value(&record);
 
-        let mut accounts = self.state.write();
         accounts
             .get_or_create(&req.account_id)
             .resource_shares
@@ -890,16 +1241,36 @@ impl RamService {
         let permission = req_str(body, "permissionArn")?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        if !st.resource_shares.contains_key(&arn) {
+            return Err(unknown_resource(format!(
+                "ResourceShare {arn} could not be found."
+            )));
+        }
+        let values = parse_values(body.get("permissionTemplateParameters"));
+        let decls = if associate {
+            require_attachable(st, &permission)?;
+            let decls = declarations_of(st, &permission, u32_field(body, "permissionVersion"));
+            check_values(&permission, &decls, &values)?;
+            decls
+        } else {
+            Vec::new()
+        };
         let share = st
             .resource_shares
             .get_mut(&arn)
             .ok_or_else(|| unknown_resource(format!("ResourceShare {arn} could not be found.")))?;
         if associate {
             if !share.permission_arns.contains(&permission) {
-                share.permission_arns.push(permission);
+                share.permission_arns.push(permission.clone());
+            }
+            if decls.is_empty() {
+                share.permission_parameters.remove(&permission);
+            } else {
+                share.permission_parameters.insert(permission, values);
             }
         } else {
             share.permission_arns.retain(|p| p != &permission);
+            share.permission_parameters.remove(&permission);
         }
         share.last_updated_time = Utc::now();
         Ok(ok(json!({
@@ -1040,6 +1411,7 @@ impl RamService {
         let name = req_str(body, "name")?;
         let resource_type = req_str(body, "resourceType")?;
         let policy = req_str(body, "policyTemplate")?;
+        let template_parameters = parse_declarations(body, &policy)?;
         let now = Utc::now();
         let arn = permission_arn(&req.region, &req.account_id, &name);
         let mut accounts = self.state.write();
@@ -1065,10 +1437,11 @@ impl RamService {
                 is_default: true,
                 creation_time: now,
                 last_updated_time: now,
+                template_parameters,
             }],
             tags: parse_tag_list(body, "tags"),
         };
-        let value = customer_summary(&record);
+        let value = customer_summary(&record, None);
         st.permissions.insert(arn, record);
         Ok(ok(json!({
             "permission": value,
@@ -1083,6 +1456,7 @@ impl RamService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = req_str(body, "permissionArn")?;
         let policy = req_str(body, "policyTemplate")?;
+        let template_parameters = parse_declarations(body, &policy)?;
         let now = Utc::now();
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -1097,6 +1471,7 @@ impl RamService {
             is_default: false,
             creation_time: now,
             last_updated_time: now,
+            template_parameters,
         };
         p.versions.push(rec.clone());
         p.last_updated_time = now;
@@ -1173,8 +1548,11 @@ impl RamService {
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = req_str(body, "permissionArn")?;
+        let values = parse_values(body.get("permissionTemplateParameters"));
         let now = Utc::now();
         if let Some((name, rt)) = find_managed(&arn) {
+            // AWS-managed permissions declare no template parameters.
+            check_values(&arn, &[], &values)?;
             return Ok(ok(
                 json!({ "permission": managed_detail(&req.region, name, rt, now) }),
             ));
@@ -1190,7 +1568,55 @@ impl RamService {
             None => p.versions.iter().find(|v| v.version == p.default_version),
         }
         .ok_or_else(|| invalid_param("Permission version could not be found."))?;
-        Ok(ok(json!({ "permission": customer_detail(p, v) })))
+        let mut detail = customer_detail(p, v);
+        // Given values, the policy comes back rendered with them.
+        if body.get("permissionTemplateParameters").is_some() {
+            check_values(&arn, &v.template_parameters, &values)?;
+            detail["permission"] = json!(render_template(
+                &v.policy_template,
+                &v.template_parameters,
+                &values
+            ));
+        }
+        Ok(ok(json!({ "permission": detail })))
+    }
+
+    /// UpdatePermission: deprecate a customer-managed permission (no new
+    /// associations; existing ones keep working) or restore a deprecated one
+    /// to `ATTACHABLE`.
+    fn update_permission(
+        &self,
+        req: &AwsRequest,
+        body: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = req_str(body, "permissionArn")?;
+        let status = req_str(body, "status")?;
+        if arn_resource(&arn, "ram").is_none() {
+            return Err(aws_err(
+                "MalformedArnException",
+                format!("The permission ARN {arn} is malformed."),
+            ));
+        }
+        if find_managed(&arn).is_some() {
+            return Err(aws_err(
+                "OperationNotPermittedException",
+                format!("The AWS managed permission {arn} can't be updated."),
+            ));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let p = st
+            .permissions
+            .get_mut(&arn)
+            .ok_or_else(|| unknown_resource(format!("Permission {arn} could not be found.")))?;
+        if p.status != status {
+            p.status = status.clone();
+            p.last_updated_time = Utc::now();
+        }
+        Ok(ok(json!({
+            "clientToken": str_field(body, "clientToken").unwrap_or_else(gen_id),
+            "permissionStatus": status,
+        })))
     }
 
     fn list_permissions(
@@ -1201,19 +1627,33 @@ impl RamService {
         let now = Utc::now();
         let type_filter = str_field(body, "resourceType");
         let perm_type = str_field(body, "permissionType").unwrap_or_else(|| "ALL".into());
+        let status_filter = str_field(body, "permissionStatus");
+        // `resourceOwner` selects permissions an account owns (`SELF`: its
+        // customer-managed permissions) or that other accounts shared with it
+        // (`OTHER-ACCOUNTS`). AWS-managed permissions are owned by neither, so
+        // they are listed only without the filter. No permission is shared
+        // across accounts here, so `OTHER-ACCOUNTS` lists none.
+        let owner_filter = str_field(body, "resourceOwner");
         let mut items: Vec<Value> = Vec::new();
-        if perm_type == "ALL" || perm_type == "AWS_MANAGED" {
+        if (perm_type == "ALL" || perm_type == "AWS_MANAGED")
+            && owner_filter.is_none()
+            && status_filter.as_deref().is_none_or(|s| s == "ATTACHABLE")
+        {
             for (name, rt) in MANAGED_PERMISSIONS {
                 if type_filter.as_deref().is_none_or(|t| t == *rt) {
                     items.push(managed_summary(&req.region, name, rt, now));
                 }
             }
         }
-        if perm_type == "ALL" || perm_type == "CUSTOMER_MANAGED" {
+        if (perm_type == "ALL" || perm_type == "CUSTOMER_MANAGED")
+            && owner_filter.as_deref().is_none_or(|o| o == "SELF")
+        {
             if let Some(st) = self.state.read().get(&req.account_id) {
                 for p in st.permissions.values() {
-                    if type_filter.as_deref().is_none_or(|t| t == p.resource_type) {
-                        items.push(customer_summary(p));
+                    if type_filter.as_deref().is_none_or(|t| t == p.resource_type)
+                        && status_filter.as_deref().is_none_or(|s| s == p.status)
+                    {
+                        items.push(customer_summary(p, None));
                     }
                 }
             }
@@ -1273,7 +1713,8 @@ impl RamService {
             if let Some((name, rt)) = find_managed(perm_arn) {
                 items.push(managed_summary(&req.region, name, rt, now));
             } else if let Some(p) = st.permissions.get(perm_arn) {
-                items.push(customer_summary(p));
+                let values = share.permission_parameters.get(perm_arn);
+                items.push(customer_summary(p, values.map(Vec::as_slice)));
             }
         }
         page_response(items, "permissions", body, &[])
@@ -1325,7 +1766,7 @@ impl RamService {
         p.feature_set = "STANDARD".into();
         p.last_updated_time = Utc::now();
         Ok(ok(json!({
-            "permission": customer_summary(p),
+            "permission": customer_summary(p, None),
             "clientToken": str_field(body, "clientToken").unwrap_or_else(gen_id),
         })))
     }
@@ -1374,6 +1815,17 @@ impl RamService {
                 "Permission {from} could not be found."
             )));
         }
+        // The target takes the values its template parameters need, and must
+        // be attachable (a deprecated permission takes no new associations).
+        let values = parse_values(body.get("permissionTemplateParameters"));
+        let to_decls = declarations_of(st, &to, None);
+        if find_managed(&to).is_none() && !st.permissions.contains_key(&to) {
+            return Err(unknown_resource(format!(
+                "Permission {to} could not be found."
+            )));
+        }
+        require_attachable(st, &to)?;
+        check_values(&to, &to_decls, &values)?;
         // Actually replace the permission on every resource share that used the
         // source permission, so ListPermissionAssociations reflects the swap.
         // Without this the work would settle but the association never changed.
@@ -1387,23 +1839,36 @@ impl RamService {
                         *p = to.clone();
                     }
                 }
+                share.permission_parameters.remove(&from);
+                if to_decls.is_empty() {
+                    share.permission_parameters.remove(&to);
+                } else {
+                    share
+                        .permission_parameters
+                        .insert(to.clone(), values.clone());
+                }
                 share.last_updated_time = now;
             }
         }
+        let to_version = st.permissions.get(&to).map_or(1, |p| p.default_version);
         // RAM's ReplacePermissionAssociationsWork has no async backing here, so
         // the swap completes synchronously and the work settles to COMPLETED
         // (the model has only status/creationTime/lastUpdatedTime -- no
         // statusCode/endTime -- so settling is status + lastUpdatedTime).
-        let work = json!({
+        let mut work = json!({
             "id": id,
             "fromPermissionArn": from,
             "fromPermissionVersion": from_version.to_string(),
             "toPermissionArn": to,
-            "toPermissionVersion": "1",
+            "toPermissionVersion": to_version.to_string(),
             "status": "COMPLETED",
             "creationTime": ts(now),
             "lastUpdatedTime": ts(now),
         });
+        if !to_decls.is_empty() {
+            work["permissionTemplateParameters"] =
+                template_parameters_value(&to_decls, Some(&values));
+        }
         st.replace_works.insert(id, work.clone());
         Ok(ok(json!({
             "replacePermissionAssociationsWork": work,
@@ -1421,26 +1886,47 @@ impl RamService {
         let default_filter = bool_field(body, "defaultVersion");
         let status_filter = str_field(body, "associationStatus");
         let type_filter = str_field(body, "resourceType");
+        let share_filter = str_field(body, "resourceShareArn");
+        // Associations with shares the account owns unless `OTHER-ACCOUNTS`.
+        let owner = str_field(body, "resourceOwner").unwrap_or_else(|| "SELF".into());
         let mut items: Vec<Value> = Vec::new();
         if let Some(st) = self.state.read().get(&req.account_id) {
             for share in st.resource_shares.values() {
+                if !owner_matches(share, &owner, &req.account_id)
+                    || share_filter.as_deref().is_some_and(|s| s != share.arn)
+                {
+                    continue;
+                }
                 for perm_arn in &share.permission_arns {
                     if perm_filter.as_deref().is_some_and(|p| p != perm_arn) {
                         continue;
                     }
-                    // Resolve the permission's type / version / feature set from
-                    // the managed catalogue or the account's customer permissions.
-                    let (rtype, version, feature) = if let Some((_, rt)) = find_managed(perm_arn) {
-                        (rt.to_string(), 1u32, "STANDARD".to_string())
-                    } else if let Some(p) = st.permissions.get(perm_arn) {
-                        (
-                            p.resource_type.clone(),
-                            p.default_version,
-                            p.feature_set.clone(),
-                        )
-                    } else {
-                        ("unknown".to_string(), 1, "STANDARD".to_string())
-                    };
+                    // Resolve the permission's type / version / feature set /
+                    // status from the managed catalogue or the account's
+                    // customer permissions.
+                    let (rtype, version, feature, status) =
+                        if let Some((_, rt)) = find_managed(perm_arn) {
+                            (
+                                rt.to_string(),
+                                1u32,
+                                "STANDARD".to_string(),
+                                "ATTACHABLE".to_string(),
+                            )
+                        } else if let Some(p) = st.permissions.get(perm_arn) {
+                            (
+                                p.resource_type.clone(),
+                                p.default_version,
+                                p.feature_set.clone(),
+                                p.status.clone(),
+                            )
+                        } else {
+                            (
+                                "unknown".to_string(),
+                                1,
+                                "STANDARD".to_string(),
+                                "ATTACHABLE".to_string(),
+                            )
+                        };
                     if type_filter.as_deref().is_some_and(|t| t != rtype) {
                         continue;
                     }
@@ -1454,16 +1940,25 @@ impl RamService {
                     if status_filter.as_deref().is_some_and(|s| s != "ASSOCIATED") {
                         continue;
                     }
-                    items.push(json!({
+                    // `status` is the permission's (ATTACHABLE, DEPRECATED, ...).
+                    let mut item = json!({
                         "arn": perm_arn,
                         "permissionVersion": version.to_string(),
                         "defaultVersion": true,
                         "resourceType": rtype,
-                        "status": "ASSOCIATED",
+                        "status": status,
                         "featureSet": feature,
                         "lastUpdatedTime": ts(share.last_updated_time),
                         "resourceShareArn": share.arn,
-                    }));
+                    });
+                    let decls = declarations_of(st, perm_arn, None);
+                    if !decls.is_empty() {
+                        item["permissionTemplateParameters"] = template_parameters_value(
+                            &decls,
+                            share.permission_parameters.get(perm_arn).map(Vec::as_slice),
+                        );
+                    }
+                    items.push(item);
                 }
             }
         }
@@ -1792,6 +2287,202 @@ mod tests {
         assert!(
             !arns.contains(&from),
             "swapped-out permission gone: {assocs}"
+        );
+    }
+
+    const TEMPLATE: &str = r#"{"Effect":"Allow","Action":["ec2:DescribeSubnets"],"Condition":{"StringEquals":{"aws:PrincipalTag/team":"@{team}","aws:SourceVpc":"@{vpcs}"}}}"#;
+
+    fn templated_permission(s: &RamService) -> String {
+        let body = json!({
+            "name": "tmpl",
+            "resourceType": "ec2:Subnet",
+            "policyTemplate": TEMPLATE,
+            "permissionTemplateParameters": [
+                {"name": "team", "type": "STRING", "description": "Team tag"},
+                {"name": "vpcs", "type": "STRING_LIST"},
+            ],
+        });
+        let out = json_of(s.create_permission(&req(&body), &body).unwrap());
+        assert_eq!(out["permission"]["resourceOwner"], "SELF");
+        assert_eq!(
+            out["permission"]["permissionTemplateParameters"][0],
+            json!({"name": "team", "type": "STRING", "description": "Team tag"})
+        );
+        out["permission"]["arn"].as_str().unwrap().to_string()
+    }
+
+    fn values() -> Value {
+        json!([
+            {"name": "team", "values": ["blue"]},
+            {"name": "vpcs", "values": ["vpc-1", "vpc-2"]},
+        ])
+    }
+
+    #[test]
+    fn template_declarations_must_match_the_policy_placeholders() {
+        let s = svc();
+        let undeclared = json!({
+            "name": "bad", "resourceType": "ec2:Subnet", "policyTemplate": TEMPLATE,
+            "permissionTemplateParameters": [{"name": "team", "type": "STRING"}],
+        });
+        let err = s
+            .create_permission(&req(&undeclared), &undeclared)
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "MalformedPolicyTemplateException");
+        let bad_type = json!({
+            "name": "bad", "resourceType": "ec2:Subnet", "policyTemplate": TEMPLATE,
+            "permissionTemplateParameters": [
+                {"name": "team", "type": "NUMBER"}, {"name": "vpcs", "type": "STRING_LIST"},
+            ],
+        });
+        let err = s
+            .create_permission(&req(&bad_type), &bad_type)
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    #[test]
+    fn get_permission_renders_template_values() {
+        let s = svc();
+        let arn = templated_permission(&s);
+        let body = json!({"permissionArn": arn, "permissionTemplateParameters": values()});
+        let got = json_of(s.get_permission(&req(&body), &body).unwrap());
+        let policy: Value =
+            serde_json::from_str(got["permission"]["permission"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            policy["Condition"]["StringEquals"],
+            json!({"aws:PrincipalTag/team": "blue", "aws:SourceVpc": ["vpc-1", "vpc-2"]})
+        );
+        // Missing a declared parameter is refused.
+        let body = json!({"permissionArn": arn, "permissionTemplateParameters": [
+            {"name": "team", "values": ["blue"]},
+        ]});
+        assert_eq!(
+            s.get_permission(&req(&body), &body).err().unwrap().code(),
+            "InvalidParameterException"
+        );
+    }
+
+    #[test]
+    fn association_values_are_stored_and_listed() {
+        let s = svc();
+        let arn = templated_permission(&s);
+        // A templated permission needs its values.
+        let create = json!({"name": "share", "permissionArns": [arn]});
+        assert_eq!(
+            s.create_resource_share(&req(&create), &create)
+                .err()
+                .unwrap()
+                .code(),
+            "InvalidParameterException"
+        );
+        let create = json!({
+            "name": "share",
+            "permissionArns": [arn],
+            "permissionTemplateParameters": [
+                {"permissionArn": arn, "permissionTemplateParameters": values()},
+            ],
+        });
+        let share = json_of(s.create_resource_share(&req(&create), &create).unwrap());
+        let share_arn = share["resourceShare"]["resourceShareArn"].clone();
+
+        let body = json!({"resourceShareArn": share_arn});
+        let perms = json_of(
+            s.list_resource_share_permissions(&req(&body), &body)
+                .unwrap(),
+        );
+        assert_eq!(
+            perms["permissions"][0]["permissionTemplateParameters"][1]["values"],
+            json!(["vpc-1", "vpc-2"])
+        );
+
+        let body = json!({"resourceShareArn": share_arn, "resourceOwner": "SELF"});
+        let assocs = json_of(s.list_permission_associations(&req(&body), &body).unwrap());
+        assert_eq!(assocs["permissions"][0]["status"], "ATTACHABLE");
+        assert_eq!(
+            assocs["permissions"][0]["permissionTemplateParameters"][0]["values"],
+            json!(["blue"])
+        );
+        let body = json!({"resourceOwner": "OTHER-ACCOUNTS"});
+        let other = json_of(s.list_permission_associations(&req(&body), &body).unwrap());
+        assert!(other["permissions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deprecated_permission_takes_no_new_associations_and_filters_by_status() {
+        let s = svc();
+        let body = json!({
+            "name": "plain", "resourceType": "ec2:Subnet",
+            "policyTemplate": r#"{"Effect":"Allow","Action":["ec2:DescribeSubnets"]}"#,
+        });
+        let arn = json_of(s.create_permission(&req(&body), &body).unwrap())["permission"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let share_body = json!({"name": "share"});
+        let share = json_of(
+            s.create_resource_share(&req(&share_body), &share_body)
+                .unwrap(),
+        );
+        let share_arn = share["resourceShare"]["resourceShareArn"].clone();
+
+        let upd = json!({"permissionArn": arn, "status": "DEPRECATED"});
+        let out = json_of(s.update_permission(&req(&upd), &upd).unwrap());
+        assert_eq!(out["permissionStatus"], "DEPRECATED");
+
+        let assoc = json!({"resourceShareArn": share_arn, "permissionArn": arn});
+        assert_eq!(
+            s.associate_permission(&req(&assoc), &assoc, true)
+                .err()
+                .unwrap()
+                .code(),
+            "OperationNotPermittedException"
+        );
+        let list = json!({"permissionStatus": "DEPRECATED"});
+        let listed = json_of(s.list_permissions(&req(&list), &list).unwrap());
+        let arns: Vec<&str> = listed["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["arn"].as_str().unwrap())
+            .collect();
+        assert_eq!(arns, vec![arn.as_str()]);
+
+        let managed = json!({
+            "permissionArn": "arn:aws:ram::aws:permission/AWSRAMDefaultPermissionSubnet",
+            "status": "DEPRECATED",
+        });
+        assert_eq!(
+            s.update_permission(&req(&managed), &managed)
+                .err()
+                .unwrap()
+                .code(),
+            "OperationNotPermittedException"
+        );
+    }
+
+    #[test]
+    fn resource_owner_filters_use_the_wire_enum_values() {
+        let mut r = req(&json!({"resourceOwner": "OTHER-ACCOUNTS"}));
+        r.action = "ListPermissions".into();
+        assert!(validate::validate("ListPermissions", &r).is_ok());
+        let r = req(&json!({"resourceOwner": "BOGUS"}));
+        assert_eq!(
+            validate::validate("ListPermissionAssociations", &r)
+                .err()
+                .unwrap()
+                .code(),
+            "InvalidParameterException"
+        );
+        let r = req(&json!({"permissionStatus": "BOGUS"}));
+        assert_eq!(
+            validate::validate("ListPermissions", &r)
+                .err()
+                .unwrap()
+                .code(),
+            "InvalidParameterException"
         );
     }
 }

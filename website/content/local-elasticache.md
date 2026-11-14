@@ -1,6 +1,6 @@
 +++
 title = "Local ElastiCache for integration tests"
-description = "Run local ElastiCache for integration tests with fakecloud. 75 operations, real Redis/Valkey/Memcached via Docker, replication groups, serverless caches. Free, no account required."
+description = "Run local ElastiCache for integration tests with fakecloud. 77 operations, real Redis/Valkey/Memcached via Docker, replication groups, serverless caches. Free, no account required."
 template = "page.html"
 +++
 
@@ -15,7 +15,7 @@ Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud
 
 ## Why fakecloud for ElastiCache
 
-- **75 ElastiCache operations** at 100% conformance — cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users / user groups, failover, tagging.
+- **77 ElastiCache operations** at 100% conformance — cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users / user groups, failover, tagging.
 - **Real Redis, Valkey, and Memcached.** fakecloud pulls real Redis / Valkey / Memcached Docker images and runs them as the ElastiCache node. Your `LPUSH`, `ZADD`, `XADD`, streams, pub/sub, Lua scripts — all work because the engine is real. Memcached gets a real `memcached:1.6-alpine` container with the full text and binary protocols.
 - **Real ACL enforcement.** `CreateUser` / `ModifyUser` push `ACL SETUSER` into the live Redis container, so unauthorized commands are rejected by the real engine — not by a stub.
 - **Real parameter group changes.** `ModifyCacheParameterGroup` runtime-tunable parameters (e.g. `maxmemory-policy`, `timeout`) are pushed to the live container via `CONFIG SET` and take effect immediately.

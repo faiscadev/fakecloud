@@ -554,6 +554,117 @@ fn get_calendar_state_evaluates_closed_window() {
     assert_eq!(err.code(), "InvalidDocumentType");
 }
 
+fn dhmc_setting_value(svc: &SsmService) -> (String, String) {
+    let resp = svc
+        .get_service_setting(&make_request(
+            "GetServiceSetting",
+            json!({ "SettingId": "/ssm/managed-instance/default-ec2-instance-management-role" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    (
+        body["ServiceSetting"]["SettingValue"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        body["ServiceSetting"]["Status"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
+}
+
+fn register_dhmc(svc: &SsmService, body: Value) -> Result<Value, AwsServiceError> {
+    svc.register_default_host_management_configuration(&make_request(
+        "RegisterDefaultHostManagementConfiguration",
+        body,
+    ))
+    .map(|resp| serde_json::from_slice(resp.body.expect_bytes()).unwrap())
+}
+
+#[test]
+fn dhmc_register_self_managed_sets_service_setting_and_deregister_resets_it() {
+    let svc = make_service();
+    let arn = "arn:aws:iam::123456789012:role/service-role/DhmcRole";
+    let body = register_dhmc(
+        &svc,
+        json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": arn }),
+    )
+    .unwrap();
+    assert_eq!(body["RoleArn"], arn);
+    assert_eq!(
+        dhmc_setting_value(&svc),
+        (
+            "service-role/DhmcRole".to_string(),
+            "Customized".to_string()
+        )
+    );
+    // Registering the same role again is idempotent.
+    register_dhmc(
+        &svc,
+        json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": arn }),
+    )
+    .unwrap();
+
+    svc.deregister_default_host_management_configuration(&make_request(
+        "DeregisterDefaultHostManagementConfiguration",
+        json!({}),
+    ))
+    .unwrap();
+    assert_eq!(
+        dhmc_setting_value(&svc),
+        (String::new(), "Default".to_string())
+    );
+}
+
+#[test]
+fn dhmc_register_service_managed_uses_reserved_path_role() {
+    let svc = make_service();
+    let body = register_dhmc(&svc, json!({ "PermissionModel": "SERVICE_MANAGED" })).unwrap();
+    assert_eq!(
+        body["RoleArn"],
+        "arn:aws:iam::123456789012:role/aws-reserved/ssm.amazonaws.com/AWSSystemsManagerDefaultEC2InstanceManagementRole"
+    );
+}
+
+#[test]
+fn dhmc_register_guards_overwrite_and_validates_role_arn() {
+    let svc = make_service();
+    register_dhmc(
+        &svc,
+        json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": "arn:aws:iam::123456789012:role/First" }),
+    )
+    .unwrap();
+    let err = register_dhmc(
+        &svc,
+        json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": "arn:aws:iam::123456789012:role/Second" }),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(err.code(), "ValidationException");
+    assert_eq!(dhmc_setting_value(&svc).0, "First");
+    register_dhmc(
+        &svc,
+        json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": "arn:aws:iam::123456789012:role/Second", "Overwrite": true }),
+    )
+    .unwrap();
+    assert_eq!(dhmc_setting_value(&svc).0, "Second");
+
+    for bad in [
+        json!({}),
+        json!({ "PermissionModel": "BOGUS" }),
+        json!({ "PermissionModel": "SELF_MANAGED" }),
+        json!({ "PermissionModel": "SERVICE_MANAGED", "RoleArn": "arn:aws:iam::123456789012:role/X" }),
+        json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": "arn:aws:s3:::not-a-role-arn-bucket" }),
+    ] {
+        assert_eq!(
+            register_dhmc(&svc, bad.clone()).err().unwrap().code(),
+            "ValidationException",
+            "{bad}"
+        );
+    }
+}
+
 #[test]
 fn service_setting_crud() {
     let svc = make_service();

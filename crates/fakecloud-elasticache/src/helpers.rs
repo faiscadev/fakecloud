@@ -1664,6 +1664,24 @@ pub(crate) fn serverless_cache_xml(cache: &ServerlessCache) -> String {
         .as_ref()
         .map(|v| format!("<ConnectionType>{}</ConnectionType>", xml_escape(v)))
         .unwrap_or_default();
+    // The migration endpoint is the cache's own standard endpoint: until
+    // cutover, ElastiCache routes requests on it to the source.
+    let migration_xml = cache
+        .migration
+        .as_ref()
+        .map(|m| {
+            let cutover = m
+                .cutover_mode
+                .as_ref()
+                .map(|c| format!("<CutoverMode>{}</CutoverMode>", xml_escape(c)))
+                .unwrap_or_default();
+            format!(
+                "<Migration><Status>{}</Status><MigrationEndpoint>{}</MigrationEndpoint>{cutover}</Migration>",
+                xml_escape(&m.status),
+                serverless_cache_endpoint_xml(&cache.endpoint),
+            )
+        })
+        .unwrap_or_default();
 
     format!(
         "<ServerlessCacheName>{}</ServerlessCacheName>\
@@ -1685,7 +1703,8 @@ pub(crate) fn serverless_cache_xml(cache: &ServerlessCache) -> String {
          {snapshot_retention_limit_xml}\
          {daily_snapshot_time_xml}\
          {network_type_xml}\
-         {connection_type_xml}",
+         {connection_type_xml}\
+         {migration_xml}",
         xml_escape(&cache.serverless_cache_name),
         xml_escape(&cache.description),
         xml_escape(&cache.created_at),

@@ -1603,6 +1603,12 @@ impl CloudWatchService {
         // from the flat `Metrics.member.N.*` params and persisted so
         // DescribeAlarms can echo it back (previously silently dropped).
         let metrics = parse_alarm_metrics(req);
+        let action_configuration = crate::flat_members::action_configuration(req)?;
+        let warm_up_configuration = crate::flat_members::warm_up_configuration(req)?;
+        let evaluation_criteria = crate::flat_members::evaluation_criteria(req)?;
+        let evaluation_window = crate::flat_members::evaluation_window(req)?;
+        let evaluation_interval =
+            optional_query_param(req, "EvaluationInterval").and_then(|s| s.parse::<i64>().ok());
         // Inline `Tags` on PutMetricAlarm land in the same ARN-keyed tag store
         // as TagResource, so ListTagsForResource returns them.
         let inline_tags = parse_tags(req, "Tags");
@@ -1673,6 +1679,11 @@ impl CloudWatchService {
                 .as_ref()
                 .map(|a| a.state_manually_set)
                 .unwrap_or(false),
+            action_configuration,
+            warm_up_configuration,
+            evaluation_criteria,
+            evaluation_window,
+            evaluation_interval,
         };
         let alarm_arn = alarm.alarm_arn.clone();
         let history_name = alarm_name.clone();
@@ -2434,6 +2445,21 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     ));
     render_alarm_metrics(&mut s, &alarm.metrics);
+    if let Some(w) = &alarm.evaluation_window {
+        s.push_str(&w.render("EvaluationWindow"));
+    }
+    if let Some(w) = &alarm.warm_up_configuration {
+        s.push_str(&w.render("WarmUpConfiguration"));
+    }
+    if let Some(c) = &alarm.evaluation_criteria {
+        s.push_str(&c.render("EvaluationCriteria"));
+    }
+    if let Some(i) = alarm.evaluation_interval {
+        s.push_str(&format!("<EvaluationInterval>{i}</EvaluationInterval>"));
+    }
+    if let Some(a) = &alarm.action_configuration {
+        s.push_str(&a.render("ActionConfiguration"));
+    }
     s.push_str("</member>");
     s
 }

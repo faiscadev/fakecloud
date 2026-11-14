@@ -699,6 +699,33 @@ fn worker_tier_environment_has_no_endpoint() {
 }
 
 #[test]
+fn managed_platform_describes_default_ami_list() {
+    let svc = svc();
+    let arn = "arn:aws:elasticbeanstalk:us-east-1::platform/64bit Amazon Linux 2023 v6.1.2 running Node.js 20";
+    let described = body(&svc, "DescribePlatformVersion", &[("PlatformArn", arn)]);
+    assert!(
+        described.contains(
+            "<DefaultAmiList><member><Architecture>x86_64</Architecture><ImageId>ami-0a1b2c3d4e5f60002</ImageId></member>\
+             <member><Architecture>arm64</Architecture><ImageId>ami-0a1b2c3d4e5f60003</ImageId></member></DefaultAmiList>"
+        ),
+        "{described}"
+    );
+    assert!(
+        described.contains(
+            "<SolutionStackName>64bit Amazon Linux 2023 v6.1.2 running Node.js 20</SolutionStackName>"
+        ),
+        "{described}"
+    );
+    let windows = "arn:aws:elasticbeanstalk:us-east-1::platform/64bit Windows Server 2019 v2.16.5 running IIS 10.0";
+    let described = body(&svc, "DescribePlatformVersion", &[("PlatformArn", windows)]);
+    assert!(
+        described.contains("<ImageId>ami-0a1b2c3d4e5f60006</ImageId>")
+            && !described.contains("arm64"),
+        "{described}"
+    );
+}
+
+#[test]
 fn platform_version_create_describe_list_delete_roundtrip() {
     let svc = svc();
     // Unknown platform describes as a service exception, not a fake "Ready".

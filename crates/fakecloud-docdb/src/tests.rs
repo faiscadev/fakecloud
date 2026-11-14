@@ -1126,7 +1126,7 @@ async fn tagging_roundtrip() {
 #[tokio::test]
 async fn supported_actions_cover_full_surface() {
     let svc = service();
-    assert_eq!(svc.supported_actions().len(), 55);
+    assert_eq!(svc.supported_actions().len(), 56);
 }
 
 #[tokio::test]
@@ -1541,5 +1541,108 @@ async fn cluster_storage_type_and_serverless_round_trip() {
     assert!(
         xml.contains("<MinCapacity>1</MinCapacity><MaxCapacity>16</MaxCapacity>"),
         "{xml}"
+    );
+}
+
+/// DescribeServerlessV2PlatformVersions lists active versions by default,
+/// disabled ones only under `IncludeAll`, narrows by version/engine/default,
+/// and a serverless cluster reports the default version it runs on.
+#[tokio::test]
+async fn serverless_v2_platform_versions_and_cluster_platform() {
+    let svc = service();
+    let xml = body(&call(&svc, "DescribeServerlessV2PlatformVersions", &[]).await);
+    assert_eq!(
+        xml.matches("<ServerlessV2PlatformVersionInfo>").count(),
+        1,
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<ServerlessV2PlatformVersion>2</ServerlessV2PlatformVersion>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<IsDefault>true</IsDefault>"), "{xml}");
+    assert!(xml.contains("<Status>enabled</Status>"), "{xml}");
+
+    let all = body(
+        &call(
+            &svc,
+            "DescribeServerlessV2PlatformVersions",
+            &[("IncludeAll", "true")],
+        )
+        .await,
+    );
+    assert_eq!(
+        all.matches("<ServerlessV2PlatformVersionInfo>").count(),
+        2,
+        "{all}"
+    );
+    assert!(all.contains("<Status>disabled</Status>"), "{all}");
+
+    let only_v1 = body(
+        &call(
+            &svc,
+            "DescribeServerlessV2PlatformVersions",
+            &[
+                ("IncludeAll", "true"),
+                ("DefaultOnly", "true"),
+                ("ServerlessV2PlatformVersion", "1"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        !only_v1.contains("<ServerlessV2PlatformVersionInfo>"),
+        "{only_v1}"
+    );
+    let other_engine = body(
+        &call(
+            &svc,
+            "DescribeServerlessV2PlatformVersions",
+            &[("Engine", "mysql")],
+        )
+        .await,
+    );
+    assert!(
+        !other_engine.contains("<ServerlessV2PlatformVersionInfo>"),
+        "{other_engine}"
+    );
+
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", "prov"), ("Engine", "docdb")],
+    )
+    .await;
+    let prov = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[("DBClusterIdentifier", "prov")],
+        )
+        .await,
+    );
+    assert!(!prov.contains("<ServerlessV2PlatformVersion>"), "{prov}");
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "sls"),
+            ("Engine", "docdb"),
+            ("ServerlessV2ScalingConfiguration.MinCapacity", "0.5"),
+            ("ServerlessV2ScalingConfiguration.MaxCapacity", "8"),
+        ],
+    )
+    .await;
+    let sls = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[("DBClusterIdentifier", "sls")],
+        )
+        .await,
+    );
+    assert!(
+        sls.contains("<ServerlessV2PlatformVersion>2</ServerlessV2PlatformVersion>"),
+        "{sls}"
     );
 }

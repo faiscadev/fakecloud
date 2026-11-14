@@ -205,10 +205,15 @@ pub struct LogGroup {
     pub index_policies: Vec<IndexPolicy>,
     pub transformer: Option<Transformer>,
     pub deletion_protection: bool,
-    /// `STANDARD` (default), `INFREQUENT_ACCESS`, or `DELIVERY`. Set at
+    /// `STANDARD` (default), `INFREQUENT_ACCESS`, `ESSENTIALS`, or `DELIVERY`. Set at
     /// creation time via `CreateLogGroup`'s `logGroupClass` parameter.
     /// Tracked here so `DescribeLogGroups` round-trips it correctly.
     pub log_group_class: Option<String>,
+    /// Set once a data protection policy is deleted from the group, so
+    /// `DescribeLogGroups` reports `dataProtectionStatus: DELETED` ("had one
+    /// in the past") until a new policy is attached.
+    #[serde(default)]
+    pub data_protection_deleted: bool,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -409,6 +414,22 @@ pub struct AccountPolicy {
     pub selection_criteria: Option<String>,
     pub account_id: String,
     pub last_updated_time: i64,
+    /// When the policy was first created (kept across updates). Retention
+    /// policies use it for `NEW_ONLY` enforcement and tie-breaking. `0` on
+    /// snapshots written before it was tracked.
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+impl AccountPolicy {
+    /// Creation time, falling back to the last update on old snapshots.
+    pub fn created_time(&self) -> i64 {
+        if self.created_at > 0 {
+            self.created_at
+        } else {
+            self.last_updated_time
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -710,6 +731,7 @@ impl LogGroup {
             transformer: self.transformer.clone(),
             deletion_protection: self.deletion_protection,
             log_group_class: self.log_group_class.clone(),
+            data_protection_deleted: self.data_protection_deleted,
         }
     }
 }

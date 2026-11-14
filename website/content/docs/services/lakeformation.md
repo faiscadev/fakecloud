@@ -1,11 +1,11 @@
 +++
 title = "AWS Lake Formation"
-description = "AWS Lake Formation (lakeformation) on fakecloud: a complete 61-operation implementation (100% conformance) — LF-tags, fine-grained permission grants, registered resources, data lake settings, governance transactions, and data-cell filters. restJson1."
+description = "AWS Lake Formation (lakeformation) on fakecloud: a complete 69-operation implementation (100% conformance) — LF-tags, fine-grained permission grants, registered resources, data lake settings, governance transactions, and data-cell filters. restJson1."
 weight = 64
 +++
 
 fakecloud implements **AWS Lake Formation** as a restJson1 service (sigv4
-signing name `lakeformation`). All **61 operations** ship with **100%
+signing name `lakeformation`). All **69 operations** ship with **100%
 conformance** against AWS's own Smithy model, backed by account-partitioned
 state that persists across restarts in persistent mode.
 

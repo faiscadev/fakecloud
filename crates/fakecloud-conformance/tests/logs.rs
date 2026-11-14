@@ -5,8 +5,8 @@ use helpers::TestServer;
 
 // -- Log group lifecycle --
 
-#[test_action("logs", "CreateLogGroup", checksum = "76f16905")]
-#[test_action("logs", "DescribeLogGroups", checksum = "c88d7e2d")]
+#[test_action("logs", "CreateLogGroup", checksum = "02830d7f")]
+#[test_action("logs", "DescribeLogGroups", checksum = "0f1abcaa")]
 #[test_action("logs", "DeleteLogGroup", checksum = "44642caf")]
 #[tokio::test]
 async fn logs_log_group_lifecycle() {
@@ -509,7 +509,7 @@ async fn logs_export_tasks() {
 
 #[test_action("logs", "PutDeliveryDestination", checksum = "22cddc87")]
 #[test_action("logs", "GetDeliveryDestination", checksum = "703ebe0d")]
-#[test_action("logs", "DescribeDeliveryDestinations", checksum = "2bf29d90")]
+#[test_action("logs", "DescribeDeliveryDestinations", checksum = "f149c5f0")]
 #[test_action("logs", "DeleteDeliveryDestination", checksum = "260fbf3b")]
 #[tokio::test]
 async fn logs_delivery_destinations() {
@@ -601,7 +601,7 @@ async fn logs_delivery_destination_policy() {
 
 #[test_action("logs", "PutDeliverySource", checksum = "6c90e054")]
 #[test_action("logs", "GetDeliverySource", checksum = "12f6bbbd")]
-#[test_action("logs", "DescribeDeliverySources", checksum = "7a5d7868")]
+#[test_action("logs", "DescribeDeliverySources", checksum = "0ed17df4")]
 #[test_action("logs", "DeleteDeliverySource", checksum = "69db1c4e")]
 #[tokio::test]
 async fn logs_delivery_sources() {
@@ -638,7 +638,7 @@ async fn logs_delivery_sources() {
 
 #[test_action("logs", "CreateDelivery", checksum = "b4ff169a")]
 #[test_action("logs", "GetDelivery", checksum = "7a1b7136")]
-#[test_action("logs", "DescribeDeliveries", checksum = "e5773338")]
+#[test_action("logs", "DescribeDeliveries", checksum = "2e66f0f0")]
 #[test_action("logs", "DeleteDelivery", checksum = "3ffa7911")]
 #[tokio::test]
 async fn logs_deliveries() {
@@ -754,9 +754,9 @@ async fn logs_query_definitions() {
 
 // -- Account policies --
 
-#[test_action("logs", "PutAccountPolicy", checksum = "c90a216e")]
-#[test_action("logs", "DescribeAccountPolicies", checksum = "7dfa3538")]
-#[test_action("logs", "DeleteAccountPolicy", checksum = "fc4e2766")]
+#[test_action("logs", "PutAccountPolicy", checksum = "250cef69")]
+#[test_action("logs", "DescribeAccountPolicies", checksum = "6e9260a7")]
+#[test_action("logs", "DeleteAccountPolicy", checksum = "c9c60d3b")]
 #[tokio::test]
 async fn logs_account_policies() {
     let server = TestServer::start().await;
@@ -1399,7 +1399,7 @@ async fn logs_start_live_tail() {
         .ok();
 }
 
-#[test_action("logs", "ListLogGroups", checksum = "726eb2db")]
+#[test_action("logs", "ListLogGroups", checksum = "e366db3f")]
 #[tokio::test]
 async fn logs_list_log_groups() {
     let server = TestServer::start().await;
@@ -1454,7 +1454,7 @@ async fn logs_list_log_groups_for_query() {
         .unwrap();
 }
 
-#[test_action("logs", "ListAggregateLogGroupSummaries", checksum = "06cc853e")]
+#[test_action("logs", "ListAggregateLogGroupSummaries", checksum = "c251e9d1")]
 #[tokio::test]
 async fn logs_list_aggregate_summaries() {
     let server = TestServer::start().await;

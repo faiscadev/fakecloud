@@ -10287,3 +10287,138 @@ fn table_quota_refuses_an_import_into_a_new_table_past_the_limit() {
         .unwrap();
     assert_table_limit(err, 1);
 }
+
+#[tokio::test]
+async fn a_replica_disassociates_only_once_its_protection_is_off() {
+    let svc = make_service();
+    call_in(&svc, "us-east-1", "CreateTable", simple_table("Glob")).await;
+    call_in(
+        &svc,
+        "us-east-1",
+        "PutItem",
+        json!({"TableName": "Glob", "Item": {"pk": {"S": "seed"}}}),
+    )
+    .await;
+    for region in ["eu-west-1", "ap-south-1"] {
+        let (status, body) = call_in(
+            &svc,
+            "us-east-1",
+            "UpdateTable",
+            json!({"TableName": "Glob", "ReplicaUpdates": [{"Create": {"RegionName": region}}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let disassociate = json!({
+        "TableName": "Glob",
+        "ReplicaUpdates": [{"Disassociate": {
+            "RegionName": "eu-west-1",
+            "DisassociationMode": "WAIT_FOR_REPLICATION"
+        }}]
+    });
+
+    // Protection is on by default and reported for the replica.
+    let (_, d) = call_in(
+        &svc,
+        "eu-west-1",
+        "DescribeTable",
+        json!({"TableName": "Glob"}),
+    )
+    .await;
+    assert_eq!(d["Table"]["DisassociationProtectionEnabled"], true);
+    let (status, err) = call_in(&svc, "eu-west-1", "UpdateTable", disassociate.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["__type"], "ValidationException");
+
+    // The setting stands alone in its request, and only replicas have it.
+    let (status, _) = call_in(
+        &svc,
+        "eu-west-1",
+        "UpdateTable",
+        json!({"TableName": "Glob", "DisassociationProtectionEnabled": false, "TableClass": "STANDARD"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    call_in(&svc, "us-west-2", "CreateTable", simple_table("Solo")).await;
+    let (status, _) = call_in(
+        &svc,
+        "us-west-2",
+        "UpdateTable",
+        json!({"TableName": "Solo", "DisassociationProtectionEnabled": false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = call_in(
+        &svc,
+        "eu-west-1",
+        "UpdateTable",
+        json!({"TableName": "Glob", "DisassociationProtectionEnabled": false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["TableDescription"]["DisassociationProtectionEnabled"],
+        false
+    );
+    // Each replica keeps its own setting.
+    let (_, d) = call_in(
+        &svc,
+        "us-east-1",
+        "DescribeTable",
+        json!({"TableName": "Glob"}),
+    )
+    .await;
+    assert_eq!(d["Table"]["DisassociationProtectionEnabled"], true);
+
+    // The request must be sent to the replica's own region.
+    let (status, _) = call_in(&svc, "us-east-1", "UpdateTable", disassociate.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut bad_mode = disassociate.clone();
+    bad_mode["ReplicaUpdates"][0]["Disassociate"]["DisassociationMode"] = json!("NOW");
+    let (status, _) = call_in(&svc, "eu-west-1", "UpdateTable", bad_mode).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = call_in(&svc, "eu-west-1", "UpdateTable", disassociate).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let standalone = &body["TableDescription"];
+    assert!(standalone.get("Replicas").is_none(), "{standalone}");
+    assert!(standalone.get("DisassociationProtectionEnabled").is_none());
+    assert_eq!(standalone["ItemCount"], 1);
+
+    // The rest of the group carries on without it.
+    let (_, d) = call_in(
+        &svc,
+        "us-east-1",
+        "DescribeTable",
+        json!({"TableName": "Glob"}),
+    )
+    .await;
+    assert_eq!(
+        d["Table"]["Replicas"],
+        json!([{"RegionName": "ap-south-1", "ReplicaStatus": "ACTIVE"}])
+    );
+    call_in(
+        &svc,
+        "us-east-1",
+        "PutItem",
+        json!({"TableName": "Glob", "Item": {"pk": {"S": "after"}}}),
+    )
+    .await;
+    let (_, got) = call_in(
+        &svc,
+        "eu-west-1",
+        "GetItem",
+        json!({"TableName": "Glob", "Key": {"pk": {"S": "after"}}}),
+    )
+    .await;
+    assert!(got.get("Item").is_none(), "{got}");
+    let (_, got) = call_in(
+        &svc,
+        "ap-south-1",
+        "GetItem",
+        json!({"TableName": "Glob", "Key": {"pk": {"S": "after"}}}),
+    )
+    .await;
+    assert_eq!(got["Item"]["pk"]["S"], "after");
+}

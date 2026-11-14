@@ -107,6 +107,8 @@ impl CloudWatchService {
             }
         }
 
+        let warm_up_configuration = crate::flat_members::warm_up_configuration(req)?;
+        let action_configuration = crate::flat_members::action_configuration(req)?;
         let arn = crate::state::alarm_arn(&req.region, &req.account_id, &alarm_name);
         let now = Utc::now();
 
@@ -166,6 +168,8 @@ impl CloudWatchService {
                 .map(|a| a.state_updated_timestamp)
                 .unwrap_or(now),
             alarm_configuration_updated_timestamp: now,
+            warm_up_configuration,
+            action_configuration,
         };
         alarms.insert(alarm_name, alarm);
 
@@ -291,6 +295,12 @@ pub(crate) fn render_log_alarm(alarm: &LogAlarm) -> String {
             "<ActionLogLineRoleArn>{}</ActionLogLineRoleArn>",
             xml_escape(r)
         ));
+    }
+    if let Some(w) = &alarm.warm_up_configuration {
+        s.push_str(&w.render("WarmUpConfiguration"));
+    }
+    if let Some(a) = &alarm.action_configuration {
+        s.push_str(&a.render("ActionConfiguration"));
     }
     s.push_str("</member>");
     s

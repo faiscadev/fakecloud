@@ -1,4 +1,5 @@
 mod batch;
+mod bulk;
 pub(crate) mod cross_account;
 #[cfg(test)]
 mod expression_corpus_tests;
@@ -688,6 +689,11 @@ impl AwsService for DynamoDbService {
             "ImportTable" => self.import_table(&req),
             "DescribeImport" => self.describe_import(&req),
             "ListImports" => self.list_imports(&req),
+            // Bulk operations
+            "StartBulkPutItems" => self.start_bulk_put_items(&req),
+            "DescribeBulkOperation" => self.describe_bulk_operation(&req),
+            "ListBulkOperations" => self.list_bulk_operations(&req),
+            "CancelBulkOperation" => self.cancel_bulk_operation(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "dynamodb",
                 &req.action,
@@ -795,6 +801,10 @@ impl AwsService for DynamoDbService {
             "ImportTable",
             "DescribeImport",
             "ListImports",
+            "StartBulkPutItems",
+            "DescribeBulkOperation",
+            "ListBulkOperations",
+            "CancelBulkOperation",
         ]
     }
 }

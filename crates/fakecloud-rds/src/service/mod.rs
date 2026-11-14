@@ -31,6 +31,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ApplyPendingMaintenanceAction",
     "AuthorizeDBSecurityGroupIngress",
     "BacktrackDBCluster",
+    "CancelDBCapacityReservation",
     "CancelExportTask",
     "CopyDBClusterParameterGroup",
     "CopyDBClusterSnapshot",
@@ -39,6 +40,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CopyOptionGroup",
     "CreateBlueGreenDeployment",
     "CreateCustomDBEngineVersion",
+    "CreateDBCapacityReservation",
     "CreateDBCluster",
     "CreateDBClusterEndpoint",
     "CreateDBClusterParameterGroup",
@@ -82,6 +84,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeAccountAttributes",
     "DescribeBlueGreenDeployments",
     "DescribeCertificates",
+    "DescribeDBCapacityReservations",
     "DescribeDBClusterAutomatedBackups",
     "DescribeDBClusterBacktracks",
     "DescribeDBClusterEndpoints",
@@ -135,6 +138,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ModifyActivityStream",
     "ModifyCertificates",
     "ModifyCurrentDBClusterCapacity",
+    "ModifyDBCapacityReservation",
     "ModifyCustomDBEngineVersion",
     "ModifyDBCluster",
     "ModifyDBClusterEndpoint",
@@ -253,6 +257,7 @@ impl RdsSourceType {
     }
 }
 
+mod capacity_reservations;
 mod cluster_snapshots;
 mod engine;
 mod instances;
@@ -838,6 +843,10 @@ impl RdsService {
     /// the visible status immediately.
     async fn stop_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let detach_from_reservation = service_helpers::parse_optional_bool(
+            optional_query_param(request, "DetachFromDBCapacityReservation").as_deref(),
+        )?
+        .unwrap_or(false);
 
         // Look up the instance first so a missing identifier returns the
         // declared `DBInstanceNotFoundFault` error rather than a 503 from a
@@ -868,6 +877,11 @@ impl RdsService {
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
             inst.db_instance_status = "stopped".to_string();
             inst.container_id = String::new();
+            // Every stop releases the unit; detaching also drops the
+            // reservation the instance would return to on start.
+            if detach_from_reservation {
+                inst.capacity_reservation = None;
+            }
             inst.clone()
         };
 
@@ -928,14 +942,27 @@ impl RdsService {
         // delete-and-recreate under the same name.
         let incarnation = instance.dbi_resource_id.clone();
         let prior_status = instance.db_instance_status.clone();
+        let requested_reservation =
+            optional_query_param(request, "DBCapacityReservationIdentifier");
 
         // Flip to `starting` so concurrent DescribeDBInstances callers
-        // see the in-flight state.
+        // see the in-flight state, placing the instance on the reservation
+        // it names or kept (or on unreserved capacity when that one is no
+        // longer active).
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            let capacity = match state.instances.get(&db_instance_identifier) {
+                Some(current) => capacity_reservations::capacity_on_start(
+                    state,
+                    current,
+                    requested_reservation.as_deref(),
+                )?,
+                None => None,
+            };
             if let Some(inst) = state.instance_by_incarnation_mut(&incarnation) {
                 inst.db_instance_status = "starting".to_string();
+                inst.capacity_reservation = capacity;
             }
         }
 
@@ -1151,6 +1178,7 @@ fn is_declared_add_tags_not_found(code: &str) -> bool {
     matches!(
         code,
         "BlueGreenDeploymentNotFoundFault"
+            | "DBCapacityReservationNotFound"
             | "DBClusterNotFoundFault"
             | "DBInstanceNotFound"
             | "DBProxyEndpointNotFoundFault"
@@ -1677,6 +1705,10 @@ impl AwsService for RdsService {
             "RestoreDBClusterToPointInTime" => {
                 self.restore_db_cluster_to_point_in_time(&request).await
             }
+            "CreateDBCapacityReservation" => self.create_db_capacity_reservation(&request),
+            "DescribeDBCapacityReservations" => self.describe_db_capacity_reservations(&request),
+            "ModifyDBCapacityReservation" => self.modify_db_capacity_reservation(&request),
+            "CancelDBCapacityReservation" => self.cancel_db_capacity_reservation(&request),
             _ => self.handle_extra_action(&request),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {

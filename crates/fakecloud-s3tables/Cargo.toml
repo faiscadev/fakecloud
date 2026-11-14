@@ -10,7 +10,9 @@ version.workspace = true
 [dependencies]
 fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
+fakecloud-glue = { workspace = true }
 fakecloud-persistence = { workspace = true }
+fakecloud-s3 = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

@@ -1,6 +1,6 @@
 +++
 title = "DynamoDB emulator for tests"
-description = "Run DynamoDB locally for integration tests with fakecloud. 58 operations, transactions, PartiQL, streams, global tables. Any language, no Docker required, free."
+description = "Run DynamoDB locally for integration tests with fakecloud. 62 operations, transactions, PartiQL, streams, global tables. Any language, no Docker required, free."
 template = "page.html"
 +++
 
@@ -15,8 +15,8 @@ Point your AWS SDK at `http://localhost:4566`. That's the whole setup.
 
 ## Why fakecloud for DynamoDB
 
-- **58 DynamoDB operations** at 100% conformance — tables, items, transactions (`TransactWriteItems`, `TransactGetItems`), PartiQL (`ExecuteStatement`, `BatchExecuteStatement`), backups, global tables, streams, secondary indexes.
-- **Validated against AWS's own Smithy models** on every commit — 257,522/257,522 generated test variants pass, true 100% conformance.
+- **62 DynamoDB operations** at 100% conformance — tables, items, transactions (`TransactWriteItems`, `TransactGetItems`), PartiQL (`ExecuteStatement`, `BatchExecuteStatement`), backups, global tables, streams, secondary indexes.
+- **Validated against AWS's own Smithy models** on every commit — 260,001/260,001 generated test variants pass, true 100% conformance.
 - **Any AWS SDK in any language.** Real HTTP server on port 4566 — Python boto3, Node aws-sdk, Go aws-sdk-go-v2, Java, Kotlin, Rust, PHP all work identically.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
 - **No Docker required** for DynamoDB (binary runs the storage engine in-process). Fastest local DynamoDB you can run.

@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use http::{Method, StatusCode};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -30,12 +31,13 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    bucket_arn_of_table, table_arn, table_bucket_arn, table_id_of_arn, NamespaceRecord,
-    SharedS3TablesState, TableBucketRecord, TableRecord, TagMap, VersionedConfig,
+    bucket_arn_of_table, table_arn, table_bucket_arn, table_id_of_arn, MigrationRecord,
+    NamespaceRecord, SharedS3TablesState, TableBucketRecord, TableRecord, TagMap, VersionedConfig,
 };
 use crate::validate;
 
 pub const S3TABLES_ACTIONS: &[&str] = &[
+    "CompleteTableMigration",
     "CreateNamespace",
     "CreateTable",
     "CreateTableBucket",
@@ -61,6 +63,7 @@ pub const S3TABLES_ACTIONS: &[&str] = &[
     "GetTableMaintenanceConfiguration",
     "GetTableMaintenanceJobStatus",
     "GetTableMetadataLocation",
+    "GetTableMigration",
     "GetTablePolicy",
     "GetTableRecordExpirationConfiguration",
     "GetTableRecordExpirationJobStatus",
@@ -69,6 +72,7 @@ pub const S3TABLES_ACTIONS: &[&str] = &[
     "GetTableStorageClass",
     "ListNamespaces",
     "ListTableBuckets",
+    "ListTableMigrations",
     "ListTables",
     "ListTagsForResource",
     "PutTableBucketEncryption",
@@ -82,9 +86,12 @@ pub const S3TABLES_ACTIONS: &[&str] = &[
     "PutTableRecordExpirationConfiguration",
     "PutTableReplication",
     "RenameTable",
+    "StartTableMigration",
+    "SyncTableMigration",
     "TagResource",
     "UntagResource",
     "UpdateTableMetadataLocation",
+    "UpdateTableMigration",
 ];
 
 /// Operations that mutate persisted state (so a snapshot save follows success).
@@ -115,6 +122,10 @@ const MUTATING: &[&str] = &[
     "TagResource",
     "UntagResource",
     "UpdateTableMetadataLocation",
+    "StartTableMigration",
+    "UpdateTableMigration",
+    "SyncTableMigration",
+    "CompleteTableMigration",
 ];
 
 /// The decoded path labels for a route, in URI order.
@@ -124,6 +135,12 @@ pub struct S3TablesService {
     state: SharedS3TablesState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// The AWS Glue Data Catalog a table migration reads its source from.
+    glue_state: Option<fakecloud_glue::SharedGlueState>,
+    /// The S3 buckets a migration reads source objects from and writes its
+    /// reports to.
+    s3_state: Option<fakecloud_s3::SharedS3State>,
+    s3_store: Option<Arc<dyn fakecloud_persistence::S3Store>>,
 }
 
 impl S3TablesService {
@@ -132,7 +149,24 @@ impl S3TablesService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            glue_state: None,
+            s3_state: None,
+            s3_store: None,
         }
+    }
+
+    /// Wire the Glue catalog and S3 buckets table migrations read from and
+    /// write their reports to.
+    pub fn with_migration_sources(
+        mut self,
+        glue_state: fakecloud_glue::SharedGlueState,
+        s3_state: fakecloud_s3::SharedS3State,
+        s3_store: Option<Arc<dyn fakecloud_persistence::S3Store>>,
+    ) -> Self {
+        self.glue_state = Some(glue_state);
+        self.s3_state = Some(s3_state);
+        self.s3_store = s3_store;
+        self
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -297,6 +331,13 @@ impl S3TablesService {
             (&Method::GET, ["table-record-expiration-job-status"]) => {
                 one("GetTableRecordExpirationJobStatus")
             }
+            // ---- table migrations (query form) ----
+            (&Method::POST, ["start-table-migration"]) => one("StartTableMigration"),
+            (&Method::GET, ["get-table-migration"]) => one("GetTableMigration"),
+            (&Method::GET, ["list-table-migrations"]) => one("ListTableMigrations"),
+            (&Method::POST, ["update-table-migration"]) => one("UpdateTableMigration"),
+            (&Method::POST, ["sync-table-migration"]) => one("SyncTableMigration"),
+            (&Method::POST, ["complete-table-migration"]) => one("CompleteTableMigration"),
             // ---- tagging ----
             (&Method::GET, ["tag", arn]) => l!("ListTagsForResource", d(arn)),
             (&Method::POST, ["tag", arn]) => l!("TagResource", d(arn)),
@@ -621,6 +662,13 @@ impl S3TablesService {
             "GetTableRecordExpirationConfiguration" => self.get_record_expiration(req),
             "PutTableRecordExpirationConfiguration" => self.put_record_expiration(req),
             "GetTableRecordExpirationJobStatus" => self.get_record_expiration_job(req),
+            // table migrations
+            "StartTableMigration" => self.start_table_migration(req),
+            "GetTableMigration" => self.get_table_migration(req),
+            "ListTableMigrations" => self.list_table_migrations(req),
+            "UpdateTableMigration" => self.update_table_migration(req),
+            "SyncTableMigration" => self.sync_table_migration(req),
+            "CompleteTableMigration" => self.complete_table_migration(req),
             // tagging
             "ListTagsForResource" => self.list_tags(req, &l[0]),
             "TagResource" => self.tag_resource(req, &l[0]),
@@ -640,3 +688,4 @@ enum SubKind {
 }
 
 include!("handlers.rs");
+include!("migrations.rs");

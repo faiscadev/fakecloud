@@ -258,8 +258,9 @@ impl SegmentedLogsStore {
         let committed = guard.as_mut().expect("committed state initialized");
         let mut streams = BTreeMap::new();
         for (_, _, account) in state.iter_regional_mut() {
+            let policies = crate::retention::parsed_policies(&account.account_policies);
             for group in account.log_groups.values_mut() {
-                let cutoff = retention_cutoff(group, now);
+                let cutoff = retention_cutoff(&policies, group, now);
                 let expired = cutoff.map(|cutoff| (cutoff, prune_group(group, cutoff)));
                 if !committed.manifest_exists {
                     // Older builds under-counted ingested and delivered events;
@@ -463,17 +464,23 @@ impl SegmentedLogsStore {
 /// memory mode; persistent saves apply it inside [`SegmentedLogsStore::prepare`].
 pub fn prune_expired(state: &mut Accounts, now: i64) {
     for (_, _, account) in state.iter_regional_mut() {
+        let policies = crate::retention::parsed_policies(&account.account_policies);
         for group in account.log_groups.values_mut() {
-            if let Some(cutoff) = retention_cutoff(group, now) {
+            if let Some(cutoff) = retention_cutoff(&policies, group, now) {
                 prune_group(group, cutoff);
             }
         }
     }
 }
 
-fn retention_cutoff(group: &LogGroup, now: i64) -> Option<i64> {
-    group
-        .retention_in_days
+/// Expiry cutoff from the group's effective retention: an applicable
+/// account-level retention policy overrides the group's own setting.
+fn retention_cutoff(
+    policies: &[crate::retention::ParsedPolicy],
+    group: &LogGroup,
+    now: i64,
+) -> Option<i64> {
+    crate::retention::effective_with(policies, group)
         .map(|days| now.saturating_sub(i64::from(days).saturating_mul(DAY_MS)))
 }
 

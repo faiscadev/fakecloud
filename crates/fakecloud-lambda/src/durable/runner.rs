@@ -197,6 +197,8 @@ struct ChainedJob {
     func: LambdaFunction,
     layers: Vec<Vec<u8>>,
     payload: String,
+    /// The trace header the invocation runs under.
+    trace_id: Option<String>,
 }
 
 impl DurableHub {
@@ -552,8 +554,17 @@ impl DurableHub {
                 })),
             },
             Some(rt) => match rt
-                .invoke(&job.func, job.payload.as_bytes(), &job.layers)
+                .invoke_with(
+                    &job.func,
+                    job.payload.as_bytes(),
+                    &job.layers,
+                    &crate::runtime::InvocationContext {
+                        trace_id: job.trace_id.clone(),
+                        ..Default::default()
+                    },
+                )
                 .await
+                .map(|(out, _)| out)
             {
                 Ok(out) => match function_error(&out) {
                     Some(e) => ChainedOutcome {
@@ -801,6 +812,18 @@ fn dispatch_chained(
             .unwrap_or_else(|| "{}".to_string());
         (pinned, version, payload)
     };
+    // The chained invocation's trace header: `ChainedInvokeOptions.
+    // XAmznTraceId` when given, else the parent execution's.
+    let trace_id = accounts
+        .regional(account, region)
+        .and_then(|st| st.durable_executions.get(parent_arn))
+        .map(|p| {
+            p.op(op_id)
+                .and_then(|o| o.chained.as_ref())
+                .and_then(|c| c.trace_header.clone())
+                .unwrap_or_else(|| p.trace_id.clone())
+        })
+        .filter(|t| !t.is_empty());
 
     if let Some(settings) = DurableSettings::of(&func) {
         if qualifier.is_none() {
@@ -834,7 +857,13 @@ fn dispatch_chained(
                 operation_id: op_id.to_string(),
             }),
         ) {
-            StartOutcome::Started(a) | StartOutcome::Existing(a) | StartOutcome::Conflict(a) => a,
+            StartOutcome::Started(a) => {
+                if let (Some(t), Some(c)) = (&trace_id, st.durable_executions.get_mut(&a)) {
+                    c.trace_id = t.clone();
+                }
+                a
+            }
+            StartOutcome::Existing(a) | StartOutcome::Conflict(a) => a,
         };
         if let Some(parent) = st.durable_executions.get_mut(parent_arn) {
             if redispatch {
@@ -884,6 +913,7 @@ fn dispatch_chained(
         func,
         layers,
         payload,
+        trace_id,
     })
 }
 
@@ -1167,6 +1197,51 @@ mod tests {
             engine::chained_dispatched(p, "ci", Some("$LATEST"), Some(&child));
         });
         (parent, child)
+    }
+
+    /// A durable child started by a chained invoke runs under
+    /// `ChainedInvokeOptions.XAmznTraceId`, else the parent's trace header.
+    #[tokio::test]
+    async fn chained_durable_child_takes_the_requested_or_parent_trace_header() {
+        for requested in [
+            Some("Root=1-5e1b4151-0123456789abcdef01234567;Sampled=1"),
+            None,
+        ] {
+            let hub = hub_with(&[("f", true)]);
+            let parent = start(&hub);
+            let mut options = json!({"FunctionName": "f:$LATEST"});
+            if let Some(t) = requested {
+                options["XAmznTraceId"] = json!(t);
+            }
+            let parent_trace = with_exec(&hub, &parent, |p| {
+                engine::begin_invocation(p, "r1", model::now());
+                let token = p.invocation.as_ref().unwrap().token.clone().unwrap();
+                engine::checkpoint(
+                    p,
+                    &token,
+                    None,
+                    &[json!({"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","ChainedInvokeOptions":options})],
+                    model::now(),
+                )
+                .unwrap();
+                engine::complete_invocation(
+                    p,
+                    "r1",
+                    InvocationOutcome::Output(json!({"Status":"PENDING"})),
+                    model::now(),
+                );
+                p.trace_id.clone()
+            });
+            hub.pass();
+            let child = with_exec(&hub, &parent, |p| {
+                p.op("ci")
+                    .and_then(|o| o.chained.as_ref())
+                    .and_then(|c| c.child_execution_arn.clone())
+                    .expect("durable child started")
+            });
+            let child_trace = with_exec(&hub, &child, |c| c.trace_id.clone());
+            assert_eq!(child_trace, requested.map_or(parent_trace, str::to_string));
+        }
     }
 
     /// Recorded: stopping a parent leaves its durable child running, and

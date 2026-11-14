@@ -16,8 +16,8 @@ through either API's Describe/List operations. The 2015 API exposes it via the
 `ElasticsearchDomainStatus` shape, the 2021 API via the superset `DomainStatus`
 shape.
 
-**The complete 147-operation surface** ships — **51 Elasticsearch Service
-operations + 96 OpenSearch Service operations** — with **100% conformance across
+**The complete 153-operation surface** ships — **51 Elasticsearch Service
+operations + 102 OpenSearch Service operations** — with **100% conformance across
 both APIs**, backed by account-partitioned state that persists across restarts in
 persistent mode.
 
@@ -105,7 +105,7 @@ domains are control-plane only: a new domain settles to
 endpoint, and nothing serves it. Search clusters always run through the
 Docker/Podman CLI, also under `FAKECLOUD_CONTAINER_BACKEND=k8s`.
 
-## Supported now (all 147 operations)
+## Supported now (all 153 operations)
 
 **Domains (shared across both APIs):** create, describe, delete, list domain
 names, batch describe, describe/update domain config (including `DryRun`), change

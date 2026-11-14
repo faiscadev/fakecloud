@@ -228,7 +228,7 @@ pub(crate) fn validate_constraints(action: &str, body: &Value) -> Result<(), Aws
                     c.field
                 )));
             }
-        } else if let Some(n) = v.as_i64() {
+        } else if let Some(n) = v.as_f64() {
             if let Some(min) = c.range_min {
                 if n < min {
                     return Err(invalid_input(format!("{} below minimum {min}", c.field)));

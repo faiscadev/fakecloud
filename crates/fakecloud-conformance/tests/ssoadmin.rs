@@ -102,7 +102,7 @@ use helpers::TestServer;
     "ListCustomerManagedPolicyReferencesInPermissionSet",
     checksum = "93ff10bc"
 )]
-#[test_action("sso", "ListInstances", checksum = "1220afd3")]
+#[test_action("sso", "ListInstances", checksum = "88f1f0f6")]
 #[test_action("sso", "ListManagedPoliciesInPermissionSet", checksum = "5ff82f40")]
 #[test_action("sso", "ListPermissionSetProvisioningStatus", checksum = "9a229c19")]
 #[test_action("sso", "ListPermissionSets", checksum = "f7c54322")]

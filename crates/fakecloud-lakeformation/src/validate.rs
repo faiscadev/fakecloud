@@ -131,6 +131,41 @@ fn input_rules(action: &str) -> Vec<Rule> {
             Rule::IntMin("DurationSeconds", 900.0),
             Rule::IntMax("DurationSeconds", 43200.0),
         ],
+        "AttachRLSPolicy" | "DetachRLSPolicy" => vec![
+            Rule::Required("Name"),
+            Rule::LenMin("Name", 1),
+            Rule::LenMax("Name", 255),
+            Rule::Required("Resource"),
+        ],
+        "CreateRLSPolicy" => vec![
+            Rule::Required("Name"),
+            Rule::LenMin("Name", 1),
+            Rule::LenMax("Name", 255),
+            Rule::Required("AttachmentColumns"),
+            Rule::Required("FilterExpression"),
+            Rule::LenMax("FilterExpression", 2048),
+        ],
+        "DeleteRLSPolicy" | "GetRLSPolicy" => vec![
+            Rule::Required("Name"),
+            Rule::LenMin("Name", 1),
+            Rule::LenMax("Name", 255),
+        ],
+        "UpdateRLSPolicy" => vec![
+            Rule::Required("Name"),
+            Rule::LenMin("Name", 1),
+            Rule::LenMax("Name", 255),
+            Rule::LenMax("FilterExpression", 2048),
+        ],
+        "ListRLSPolicies" => vec![
+            Rule::IntMin("MaxResults", 1.0),
+            Rule::IntMax("MaxResults", 1000.0),
+        ],
+        "ListRLSPolicyAttachments" => vec![
+            Rule::LenMin("PolicyName", 1),
+            Rule::LenMax("PolicyName", 255),
+            Rule::IntMin("MaxResults", 1.0),
+            Rule::IntMax("MaxResults", 1000.0),
+        ],
         "BatchGrantPermissions" => vec![
             Rule::LenMin("CatalogId", 1),
             Rule::LenMax("CatalogId", 255),

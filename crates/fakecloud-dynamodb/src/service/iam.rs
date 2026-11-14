@@ -210,6 +210,11 @@ pub(crate) fn actions_for(
         "DescribeBackup" | "DeleteBackup" => vec![action(op, arn_field("BackupArn"))],
         "DescribeExport" => vec![action(op, arn_field("ExportArn"))],
         "DescribeImport" => vec![action(op, arn_field("ImportArn"))],
+        "StartBulkPutItems" => vec![action(op, table("TableName"))],
+        "DescribeBulkOperation" | "CancelBulkOperation" => {
+            vec![action(op, arn_field("BulkOperationArn"))]
+        }
+        "ListBulkOperations" => vec![action(op, "*".to_string())],
         "TagResource"
         | "UntagResource"
         | "ListTagsOfResource"
@@ -367,6 +372,7 @@ const DYNAMODB_ACTIONS: &[&str] = &[
     "BatchExecuteStatement",
     "BatchGetItem",
     "BatchWriteItem",
+    "CancelBulkOperation",
     "CreateBackup",
     "CreateGlobalTable",
     "CreateTable",
@@ -375,6 +381,7 @@ const DYNAMODB_ACTIONS: &[&str] = &[
     "DeleteResourcePolicy",
     "DeleteTable",
     "DescribeBackup",
+    "DescribeBulkOperation",
     "DescribeContinuousBackups",
     "DescribeContributorInsights",
     "DescribeEndpoints",
@@ -396,6 +403,7 @@ const DYNAMODB_ACTIONS: &[&str] = &[
     "GetResourcePolicy",
     "ImportTable",
     "ListBackups",
+    "ListBulkOperations",
     "ListContributorInsights",
     "ListExports",
     "ListGlobalTables",
@@ -409,6 +417,7 @@ const DYNAMODB_ACTIONS: &[&str] = &[
     "RestoreTableToPointInTime",
     "Scan",
     "SearchVectors",
+    "StartBulkPutItems",
     "TagResource",
     "TransactGetItems",
     "TransactWriteItems",

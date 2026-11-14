@@ -191,9 +191,9 @@ impl LogsService {
                     continue;
                 }
                 if let Some(group) = state.log_groups.get(&group_name) {
-                    let retention_cutoff = group
-                        .retention_in_days
-                        .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
+                    let retention_cutoff =
+                        crate::retention::effective_retention(&state.account_policies, group)
+                            .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
                     for stream in group.log_streams.values() {
                         let events: Vec<(usize, LogEvent)> = stream
                             .events

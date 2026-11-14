@@ -797,6 +797,7 @@ impl MediaConvertService {
                 "queue",
                 "priority",
                 "accelerationSettings",
+                "elementalInferenceSettings",
                 "hopDestinations",
                 "statusUpdateInterval",
             ],
@@ -857,6 +858,7 @@ impl MediaConvertService {
             "priority",
             "settings",
             "accelerationSettings",
+            "elementalInferenceSettings",
             "hopDestinations",
             "statusUpdateInterval",
         ] {
@@ -966,6 +968,7 @@ impl MediaConvertService {
                 "accelerationSettings",
                 "billingTagsSource",
                 "clientRequestToken",
+                "elementalInferenceSettings",
                 "hopDestinations",
                 "jobTemplate",
                 "simulateReservedQueue",
@@ -1426,6 +1429,59 @@ mod tests {
         assert_eq!(resp.status, StatusCode::CREATED);
         let g = s.get_queue(&c, "MyQueue").unwrap();
         assert_eq!(g.status, StatusCode::OK);
+    }
+
+    fn json_body(resp: &AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    /// Settings are stored verbatim, so the refresh's new codec / caption /
+    /// group members round-trip; `elementalInferenceSettings` is echoed on
+    /// jobs and job templates (create and update).
+    #[test]
+    fn new_settings_members_and_elemental_inference_round_trip() {
+        let s = svc();
+        let c = ctx();
+        let feed = json!({ "feedConfigurationSource": { "feedArn": "arn:aws:elemental-inference:us-east-1:000000000000:feed/abcdefghij012345678" } });
+        let settings = json!({
+            "outputGroups": [{
+                "outputGroupSettings": { "type": "CMAF_GROUP_SETTINGS", "cmafGroupSettings": { "dashAdaptationSetGrouping": "GROUP_BY_TYPE" } },
+                "outputs": [{
+                    "videoDescription": { "codecSettings": { "codec": "AV1", "av1Settings": {
+                        "rateControlMode": "CBR", "bitrate": 5000000, "sceneChangeDetect": "ENABLED",
+                        "slidingWindowMs": 1000, "slidingWindowPeakBitrate": 6000000
+                    } } },
+                    "captionDescriptions": [{ "captionSelectorName": "c", "audioSourceNames": ["a1"], "source": "SMART_SUBTITLE" }]
+                }]
+            }],
+            "inputs": [{ "videoSelector": {}, "filterEnable": "AUTO" }]
+        });
+        let job = json_body(
+            &s.create_job(
+                &c,
+                &json!({ "role": "arn:aws:iam::000000000000:role/r", "settings": settings, "elementalInferenceSettings": feed }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(job["job"]["elementalInferenceSettings"], feed);
+        assert_eq!(job["job"]["settings"], settings);
+
+        let tpl = json_body(
+            &s.create_job_template(
+                &c,
+                &json!({ "name": "t", "settings": settings, "elementalInferenceSettings": feed }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(tpl["jobTemplate"]["elementalInferenceSettings"], feed);
+        let other = json!({ "feedConfigurationSource": { "feedArn": "arn:aws:elemental-inference:us-west-2:000000000000:feed/0000000000000000000" } });
+        s.update_job_template(&c, "t", &json!({ "elementalInferenceSettings": other }))
+            .unwrap();
+        let got = json_body(&s.get_job_template(&c, "t").unwrap());
+        assert_eq!(got["jobTemplate"]["elementalInferenceSettings"], other);
+
+        let bad = json!({ "role": "r", "settings": {}, "elementalInferenceSettings": { "feedConfigurationSource": { "feedArn": "arn:aws:s3:::nope" } } });
+        assert!(crate::validate::validate_input("CreateJob", &bad).is_err());
     }
 
     #[test]

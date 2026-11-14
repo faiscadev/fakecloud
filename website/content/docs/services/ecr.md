@@ -1,10 +1,10 @@
 +++
 title = "ECR"
-description = "Elastic Container Registry — full 58-operation API plus real OCI v2 Distribution so docker push and docker pull work against fakecloud."
+description = "Elastic Container Registry — full 62-operation API plus real OCI v2 Distribution so docker push and docker pull work against fakecloud."
 weight = 21
 +++
 
-fakecloud implements Amazon Elastic Container Registry (ECR) with full API coverage. 58 operations, plus the OCI v2 Distribution HTTP surface that `docker push` / `docker pull` actually speak.
+fakecloud implements Amazon Elastic Container Registry (ECR) with full API coverage. 62 operations, plus the OCI v2 Distribution HTTP surface that `docker push` / `docker pull` actually speak.
 
 **Status: full API.** Repositories, images, layers, tags, lifecycle policy evaluation, image scanning, registry policy, pull-through cache, replication, repository creation templates, signing configuration, and pull-time exclusions.
 

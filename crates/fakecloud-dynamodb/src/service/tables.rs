@@ -249,6 +249,7 @@ impl DynamoDbService {
             vector_indexes,
             pitr_history: Default::default(),
             replica_regions: Vec::new(),
+            disassociation_protection_enabled: true,
             change_log: Default::default(),
         };
 
@@ -523,6 +524,7 @@ impl DynamoDbService {
             .ok_or_else(not_found)?;
 
         validate_update_table_request(table, &body)?;
+        let disassociation_protection = validate_disassociation_protection(table, &body)?;
 
         // Everything fallible is settled before the first change, so a
         // rejected UpdateTable leaves the table exactly as it was.
@@ -675,6 +677,9 @@ impl DynamoDbService {
             .and_then(|v| v.as_bool())
         {
             table.deletion_protection_enabled = dpe;
+        }
+        if let Some(enabled) = disassociation_protection {
+            table.disassociation_protection_enabled = enabled;
         }
 
         if let Some(tc) = body.get("TableClass").and_then(|v| v.as_str()) {
@@ -1470,6 +1475,7 @@ impl DynamoDbService {
             vector_indexes: Vec::new(),
             pitr_history: Default::default(),
             replica_regions: Vec::new(),
+            disassociation_protection_enabled: true,
             change_log: Default::default(),
         };
         table.recalculate_stats();
@@ -1588,6 +1594,7 @@ impl DynamoDbService {
             vector_indexes: Vec::new(),
             pitr_history: Default::default(),
             replica_regions: Vec::new(),
+            disassociation_protection_enabled: true,
             change_log: Default::default(),
         };
         table.recalculate_stats();
@@ -1682,6 +1689,49 @@ impl DynamoDbService {
             }
         }))
     }
+}
+
+/// `UpdateTable` `DisassociationProtectionEnabled`: the new setting, if the
+/// request changes it. It applies only to a replica of a version 2019.11.21
+/// global table, and cannot be combined with any other change.
+fn validate_disassociation_protection(
+    table: &DynamoTable,
+    body: &Value,
+) -> Result<Option<bool>, AwsServiceError> {
+    let invalid = |msg: String| {
+        AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+    };
+    let Some(value) = body
+        .get("DisassociationProtectionEnabled")
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(None);
+    };
+    let Some(enabled) = value.as_bool() else {
+        return Err(invalid(
+            "DisassociationProtectionEnabled must be a boolean".to_string(),
+        ));
+    };
+    let other_change = body.as_object().is_some_and(|members| {
+        members.iter().any(|(k, v)| {
+            !v.is_null() && k != "TableName" && k != "DisassociationProtectionEnabled"
+        })
+    });
+    if other_change {
+        return Err(invalid(
+            "DisassociationProtectionEnabled cannot be updated together with any other table \
+             setting in the same UpdateTable request"
+                .to_string(),
+        ));
+    }
+    if table.replica_regions.is_empty() {
+        return Err(invalid(format!(
+            "Disassociation protection can only be set on a replica of a global table. Table \
+             {} has no replicas.",
+            table.name
+        )));
+    }
+    Ok(Some(enabled))
 }
 
 /// Derive a stable `RevisionId` for a resource policy from its content. Real

@@ -434,6 +434,8 @@ impl ResourceProvisioner {
                 .into_iter()
                 .map(lowercase_first_keys)
                 .collect(),
+            // AWS::ECS::Service has no gateway connector property.
+            gateway_connectors: Vec::new(),
         };
         state.record_service_revision(&service);
         state.services.insert(key.clone(), service);

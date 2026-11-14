@@ -15,7 +15,7 @@ Point your AWS SDK at `http://localhost:4566`. Tasks really run — `RunTask` sh
 
 ## Why fakecloud for ECS
 
-- **Full API — 77 operations at 100% conformance.** Clusters, task definitions, tasks, services, service deployments, task sets, container instances, attributes, capacity providers, task protection, daemons, ExpressGatewayService, ECS Exec, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
+- **Full API — 88 operations at 100% conformance.** Clusters, task definitions, tasks, services, service deployments, task sets, container instances, attributes, capacity providers, task protection, daemons, ExpressGatewayService, ECS Exec, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
 - **Real Fargate-style task execution.** `RunTask` does `docker pull <image>` -> `docker run -d` -> `docker wait` (blocks on exit) -> `docker logs` (captures stdout/stderr) -> `docker rm`. Exit code lands on `containers[].exitCode`; `pullStartedAt` / `pullStoppedAt` timestamps are recorded the way real ECS does.
 - **Services with rolling deployments.** `CreateService` spawns tasks to match `desiredCount` and tags each with `startedBy=ecs-svc/<name>`. `UpdateService` flips the previous PRIMARY deployment to `ACTIVE`, creates a new PRIMARY for the target revision, and drains old tasks while new ones come up. `minimumHealthyPercent` / `maximumPercent` and the deployment circuit breaker are honored.
 - **CODE_DEPLOY blue/green task sets.** Services with `deploymentController.type=CODE_DEPLOY` skip the inline rolling deployment and let CodeDeploy-style external task-set churn drive the cutover via `CreateTaskSet` / `UpdateServicePrimaryTaskSet` / `DeleteTaskSet`.

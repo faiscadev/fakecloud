@@ -56,6 +56,29 @@ pub struct ResourceShareRecord {
     pub resource_associations: Vec<AssociationRecord>,
     pub principal_associations: Vec<AssociationRecord>,
     pub permission_arns: Vec<String>,
+    /// The template parameter values each associated permission was
+    /// associated with, keyed by permission ARN (only permissions that
+    /// declare template parameters have an entry).
+    #[serde(default)]
+    pub permission_parameters: BTreeMap<String, Vec<TemplateParameterValue>>,
+}
+
+/// A template parameter a permission version declares
+/// (`PermissionTemplateParameterDeclaration`): a `@{name}` placeholder in its
+/// policy template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateParameterDeclaration {
+    pub name: String,
+    /// `STRING` or `STRING_LIST`.
+    pub parameter_type: String,
+    pub description: Option<String>,
+}
+
+/// The values given to one template parameter (`PermissionTemplateParameterInput`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateParameterValue {
+    pub name: String,
+    pub values: Vec<String>,
 }
 
 /// A single version of a customer-managed permission.
@@ -66,6 +89,8 @@ pub struct PermissionVersionRecord {
     pub is_default: bool,
     pub creation_time: DateTime<Utc>,
     pub last_updated_time: DateTime<Utc>,
+    #[serde(default)]
+    pub template_parameters: Vec<TemplateParameterDeclaration>,
 }
 
 /// A customer-managed permission with its versions.

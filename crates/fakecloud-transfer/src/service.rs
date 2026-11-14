@@ -500,10 +500,32 @@ impl TransferService {
             json!(format!("SHA256:{}", hex17())),
         );
         copy_present(b, &mut srv, SERVER_FIELDS);
+        // A supplied `HostKey` becomes the server's first host key, stored as
+        // `HostKeyStorageType` says (SERVICE_MANAGED by default).
+        let initial_host_key = b
+            .get("HostKey")
+            .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
+            .map(|body| {
+                let storage = b
+                    .get("HostKeyStorageType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("SERVICE_MANAGED");
+                new_host_key(ctx, &server_id, body, storage, None)
+            });
+        if let Some((_, _, hk)) = &initial_host_key {
+            if let Some(fp) = hk.get("HostKeyFingerprint") {
+                srv.insert("HostKeyFingerprint".into(), fp.clone());
+            }
+        }
         let srv = Value::Object(srv);
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         data.servers.insert(server_id.clone(), srv);
+        if let Some((host_key_id, _, hk)) = initial_host_key {
+            data.host_keys
+                .insert(format!("{server_id}/{host_key_id}"), Value::Object(hk));
+        }
         store_tags(data, &server_arn, b);
         ok(json!({ "ServerId": server_id }))
     }
@@ -886,27 +908,96 @@ fn host_key_type(body: &str) -> &'static str {
     "ssh-rsa"
 }
 
+/// Apply a host key's `StorageType` / `KmsKey` to its stored record.
+///
+/// `SECRETS_MANAGER` keeps the private key material in a Secrets Manager
+/// secret whose ARN is reported as `SecretId`; `KmsKey` (only meaningful for
+/// that storage) is kept internally and not echoed, as the model has no
+/// output member for it. Moving back to `SERVICE_MANAGED` drops the secret.
+fn apply_host_key_storage(
+    ctx: &Ctx,
+    hk: &mut Map<String, Value>,
+    server_id: &str,
+    host_key_id: &str,
+    storage_type: &str,
+    kms_key: Option<&Value>,
+) {
+    hk.insert("StorageType".into(), json!(storage_type));
+    if storage_type == "SECRETS_MANAGER" {
+        if !hk.contains_key("SecretId") {
+            let suffix: String = hex17().chars().take(6).collect();
+            let secret = fakecloud_aws::arn::Arn::regional(
+                "secretsmanager",
+                &ctx.region,
+                &ctx.account,
+                &format!("secret:aws/transfer/{server_id}/{host_key_id}-{suffix}"),
+            )
+            .to_string();
+            hk.insert("SecretId".into(), json!(secret));
+        }
+        if let Some(k) = kms_key {
+            hk.insert(HOST_KEY_KMS_FIELD.into(), k.clone());
+        }
+    } else {
+        hk.remove("SecretId");
+        hk.remove(HOST_KEY_KMS_FIELD);
+    }
+}
+
+/// Internal (never rendered) record of a host key's `KmsKey`.
+const HOST_KEY_KMS_FIELD: &str = "__KmsKey";
+
+/// Create a host key record for `server_id` from key material.
+fn new_host_key(
+    ctx: &Ctx,
+    server_id: &str,
+    host_key_body: &str,
+    storage_type: &str,
+    kms_key: Option<&Value>,
+) -> (String, String, Map<String, Value>) {
+    let host_key_id = format!("hostkey-{}", hex17());
+    let hk_arn = arn(ctx, &format!("host-key/{server_id}/{host_key_id}"));
+    let mut hk = Map::new();
+    hk.insert("Arn".into(), json!(hk_arn));
+    hk.insert("HostKeyId".into(), json!(host_key_id));
+    hk.insert(
+        "HostKeyFingerprint".into(),
+        json!(format!("SHA256:{}", hex17())),
+    );
+    hk.insert("Type".into(), json!(host_key_type(host_key_body)));
+    hk.insert("DateImported".into(), json!(now_ts()));
+    apply_host_key_storage(ctx, &mut hk, server_id, &host_key_id, storage_type, kms_key);
+    (host_key_id, hk_arn, hk)
+}
+
+/// A stored host key as rendered: internal fields stripped.
+fn rendered_host_key(hk: &Value) -> Map<String, Value> {
+    let mut out = hk.as_object().cloned().unwrap_or_default();
+    out.remove(HOST_KEY_KMS_FIELD);
+    out
+}
+
 impl TransferService {
     fn import_host_key(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
         let server_id = req_str(b, "ServerId")?.to_string();
         let host_key_body = req_str(b, "HostKeyBody")?.to_string();
+        let storage_type = b
+            .get("StorageType")
+            .and_then(Value::as_str)
+            .unwrap_or("SERVICE_MANAGED");
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         self.require_server(data, &server_id)?;
-        let host_key_id = format!("hostkey-{}", hex17());
-        let key = format!("{server_id}/{host_key_id}");
-        let hk_arn = arn(ctx, &format!("host-key/{server_id}/{host_key_id}"));
-        let mut hk = Map::new();
-        hk.insert("Arn".into(), json!(hk_arn));
-        hk.insert("HostKeyId".into(), json!(host_key_id));
-        hk.insert(
-            "HostKeyFingerprint".into(),
-            json!(format!("SHA256:{}", hex17())),
+        let (host_key_id, hk_arn, mut hk) = new_host_key(
+            ctx,
+            &server_id,
+            &host_key_body,
+            storage_type,
+            b.get("KmsKey"),
         );
-        hk.insert("Type".into(), json!(host_key_type(&host_key_body)));
-        hk.insert("DateImported".into(), json!(now_ts()));
         copy_present(b, &mut hk, &["Description"]);
-        data.host_keys.insert(key, Value::Object(hk));
+        data.host_keys
+            .insert(format!("{server_id}/{host_key_id}"), Value::Object(hk));
         store_tags(data, &hk_arn, b);
         ok(json!({ "ServerId": server_id, "HostKeyId": host_key_id }))
     }
@@ -914,16 +1005,21 @@ impl TransferService {
     fn update_host_key(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
         let server_id = req_str(b, "ServerId")?.to_string();
         let host_key_id = req_str(b, "HostKeyId")?.to_string();
-        let description = req_str(b, "Description")?.to_string();
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         let hk = data
             .host_keys
             .get_mut(&format!("{server_id}/{host_key_id}"))
             .ok_or_else(|| not_found(&format!("Host key {host_key_id} does not exist.")))?;
-        hk.as_object_mut()
-            .unwrap()
-            .insert("Description".into(), json!(description));
+        let obj = hk.as_object_mut().unwrap();
+        copy_present(b, obj, &["Description"]);
+        if let Some(st) = b.get("StorageType").and_then(Value::as_str) {
+            apply_host_key_storage(ctx, obj, &server_id, &host_key_id, st, b.get("KmsKey"));
+        } else if let Some(k) = b.get("KmsKey") {
+            if obj.get("StorageType").and_then(Value::as_str) == Some("SECRETS_MANAGER") {
+                obj.insert(HOST_KEY_KMS_FIELD.into(), k.clone());
+            }
+        }
         ok(json!({ "ServerId": server_id, "HostKeyId": host_key_id }))
     }
 
@@ -938,7 +1034,7 @@ impl TransferService {
             .host_keys
             .get(&format!("{server_id}/{host_key_id}"))
             .ok_or_else(|| not_found(&format!("Host key {host_key_id} does not exist.")))?;
-        let mut out = hk.as_object().unwrap().clone();
+        let mut out = rendered_host_key(hk);
         let arn = out
             .get("Arn")
             .and_then(Value::as_str)
@@ -997,6 +1093,8 @@ fn listed_host_key(hk: &Value) -> Value {
         ("Description", "Description"),
         ("Type", "Type"),
         ("DateImported", "DateImported"),
+        ("StorageType", "StorageType"),
+        ("SecretId", "SecretId"),
     ] {
         if let Some(v) = hk.get(src) {
             out.insert(dst.to_string(), v.clone());
@@ -2181,5 +2279,127 @@ impl TransferService {
             b,
             &[("Arn", json!(resource_arn))],
         ))
+    }
+}
+
+#[cfg(test)]
+mod host_key_storage_tests {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+
+    fn svc() -> TransferService {
+        TransferService::new(Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        ))))
+    }
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "transfer".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "req".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: String::new(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn call(s: &TransferService, action: &str, body: Value) -> Value {
+        let resp = dispatch(s, &req(action, body)).expect("op ok");
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    const KEY: &str =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nssh-ed25519 AAAA\n-----END OPENSSH PRIVATE KEY-----";
+
+    #[test]
+    fn host_key_storage_type_round_trips() {
+        let s = svc();
+        let server = call(
+            &s,
+            "CreateServer",
+            json!({ "HostKey": KEY, "HostKeyStorageType": "SECRETS_MANAGER" }),
+        )["ServerId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // The CreateServer host key is listed with its storage type.
+        let listed = call(&s, "ListHostKeys", json!({ "ServerId": server }));
+        let first = &listed["HostKeys"][0];
+        assert_eq!(first["StorageType"], json!("SECRETS_MANAGER"));
+        assert!(first["SecretId"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:secretsmanager:us-east-1:000000000000:secret:aws/transfer/"));
+        let described = call(&s, "DescribeServer", json!({ "ServerId": server }));
+        assert_eq!(
+            described["Server"]["HostKeyFingerprint"],
+            first["Fingerprint"]
+        );
+
+        let hk = call(
+            &s,
+            "ImportHostKey",
+            json!({
+                "ServerId": server,
+                "HostKeyBody": KEY,
+                "StorageType": "SECRETS_MANAGER",
+                "KmsKey": "arn:aws:kms:us-east-1:000000000000:key/abc",
+            }),
+        )["HostKeyId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let d = call(
+            &s,
+            "DescribeHostKey",
+            json!({ "ServerId": server, "HostKeyId": hk }),
+        );
+        assert_eq!(d["HostKey"]["StorageType"], json!("SECRETS_MANAGER"));
+        assert!(d["HostKey"].get("SecretId").is_some());
+        assert!(d["HostKey"].get("__KmsKey").is_none());
+
+        // Description is optional on UpdateHostKey; moving to SERVICE_MANAGED
+        // drops the secret.
+        call(
+            &s,
+            "UpdateHostKey",
+            json!({ "ServerId": server, "HostKeyId": hk, "StorageType": "SERVICE_MANAGED" }),
+        );
+        let d = call(
+            &s,
+            "DescribeHostKey",
+            json!({ "ServerId": server, "HostKeyId": hk }),
+        );
+        assert_eq!(d["HostKey"]["StorageType"], json!("SERVICE_MANAGED"));
+        assert!(d["HostKey"].get("SecretId").is_none());
+    }
+
+    #[test]
+    fn host_key_storage_type_enum_is_validated() {
+        let s = svc();
+        for (action, body) in [
+            ("CreateServer", json!({ "HostKeyStorageType": "VAULT" })),
+            (
+                "ImportHostKey",
+                json!({ "ServerId": "s-0123456789abcdef0", "HostKeyBody": KEY, "StorageType": "VAULT" }),
+            ),
+        ] {
+            let e = dispatch(&s, &req(action, body)).err().expect("rejected");
+            assert_eq!(e.code(), "InvalidRequestException");
+        }
     }
 }

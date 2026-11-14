@@ -4,7 +4,7 @@ description = "Parameters, documents, commands, maintenance windows, association
 weight = 9
 +++
 
-fakecloud implements **152 of 152** SSM operations at 100% Smithy conformance.
+fakecloud implements **154 of 154** SSM operations at 100% Smithy conformance.
 
 ## Supported features
 

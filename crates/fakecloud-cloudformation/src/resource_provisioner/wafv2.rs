@@ -172,6 +172,7 @@ impl ResourceProvisioner {
             data_protection_config: None,
             on_source_d_do_s_protection_config: None,
             application_config: None,
+            monetization_config: None,
             retrofitted_by_firewall_manager: false,
             pre_process_firewall_manager_rule_groups: Vec::new(),
             post_process_firewall_manager_rule_groups: Vec::new(),
@@ -395,6 +396,7 @@ impl ResourceProvisioner {
             available_labels: Vec::new(),
             consumed_labels: Vec::new(),
             created_time: Utc::now(),
+            monetization_config: None,
         };
 
         let mut accounts = self.wafv2_state.write();

@@ -17,6 +17,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
+mod compare;
+mod replication;
+
 use crate::backing;
 use crate::runtime::OpenSearchRuntime;
 use crate::state::{
@@ -128,6 +131,7 @@ pub const OPENSEARCH_ACTIONS: &[&str] = &[
     "AcceptInboundConnection",
     "AddDataSource",
     "AddDirectQueryDataSource",
+    "AddReplicationPeer",
     "AddTags",
     "AssociatePackage",
     "AssociatePackages",
@@ -135,6 +139,7 @@ pub const OPENSEARCH_ACTIONS: &[&str] = &[
     "AuthorizeVpcEndpointAccess",
     "CancelDomainConfigChange",
     "CancelServiceSoftwareUpdate",
+    "CompareDomainConfiguration",
     "CreateApplication",
     "CreateDomain",
     "CreateIndex",
@@ -158,6 +163,7 @@ pub const OPENSEARCH_ACTIONS: &[&str] = &[
     "DescribeDomainConfig",
     "DescribeDomainHealth",
     "DescribeDomainNodes",
+    "DescribeDomainReplication",
     "DescribeDomains",
     "DescribeDryRunProgress",
     "DescribeInboundConnections",
@@ -171,6 +177,7 @@ pub const OPENSEARCH_ACTIONS: &[&str] = &[
     "DetachDataSource",
     "DissociatePackage",
     "DissociatePackages",
+    "FailoverReplication",
     "GetApplication",
     "GetCapability",
     "GetCompatibleVersions",
@@ -203,11 +210,13 @@ pub const OPENSEARCH_ACTIONS: &[&str] = &[
     "PutDefaultApplicationSetting",
     "RegisterCapability",
     "RejectInboundConnection",
+    "RemoveReplicationPeer",
     "RemoveTags",
     "RevokeVpcEndpointAccess",
     "RollbackServiceSoftwareUpdate",
     "StartDomainMaintenance",
     "StartServiceSoftwareUpdate",
+    "SwitchoverReplication",
     "UpdateApplication",
     "UpdateDataSource",
     "UpdateDirectQueryDataSource",
@@ -343,6 +352,12 @@ pub const ALL_ACTIONS: &[&str] = &[
     "UpdatePackageScope",
     "UpdateScheduledAction",
     "UpgradeDomain",
+    "AddReplicationPeer",
+    "CompareDomainConfiguration",
+    "DescribeDomainReplication",
+    "FailoverReplication",
+    "RemoveReplicationPeer",
+    "SwitchoverReplication",
 ];
 
 /// Actions that mutate persisted state; a snapshot is written after each one
@@ -416,6 +431,13 @@ fn is_mutating(action: &str) -> bool {
             | "RollbackServiceSoftwareUpdate"
             // Scheduled-action updates mutate the stored scheduled action.
             | "UpdateScheduledAction"
+            // Replication relationships live on both domains; a describe
+            // settles a transition in progress.
+            | "AddReplicationPeer"
+            | "RemoveReplicationPeer"
+            | "SwitchoverReplication"
+            | "FailoverReplication"
+            | "DescribeDomainReplication"
     )
 }
 
@@ -811,6 +833,24 @@ fn resolve_os(method: &Method, seg: &[&str], mut l: Labels) -> Option<(&'static 
             l.domain = Some(d.to_string());
             "ListVpcEndpointsForDomain"
         }
+        // Cross-Region replication.
+        (&Method::GET, ["opensearch", "domain", d, "replication"]) => {
+            l.domain = Some(d.to_string());
+            "DescribeDomainReplication"
+        }
+        (&Method::POST, ["opensearch", "domain", d, "replication", op]) => {
+            l.domain = Some(d.to_string());
+            match *op {
+                "addPeer" => "AddReplicationPeer",
+                "removePeer" => "RemoveReplicationPeer",
+                "switchover" => "SwitchoverReplication",
+                "failover" => "FailoverReplication",
+                _ => return None,
+            }
+        }
+        (&Method::POST, ["opensearch", "compareDomainConfiguration"]) => {
+            "CompareDomainConfiguration"
+        }
         // Data sources (per domain).
         (&Method::POST, ["opensearch", "domain", d, "dataSource"]) => {
             l.domain = Some(d.to_string());
@@ -1051,6 +1091,11 @@ impl AwsService for OpenSearchService {
             &req,
         )?;
 
+        // Comparing domain metadata reads both backing clusters over HTTP.
+        if action == "CompareDomainConfiguration" {
+            return self.compare_domain_configuration(&req).await;
+        }
+
         let result = self
             .dispatch(action, api, &labels, &req)
             .map(|resp| match page {
@@ -1195,6 +1240,12 @@ impl OpenSearchService {
             "DescribeDomainNodes" => self.describe_domain_nodes(l),
             "DescribeDryRunProgress" => self.describe_dry_run_progress(l, req),
             "CancelDomainConfigChange" => self.cancel_domain_config_change(l, req),
+            // Cross-Region replication.
+            "AddReplicationPeer" => self.add_replication_peer(l, req),
+            "DescribeDomainReplication" => self.describe_domain_replication(l, req),
+            "RemoveReplicationPeer" => self.remove_replication_peer(l, req),
+            "SwitchoverReplication" => self.switchover_replication(l, req),
+            "FailoverReplication" => self.failover_replication(l, req),
             // ---- Instance types / versions ----
             "DescribeInstanceTypeLimits" | "DescribeElasticsearchInstanceTypeLimits" => {
                 Ok(ok(instance_type_limits()))
@@ -1317,6 +1368,7 @@ impl OpenSearchService {
             processing: None,
             data_plane_error: None,
             change_pending: false,
+            replication: None,
         };
         // With a container runtime the domain reports `Processing` until a real
         // cluster answers health (converged in the background below).
@@ -1371,6 +1423,7 @@ impl OpenSearchService {
             .remove(&name)
             .ok_or_else(|| not_found_domain(&name))?;
         st.tags.remove(&d.arn);
+        st.detach_replication_peer_of(&d.arn);
         if let Some(rt) = &self.runtime {
             backing::spawn_teardown(rt, &d);
         }

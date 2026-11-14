@@ -1976,13 +1976,21 @@ impl ElasticBeanstalkService {
         // Otherwise it must be one of the AWS-managed solution stacks; anything
         // else is genuinely unknown (real ACM returns the service exception).
         if is_managed_platform_arn(&arn) {
+            let stack = arn.split_once("::platform/").map_or("", |(_, s)| s);
+            let solution_stack = if SOLUTION_STACKS.contains(&stack) {
+                el("SolutionStackName", stack)
+            } else {
+                String::new()
+            };
             let inner = format!(
-                "<PlatformDescription>{}{}{}{}{}</PlatformDescription>",
+                "<PlatformDescription>{}{}{}{}{}{}{}</PlatformDescription>",
                 el("PlatformArn", &arn),
                 el("PlatformOwner", "AWSElasticBeanstalk"),
+                solution_stack,
                 el("PlatformStatus", "Ready"),
                 el("PlatformCategory", "generic"),
                 el("PlatformLifecycleState", "Supported"),
+                render_default_ami_list(stack),
             );
             return Ok(self.ok("DescribePlatformVersion", inner, req));
         }
@@ -2492,6 +2500,45 @@ fn render_custom_platform_summary(p: &CustomPlatform) -> String {
 /// An AWS-managed solution-stack platform ARN carries an empty account segment
 /// (`...:elasticbeanstalk:<region>::platform/...`); custom platforms carry the
 /// owning account id.
+/// `DefaultAmiList` for a managed platform: the base OS image per supported
+/// architecture, using the public AMIs the EC2 emulator seeds (so the IDs
+/// resolve with `DescribeImages`). Custom platforms never carry this list.
+fn default_amis(stack: &str) -> &'static [(&'static str, &'static str)] {
+    if stack.contains("Amazon Linux 2023") {
+        &[
+            ("x86_64", "ami-0a1b2c3d4e5f60002"),
+            ("arm64", "ami-0a1b2c3d4e5f60003"),
+        ]
+    } else if stack.contains("Amazon Linux 2 ") {
+        &[
+            ("x86_64", "ami-0a1b2c3d4e5f60001"),
+            ("arm64", "ami-0a1b2c3d4e5f60007"),
+        ]
+    } else if stack.contains("Windows Server") {
+        &[("x86_64", "ami-0a1b2c3d4e5f60006")]
+    } else {
+        &[]
+    }
+}
+
+fn render_default_ami_list(stack: &str) -> String {
+    let amis = default_amis(stack);
+    if amis.is_empty() {
+        return String::new();
+    }
+    let members: String = amis
+        .iter()
+        .map(|(arch, id)| {
+            format!(
+                "<member>{}{}</member>",
+                el("Architecture", arch),
+                el("ImageId", id)
+            )
+        })
+        .collect();
+    format!("<DefaultAmiList>{members}</DefaultAmiList>")
+}
+
 fn is_managed_platform_arn(arn: &str) -> bool {
     arn.contains(":elasticbeanstalk:") && arn.contains("::platform/")
 }

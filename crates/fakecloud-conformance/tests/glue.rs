@@ -91,17 +91,17 @@ async fn database_lifecycle() {
 }
 
 #[test_action("glue", "CreateTable", checksum = "7c199a41")]
-#[test_action("glue", "GetTable", checksum = "78029ca4")]
-#[test_action("glue", "GetTables", checksum = "15b153e1")]
+#[test_action("glue", "GetTable", checksum = "cfc03219")]
+#[test_action("glue", "GetTables", checksum = "e677866e")]
 #[test_action("glue", "UpdateTable", checksum = "03d09ed7")]
 #[test_action("glue", "DeleteTable", checksum = "6e87f081")]
-#[test_action("glue", "SearchTables", checksum = "bf213b9f")]
-#[test_action("glue", "GetTableVersion", checksum = "f8c663c5")]
-#[test_action("glue", "GetTableVersions", checksum = "5c7e00bd")]
+#[test_action("glue", "SearchTables", checksum = "adf6b78e")]
+#[test_action("glue", "GetTableVersion", checksum = "1732b994")]
+#[test_action("glue", "GetTableVersions", checksum = "88811a8d")]
 #[test_action("glue", "DeleteTableVersion", checksum = "6b333c1a")]
 #[test_action("glue", "BatchDeleteTableVersion", checksum = "4ee84752")]
 #[test_action("glue", "BatchDeleteTable", checksum = "88fe68f8")]
-#[test_action("glue", "GetUnfilteredTableMetadata", checksum = "6c1562be")]
+#[test_action("glue", "GetUnfilteredTableMetadata", checksum = "f31e36a7")]
 #[tokio::test]
 async fn table_lifecycle() {
     let server = TestServer::start().await;
@@ -382,16 +382,16 @@ async fn partition_lifecycle() {
 // Jobs, job runs, bookmarks
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateJob", checksum = "a9db5691")]
-#[test_action("glue", "GetJob", checksum = "77a96892")]
-#[test_action("glue", "GetJobs", checksum = "6851e3e8")]
+#[test_action("glue", "CreateJob", checksum = "cbf57481")]
+#[test_action("glue", "GetJob", checksum = "9e42ed8a")]
+#[test_action("glue", "GetJobs", checksum = "797cf3cb")]
 #[test_action("glue", "ListJobs", checksum = "93e4dce9")]
-#[test_action("glue", "UpdateJob", checksum = "38eb8c22")]
+#[test_action("glue", "UpdateJob", checksum = "78d4bf25")]
 #[test_action("glue", "DeleteJob", checksum = "4083b5e4")]
-#[test_action("glue", "BatchGetJobs", checksum = "7c958799")]
-#[test_action("glue", "StartJobRun", checksum = "838ccbfd")]
-#[test_action("glue", "GetJobRun", checksum = "97d9b62c")]
-#[test_action("glue", "GetJobRuns", checksum = "a6746968")]
+#[test_action("glue", "BatchGetJobs", checksum = "90b9d9de")]
+#[test_action("glue", "StartJobRun", checksum = "7ef76974")]
+#[test_action("glue", "GetJobRun", checksum = "d0b5eb60")]
+#[test_action("glue", "GetJobRuns", checksum = "9d3761a5")]
 #[test_action("glue", "BatchStopJobRun", checksum = "a8bfd43c")]
 #[test_action("glue", "GetJobBookmark", checksum = "0f127a53")]
 #[test_action("glue", "ResetJobBookmark", checksum = "561c3632")]
@@ -899,14 +899,14 @@ async fn trigger_lifecycle() {
 }
 
 #[test_action("glue", "CreateWorkflow", checksum = "ca63809a")]
-#[test_action("glue", "GetWorkflow", checksum = "1b96904c")]
+#[test_action("glue", "GetWorkflow", checksum = "a08ab4b9")]
 #[test_action("glue", "ListWorkflows", checksum = "1e3d60c1")]
-#[test_action("glue", "BatchGetWorkflows", checksum = "f9be7f11")]
+#[test_action("glue", "BatchGetWorkflows", checksum = "f2af3192")]
 #[test_action("glue", "UpdateWorkflow", checksum = "5072ffc0")]
 #[test_action("glue", "DeleteWorkflow", checksum = "e46038d6")]
 #[test_action("glue", "StartWorkflowRun", checksum = "a224cc53")]
-#[test_action("glue", "GetWorkflowRun", checksum = "552d8eb7")]
-#[test_action("glue", "GetWorkflowRuns", checksum = "a1568649")]
+#[test_action("glue", "GetWorkflowRun", checksum = "3064cfb7")]
+#[test_action("glue", "GetWorkflowRuns", checksum = "4f1f8ca5")]
 #[test_action("glue", "GetWorkflowRunProperties", checksum = "c26a6f2d")]
 #[test_action("glue", "PutWorkflowRunProperties", checksum = "322dfba1")]
 #[test_action("glue", "StopWorkflowRun", checksum = "3e38c2d6")]
@@ -1062,11 +1062,11 @@ async fn blueprint_lifecycle() {
     glue.delete_blueprint().name("bp").send().await.unwrap();
 }
 
-#[test_action("glue", "CreateDevEndpoint", checksum = "2b882a55")]
-#[test_action("glue", "GetDevEndpoint", checksum = "16feeac1")]
-#[test_action("glue", "GetDevEndpoints", checksum = "9e57c705")]
+#[test_action("glue", "CreateDevEndpoint", checksum = "627f97c3")]
+#[test_action("glue", "GetDevEndpoint", checksum = "2bddc7cd")]
+#[test_action("glue", "GetDevEndpoints", checksum = "0ed6f407")]
 #[test_action("glue", "ListDevEndpoints", checksum = "12de5690")]
-#[test_action("glue", "BatchGetDevEndpoints", checksum = "355c5c89")]
+#[test_action("glue", "BatchGetDevEndpoints", checksum = "de4501f0")]
 #[test_action("glue", "UpdateDevEndpoint", checksum = "ccd83c9b")]
 #[test_action("glue", "DeleteDevEndpoint", checksum = "8acdc4ae")]
 #[tokio::test]
@@ -1291,9 +1291,9 @@ async fn schema_registry_lifecycle() {
 // Sessions and statements
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateSession", checksum = "ffdec0fb")]
-#[test_action("glue", "GetSession", checksum = "eab70118")]
-#[test_action("glue", "ListSessions", checksum = "45116557")]
+#[test_action("glue", "CreateSession", checksum = "be238621")]
+#[test_action("glue", "GetSession", checksum = "36752880")]
+#[test_action("glue", "ListSessions", checksum = "7e09fd15")]
 #[test_action("glue", "StopSession", checksum = "17e56dd4")]
 #[test_action("glue", "DeleteSession", checksum = "c20b8b75")]
 #[test_action("glue", "RunStatement", checksum = "bac28d6f")]
@@ -1581,11 +1581,11 @@ async fn batch_get_data_quality_ruleset_evaluation_run() {
 // ML transforms, ML task runs
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateMLTransform", checksum = "a55215e9")]
-#[test_action("glue", "GetMLTransform", checksum = "deefb508")]
-#[test_action("glue", "GetMLTransforms", checksum = "c7f0b2e0")]
-#[test_action("glue", "ListMLTransforms", checksum = "f61628fb")]
-#[test_action("glue", "UpdateMLTransform", checksum = "e7245f3c")]
+#[test_action("glue", "CreateMLTransform", checksum = "5f5c0592")]
+#[test_action("glue", "GetMLTransform", checksum = "408a55a7")]
+#[test_action("glue", "GetMLTransforms", checksum = "c868f3ce")]
+#[test_action("glue", "ListMLTransforms", checksum = "fa59ba00")]
+#[test_action("glue", "UpdateMLTransform", checksum = "0d7d644f")]
 #[test_action("glue", "DeleteMLTransform", checksum = "8ca0e796")]
 #[test_action("glue", "StartMLEvaluationTaskRun", checksum = "b6439462")]
 #[test_action("glue", "StartMLLabelingSetGenerationTaskRun", checksum = "6d623d17")]
@@ -1957,10 +1957,10 @@ async fn custom_entity_type_lifecycle() {
         .unwrap();
 }
 
-#[test_action("glue", "CreateUserDefinedFunction", checksum = "9c7feb30")]
-#[test_action("glue", "GetUserDefinedFunction", checksum = "68bc9871")]
-#[test_action("glue", "GetUserDefinedFunctions", checksum = "1df0d804")]
-#[test_action("glue", "UpdateUserDefinedFunction", checksum = "f171b634")]
+#[test_action("glue", "CreateUserDefinedFunction", checksum = "52319c23")]
+#[test_action("glue", "GetUserDefinedFunction", checksum = "079101cb")]
+#[test_action("glue", "GetUserDefinedFunctions", checksum = "4890c4d4")]
+#[test_action("glue", "UpdateUserDefinedFunction", checksum = "b112e629")]
 #[test_action("glue", "DeleteUserDefinedFunction", checksum = "2ee4d9da")]
 #[tokio::test]
 async fn udf_lifecycle() {
@@ -2142,10 +2142,10 @@ async fn table_optimizer_lifecycle() {
 // Integrations, integration resource/table properties, identity center
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateIntegration", checksum = "b6fc9efd")]
-#[test_action("glue", "ModifyIntegration", checksum = "7d0a6f5b")]
-#[test_action("glue", "DescribeIntegrations", checksum = "c21aa1ee")]
-#[test_action("glue", "DescribeInboundIntegrations", checksum = "43d02f1f")]
+#[test_action("glue", "CreateIntegration", checksum = "b417c9af")]
+#[test_action("glue", "ModifyIntegration", checksum = "b3fcfde2")]
+#[test_action("glue", "DescribeIntegrations", checksum = "c13bc862")]
+#[test_action("glue", "DescribeInboundIntegrations", checksum = "fa2bbc63")]
 #[test_action("glue", "DeleteIntegration", checksum = "3f0e1131")]
 #[test_action("glue", "CreateIntegrationResourceProperty", checksum = "deb6c2c9")]
 #[test_action("glue", "GetIntegrationResourceProperty", checksum = "97ca2162")]
@@ -2750,4 +2750,172 @@ async fn data_quality_recommendation_run_round_trips_its_request() {
     )
     .await;
     assert_eq!(resp.status(), 400, "an unmodelled RecommendationMode");
+}
+
+/// POST a raw awsJson1.1 Glue operation, returning `(status, parsed_body)`.
+async fn glue_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/glue/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", format!("AWSGlue.{op}"))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+// The data quality result V2 operations are newer than the typed
+// aws-sdk-glue client, so drive them over raw awsJson1.1.
+#[test_action("glue", "PublishDataQualityResultV2", checksum = "2312ae2f")]
+#[test_action("glue", "GetDataQualityResultV2", checksum = "40fb57da")]
+#[test_action("glue", "BatchGetDataQualityResultV2", checksum = "ffec0434")]
+#[test_action("glue", "ListDataQualityResultsV2", checksum = "b6ac3803")]
+#[tokio::test]
+async fn data_quality_results_v2() {
+    use serde_json::json;
+    let server = TestServer::start().await;
+
+    let (status, out) = glue_raw(
+        &server,
+        "PublishDataQualityResultV2",
+        json!({
+            "Dimensions": {"workgroup": "wg-1"},
+            "Score": 0.75,
+            "RuleResults": [
+                {"Name": "Rule_1", "Result": "PASS", "EvaluatedRule": "IsComplete \"id\""},
+                {"Name": "Rule_2", "Result": "FAIL", "EvaluatedRule": "ColumnLength \"id\" = 4"},
+            ],
+            "EvaluationContext": "nightly",
+            "Descriptors": {"databaseName": "sales", "tableName": "orders"},
+            "RulesetName": "orders-rules",
+            "ClientToken": "publish-1",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let id = out["ResultId"].as_str().unwrap().to_string();
+
+    let (status, out) = glue_raw(&server, "GetDataQualityResultV2", json!({"ResultId": id})).await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["Score"], 0.75);
+    assert_eq!(out["RulesetName"], "orders-rules");
+    assert_eq!(out["DataSource"]["GlueTable"]["TableName"], "orders");
+    assert_eq!(out["RuleResults"].as_array().unwrap().len(), 2);
+
+    let (status, out) = glue_raw(
+        &server,
+        "BatchGetDataQualityResultV2",
+        json!({"ResultIds": [id, "dqresult-unknown"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["Results"][0]["ResultId"], id.as_str());
+    assert_eq!(out["ResultsNotFound"], json!(["dqresult-unknown"]));
+
+    let (status, out) = glue_raw(
+        &server,
+        "ListDataQualityResultsV2",
+        json!({"Filter": {"DataSource": {"GlueTable": {"DatabaseName": "sales", "TableName": "orders"}}}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["Results"][0]["ResultId"], id.as_str());
+    assert_eq!(out["Results"][0]["EvaluationContext"], "nightly");
+
+    let (status, _) = glue_raw(
+        &server,
+        "GetDataQualityResultV2",
+        json!({"ResultId": "dqresult-unknown"}),
+    )
+    .await;
+    assert_eq!(status, 400);
+}
+
+// The job upgrade analysis operations (and Job.AutoUpgradeMetadata) are newer
+// than the typed aws-sdk-glue client, so drive them over raw awsJson1.1.
+#[test_action("glue", "GetJobUpgradeAnalysis", checksum = "46235553")]
+#[test_action("glue", "StartJobUpgradeAnalysis", checksum = "00a36a29")]
+#[test_action("glue", "StopJobUpgradeAnalysis", checksum = "3b6ef17e")]
+#[tokio::test]
+async fn job_upgrade_analysis() {
+    use serde_json::json;
+    let server = TestServer::start().await;
+    let create = |name: &'static str| {
+        json!({
+            "Name": name,
+            "Role": "arn:aws:iam::123456789012:role/glue",
+            "Command": {"Name": "glueetl", "ScriptLocation": "s3://scripts/job.py"},
+            "GlueVersion": "auto",
+        })
+    };
+    let (status, out) = glue_raw(&server, "CreateJob", create("auto-job")).await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = glue_raw(&server, "GetJob", json!({"JobName": "auto-job"})).await;
+    let meta = &out["Job"]["AutoUpgradeMetadata"];
+    assert_eq!(meta["Status"], "OBSERVING", "{out}");
+    let id = meta["AnalysisId"].as_str().unwrap().to_string();
+
+    // A successful run is observed; the analysis then waits for consent.
+    let (status, out) = glue_raw(&server, "StartJobRun", json!({"JobName": "auto-job"})).await;
+    assert_eq!(status, 200, "{out}");
+    let (status, out) = glue_raw(
+        &server,
+        "GetJobUpgradeAnalysis",
+        json!({"jobName": "auto-job", "analysisId": id}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["status"], "WAITING_FOR_CONSENT");
+    assert_eq!(out["targetVersion"], "6.0");
+    assert_eq!(out["analysisType"], "AUTO_UPGRADE");
+
+    let (status, out) = glue_raw(
+        &server,
+        "StartJobUpgradeAnalysis",
+        json!({"jobName": "auto-job", "analysisId": id, "upgradeConsent": "APPROVE"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["analysisId"], id.as_str());
+    let (_, out) = glue_raw(&server, "GetJob", json!({"JobName": "auto-job"})).await;
+    assert_eq!(
+        out["Job"]["AutoUpgradeMetadata"]["Status"],
+        "UPGRADE_SUCCEEDED"
+    );
+
+    // A second auto job's analysis is stopped while it observes.
+    glue_raw(&server, "CreateJob", create("stopped-job")).await;
+    let (_, out) = glue_raw(&server, "GetJob", json!({"JobName": "stopped-job"})).await;
+    let other = out["Job"]["AutoUpgradeMetadata"]["AnalysisId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, out) = glue_raw(
+        &server,
+        "StopJobUpgradeAnalysis",
+        json!({"jobName": "stopped-job", "analysisId": other}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = glue_raw(
+        &server,
+        "GetJobUpgradeAnalysis",
+        json!({"jobName": "stopped-job", "analysisId": other}),
+    )
+    .await;
+    assert_eq!(out["status"], "STOPPED");
 }

@@ -223,6 +223,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
         activity_stream: None,
+        capacity_reservation: None,
     };
 
     let xml = db_instance_xml(&instance, Some("creating"), None);
@@ -418,6 +419,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
         activity_stream: None,
+        capacity_reservation: None,
     }
 }
 
@@ -735,6 +737,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
             activity_stream: None,
+            capacity_reservation: None,
         },
     );
     arn
@@ -6507,6 +6510,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
             activity_stream: None,
+            capacity_reservation: None,
         }
     }
 
@@ -7868,4 +7872,516 @@ fn detaching_the_writer_promotes_the_next_member() {
     let cluster = &state.extras["clusters"]["c1"];
     assert!(cluster["DBClusterMembers"].as_array().unwrap().is_empty());
     assert!(cluster.get("WriterDBInstanceIdentifier").is_none());
+}
+
+// ── DB capacity reservations ─────────────────────────────────────
+
+async fn call_ok(svc: &RdsService, action: &str, params: &[(&str, &str)]) -> String {
+    let resp = svc
+        .handle(request(action, params))
+        .await
+        .unwrap_or_else(|e| panic!("{action} failed: {}", e.code()));
+    String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+}
+
+async fn call_err(svc: &RdsService, action: &str, params: &[(&str, &str)]) -> String {
+    match svc.handle(request(action, params)).await {
+        Ok(_) => panic!("{action} unexpectedly succeeded"),
+        Err(e) => e.code().to_string(),
+    }
+}
+
+fn tag_value(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let start = xml.find(&open).expect(tag) + open.len();
+    let end = xml[start..].find(&format!("</{tag}>")).unwrap() + start;
+    xml[start..end].to_string()
+}
+
+/// A reservation of two db.t3.micro postgres units in each of two zones.
+async fn service_with_reservation() -> (RdsService, String) {
+    let svc = make_service();
+    let xml = call_ok(
+        &svc,
+        "CreateDBCapacityReservation",
+        &[
+            ("DBCapacityReservationName", "pg-res"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("Engine", "postgres"),
+            ("CapacityPerAvailabilityZone", "1"),
+            ("AvailabilityZones.AvailabilityZone.1", "us-east-1a"),
+            ("AvailabilityZones.AvailabilityZone.2", "us-east-1b"),
+        ],
+    )
+    .await;
+    let id = tag_value(&xml, "DBCapacityReservationIdentifier");
+    (svc, id)
+}
+
+fn insert_instance(svc: &RdsService, id: &str, az: &str) {
+    let mut instance = make_instance_with_defaults(id);
+    instance.availability_zone = Some(az.to_string());
+    svc.state_handle()
+        .write()
+        .get_or_create("123456789012")
+        .instances
+        .insert(id.to_string(), instance);
+}
+
+fn available_in(xml: &str, az: &str) -> String {
+    let marker = format!("<AvailabilityZone>{az}</AvailabilityZone><AvailableCapacity>");
+    let start = xml.find(&marker).expect(az) + marker.len();
+    let end = xml[start..].find('<').unwrap() + start;
+    xml[start..end].to_string()
+}
+
+#[tokio::test]
+async fn capacity_reservation_create_validates_its_configuration() {
+    let svc = make_service();
+    let base = [
+        ("DBInstanceClass", "db.m5.large"),
+        ("Engine", "mysql"),
+        ("CapacityPerAvailabilityZone", "2"),
+        ("AvailabilityZones.AvailabilityZone.1", "us-east-1a"),
+    ];
+    let with = |extra: &[(&'static str, &'static str)]| {
+        let mut p = vec![("DBCapacityReservationName", "res")];
+        p.extend(base);
+        p.extend_from_slice(extra);
+        p
+    };
+    let mut bad_name = with(&[]);
+    bad_name[0] = ("DBCapacityReservationName", "Bad--Name");
+    assert_eq!(
+        call_err(&svc, "CreateDBCapacityReservation", &bad_name).await,
+        "InvalidParameterValue"
+    );
+    let mut bad_engine = with(&[]);
+    bad_engine[2] = ("Engine", "docdb");
+    assert_eq!(
+        call_err(&svc, "CreateDBCapacityReservation", &bad_engine).await,
+        "DBCapacityReservationUnsupported"
+    );
+    // License models only for the engines that have one.
+    assert_eq!(
+        call_err(
+            &svc,
+            "CreateDBCapacityReservation",
+            &with(&[("LicenseModel", "license-included")])
+        )
+        .await,
+        "DBCapacityReservationUnsupported"
+    );
+    // Out-of-region and duplicate zones.
+    let mut other_region = with(&[]);
+    other_region[4] = ("AvailabilityZones.AvailabilityZone.1", "eu-west-1a");
+    assert_eq!(
+        call_err(&svc, "CreateDBCapacityReservation", &other_region).await,
+        "InvalidParameterValue"
+    );
+    // A future-dated reservation needs a generation-7+ db.m class.
+    let start = (Utc::now() + chrono::Duration::days(10)).to_rfc3339();
+    let start: &'static str = Box::leak(start.into_boxed_str());
+    assert_eq!(
+        call_err(
+            &svc,
+            "CreateDBCapacityReservation",
+            &with(&[("StartDate", start), ("CommitmentDuration", "1209600")])
+        )
+        .await,
+        "DBCapacityReservationUnsupported"
+    );
+    let mut future = with(&[("StartDate", start), ("CommitmentDuration", "1209600")]);
+    future[1] = ("DBInstanceClass", "db.m7g.2xlarge");
+    future[3] = ("CapacityPerAvailabilityZone", "4");
+    let xml = call_ok(&svc, "CreateDBCapacityReservation", &future).await;
+    assert!(xml.contains("<State>scheduled</State>"), "{xml}");
+    assert!(
+        xml.contains(
+            "<CommittedCapacityPerAvailabilityZone>4</CommittedCapacityPerAvailabilityZone>"
+        ),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<AvailableCapacity>0</AvailableCapacity>"),
+        "{xml}"
+    );
+    // Not modifiable or cancellable before it starts.
+    let id = tag_value(&xml, "DBCapacityReservationIdentifier");
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBCapacityReservation",
+            &[
+                ("DBCapacityReservationIdentifier", &id),
+                ("CapacityPerAvailabilityZone", "5")
+            ]
+        )
+        .await,
+        "InvalidDBCapacityReservationState"
+    );
+    assert_eq!(
+        call_err(
+            &svc,
+            "CancelDBCapacityReservation",
+            &[("DBCapacityReservationIdentifier", &id)]
+        )
+        .await,
+        "InvalidDBCapacityReservationState"
+    );
+    // The same name again.
+    assert_eq!(
+        call_err(&svc, "CreateDBCapacityReservation", &future).await,
+        "DBCapacityReservationAlreadyExists"
+    );
+}
+
+#[tokio::test]
+async fn capacity_reservation_modify_requires_a_change_and_consistent_end_date() {
+    let (svc, id) = service_with_reservation().await;
+    let id = id.as_str();
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBCapacityReservation",
+            &[("DBCapacityReservationIdentifier", id)]
+        )
+        .await,
+        "InvalidParameterValue"
+    );
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBCapacityReservation",
+            &[
+                ("DBCapacityReservationIdentifier", id),
+                ("EndDateType", "limited")
+            ]
+        )
+        .await,
+        "InvalidParameterValue"
+    );
+    let xml = call_ok(
+        &svc,
+        "ModifyDBCapacityReservation",
+        &[
+            ("DBCapacityReservationIdentifier", "pg-res"),
+            ("EndDateType", "limited"),
+            ("EndDate", "2099-01-01T00:00:00Z"),
+        ],
+    )
+    .await;
+    assert!(
+        xml.contains("<EndDate>2099-01-01T00:00:00.000Z</EndDate>"),
+        "{xml}"
+    );
+    let xml = call_ok(
+        &svc,
+        "ModifyDBCapacityReservation",
+        &[
+            ("DBCapacityReservationIdentifier", id),
+            ("EndDateType", "unlimited"),
+        ],
+    )
+    .await;
+    assert!(!xml.contains("<EndDate>"), "{xml}");
+}
+
+#[tokio::test]
+async fn describe_capacity_reservations_bounds_max_records() {
+    let (svc, _id) = service_with_reservation().await;
+    for bad in ["19", "101"] {
+        assert_eq!(
+            call_err(
+                &svc,
+                "DescribeDBCapacityReservations",
+                &[("MaxRecords", bad)]
+            )
+            .await,
+            "InvalidParameterValue",
+            "MaxRecords={bad}"
+        );
+    }
+    let xml = call_ok(
+        &svc,
+        "DescribeDBCapacityReservations",
+        &[("MaxRecords", "20")],
+    )
+    .await;
+    assert!(xml.contains("pg-res"), "{xml}");
+}
+
+#[tokio::test]
+async fn db_instances_hold_and_release_reserved_capacity() {
+    let (svc, id) = service_with_reservation().await;
+    let id = id.as_str();
+    insert_instance(&svc, "db1", "us-east-1a");
+    insert_instance(&svc, "db2", "us-east-1a");
+
+    // Moving onto a reservation needs a hardware change.
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBInstance",
+            &[
+                ("DBInstanceIdentifier", "db1"),
+                ("DBCapacityReservationIdentifier", id)
+            ]
+        )
+        .await,
+        "InvalidDBCapacityReservationState"
+    );
+    // Wrong class for the reservation.
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBInstance",
+            &[
+                ("DBInstanceIdentifier", "db1"),
+                ("DBInstanceClass", "db.t3.small"),
+                ("DBCapacityReservationIdentifier", id),
+            ]
+        )
+        .await,
+        "InvalidDBCapacityReservationState"
+    );
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBInstance",
+            &[
+                ("DBInstanceIdentifier", "db1"),
+                ("MultiAZ", "true"),
+                ("DBCapacityReservationIdentifier", "missing-res"),
+            ]
+        )
+        .await,
+        "DBCapacityReservationNotFound"
+    );
+    // A Multi-AZ move takes a unit in both zones.
+    let xml = call_ok(
+        &svc,
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("MultiAZ", "true"),
+            ("ApplyImmediately", "true"),
+            ("DBCapacityReservationIdentifier", id),
+        ],
+    )
+    .await;
+    assert!(
+        xml.contains(&format!(
+            "<DBCapacityReservationIdentifier>{id}</DBCapacityReservationIdentifier>"
+        )),
+        "{xml}"
+    );
+    let res = call_ok(
+        &svc,
+        "DescribeDBCapacityReservations",
+        &[("DBCapacityReservationIdentifier", id)],
+    )
+    .await;
+    assert_eq!(available_in(&res, "us-east-1a"), "0");
+    assert_eq!(available_in(&res, "us-east-1b"), "0");
+    // No room left for db2.
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBInstance",
+            &[
+                ("DBInstanceIdentifier", "db2"),
+                ("MultiAZ", "true"),
+                ("DBCapacityReservationIdentifier", id),
+            ]
+        )
+        .await,
+        "InsufficientDBInstanceCapacity"
+    );
+    // Capacity can't drop below what is in use.
+    svc.state_handle()
+        .write()
+        .get_or_create("123456789012")
+        .capacity_reservations
+        .get_mut(id)
+        .unwrap()
+        .capacity_per_az = 2;
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBCapacityReservation",
+            &[
+                ("DBCapacityReservationIdentifier", id),
+                ("CapacityPerAvailabilityZone", "0")
+            ]
+        )
+        .await,
+        "InvalidParameterValue"
+    );
+
+    // A deferred move holds its unit at once and reports it as pending.
+    let xml = call_ok(
+        &svc,
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db2"),
+            ("MultiAZ", "true"),
+            ("ApplyImmediately", "false"),
+            ("DBCapacityReservationIdentifier", id),
+        ],
+    )
+    .await;
+    let pending = tag_value(&xml, "PendingModifiedValues");
+    assert!(
+        pending.contains("<DBCapacityReservationIdentifier>"),
+        "{xml}"
+    );
+    let res = call_ok(&svc, "DescribeDBCapacityReservations", &[]).await;
+    assert_eq!(available_in(&res, "us-east-1a"), "0");
+    assert_eq!(
+        call_err(
+            &svc,
+            "ModifyDBCapacityReservation",
+            &[
+                ("DBCapacityReservationIdentifier", id),
+                ("CapacityPerAvailabilityZone", "1")
+            ]
+        )
+        .await,
+        "InvalidDBCapacityReservationState"
+    );
+
+    // A class change without the parameter moves db1 to unreserved capacity.
+    let xml = call_ok(
+        &svc,
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("DBInstanceClass", "db.t3.small"),
+            ("ApplyImmediately", "true"),
+        ],
+    )
+    .await;
+    assert!(!xml.contains("<DBCapacityReservationIdentifier>"), "{xml}");
+    let res = call_ok(&svc, "DescribeDBCapacityReservations", &[]).await;
+    assert_eq!(available_in(&res, "us-east-1a"), "1");
+
+    // Cancelling drops the reservation from running instances.
+    call_ok(
+        &svc,
+        "CancelDBCapacityReservation",
+        &[("DBCapacityReservationIdentifier", id)],
+    )
+    .await;
+    let state = svc.state_handle().read();
+    let st = state.get("123456789012").unwrap();
+    assert!(st.instances["db2"]
+        .pending_modified_values
+        .as_ref()
+        .unwrap()
+        .capacity_reservation
+        .is_none());
+}
+
+#[tokio::test]
+async fn stopped_instances_hold_no_capacity_and_can_detach() {
+    let (svc, id) = service_with_reservation().await;
+    insert_instance(&svc, "db1", "us-east-1a");
+    {
+        let mut accounts = svc.state_handle().write();
+        let st = accounts.get_or_create("123456789012");
+        st.instances.get_mut("db1").unwrap().capacity_reservation =
+            Some(crate::state::CapacityReservationUse {
+                identifier: id.clone(),
+                availability_zones: vec!["us-east-1a".to_string()],
+            });
+    }
+    let res = call_ok(&svc, "DescribeDBCapacityReservations", &[]).await;
+    assert_eq!(available_in(&res, "us-east-1a"), "0");
+    let xml = call_ok(&svc, "StopDBInstance", &[("DBInstanceIdentifier", "db1")]).await;
+    // Stopped: keeps its reservation, holds no unit.
+    assert!(xml.contains("<DBCapacityReservationIdentifier>"), "{xml}");
+    let res = call_ok(&svc, "DescribeDBCapacityReservations", &[]).await;
+    assert_eq!(available_in(&res, "us-east-1a"), "1");
+    // StartDBInstance names a reservation that doesn't exist.
+    assert_eq!(
+        call_err(
+            &svc,
+            "StartDBInstance",
+            &[
+                ("DBInstanceIdentifier", "db1"),
+                ("DBCapacityReservationIdentifier", "nope")
+            ]
+        )
+        .await,
+        "DBCapacityReservationNotFound"
+    );
+    let xml = call_ok(
+        &svc,
+        "StopDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("DetachFromDBCapacityReservation", "true"),
+        ],
+    )
+    .await;
+    assert!(!xml.contains("<DBCapacityReservationIdentifier>"), "{xml}");
+}
+
+#[tokio::test]
+async fn capacity_reservations_are_taggable_and_filterable() {
+    let (svc, id) = service_with_reservation().await;
+    let arn = format!("arn:aws:rds:us-east-1:123456789012:db-capacity-reservation:{id}");
+    call_ok(
+        &svc,
+        "AddTagsToResource",
+        &[
+            ("ResourceName", &arn),
+            ("Tags.Tag.1.Key", "k"),
+            ("Tags.Tag.1.Value", "v"),
+        ],
+    )
+    .await;
+    let tags = call_ok(&svc, "ListTagsForResource", &[("ResourceName", &arn)]).await;
+    assert!(tags.contains("<Key>k</Key>"), "{tags}");
+    let missing = "arn:aws:rds:us-east-1:123456789012:db-capacity-reservation:dbcr-missing";
+    assert_eq!(
+        call_err(&svc, "ListTagsForResource", &[("ResourceName", missing)]).await,
+        "DBCapacityReservationNotFound"
+    );
+    for (name, value, hit) in [
+        ("availability-zone", "us-east-1b", true),
+        ("availability-zone", "us-east-1c", false),
+        ("state", "active", true),
+        ("state", "expired", false),
+        ("db-instance-class", "db.t3.micro", true),
+        ("unknown-filter", "x", false),
+    ] {
+        let xml = call_ok(
+            &svc,
+            "DescribeDBCapacityReservations",
+            &[
+                ("Filters.Filter.1.Name", name),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        )
+        .await;
+        assert_eq!(xml.contains(&id), hit, "{name}={value}: {xml}");
+    }
+}
+
+#[test]
+fn option_group_options_report_cross_region_copyability() {
+    let xml = crate::extras::option_group_options_xml_for_tests("oracle-ee", Some("19"));
+    assert!(xml.contains("<Name>TDE</Name>"), "{xml}");
+    assert!(
+        xml.contains("<CopyableCrossRegion>false</CopyableCrossRegion>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<CopyableCrossRegion>true</CopyableCrossRegion>"),
+        "{xml}"
+    );
+    let none = crate::extras::option_group_options_xml_for_tests("postgres", None);
+    assert!(!none.contains("<OptionGroupOption>"), "{none}");
 }

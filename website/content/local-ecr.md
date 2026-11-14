@@ -1,6 +1,6 @@
 +++
 title = "Local ECR for integration tests"
-description = "Run local Amazon ECR for tests with fakecloud. Full 58-operation API, real OCI v2 Distribution so docker push and docker pull actually work. Free, AGPL-3.0."
+description = "Run local Amazon ECR for tests with fakecloud. Full 62-operation API, real OCI v2 Distribution so docker push and docker pull actually work. Free, AGPL-3.0."
 template = "page.html"
 +++
 
@@ -15,7 +15,7 @@ Point your AWS SDK at `http://localhost:4566`. `docker push` / `docker pull` wor
 
 ## Why fakecloud for ECR
 
-- **Full API — 58 operations at 100% conformance.** Repositories, images, layers, tags, policies, lifecycle evaluation, image scanning, registry policy, pull-through cache, replication, repository creation templates, signing configuration, pull-time exclusions.
+- **Full API — 62 operations at 100% conformance.** Repositories, images, layers, tags, policies, lifecycle evaluation, image scanning, registry policy, pull-through cache, replication, repository creation templates, signing configuration, pull-time exclusions.
 - **Real `docker push` / `docker pull`.** The OCI v2 Distribution HTTP endpoints (`/v2/<name>/blobs/...`, `/v2/<name>/manifests/<ref>`, etc.) are wired to the same content-addressed blob store the AWS JSON ops read and write. A layer pushed by Docker is visible via `BatchCheckLayerAvailability`; an image created via `PutImage` can be `docker pull`ed.
 - **`GetAuthorizationToken` that Docker accepts.** Returns `base64("AWS:<token>")` with a 12h expiry matching real AWS, and the `/v2/` endpoints honor the Basic Auth flow. `aws ecr get-login-password | docker login localhost:4566 --username AWS --password-stdin` works.
 - **Real lifecycle policy evaluator.** `PutLifecyclePolicy` applies immediately. Selectors supported: `tagStatus` (tagged/untagged/any), `tagPrefixList`, `tagPatternList` (`*` wildcards), `countType` (`imageCountMoreThan` and `sinceImagePushed`) with `countUnit` days/hours. Rules run in ascending `rulePriority` so earlier rules' decisions can't be reversed. `GetLifecyclePolicyPreview` returns the digests that would be expired.

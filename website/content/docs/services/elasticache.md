@@ -4,7 +4,7 @@ description = "Real Redis, Valkey, and Memcached clusters via Docker. Replicatio
 weight = 18
 +++
 
-fakecloud implements **75 of 75** ElastiCache operations at 100% Smithy conformance. Cache clusters run in **real Docker containers** — your code connects to a real Redis, Valkey, or Memcached instance.
+fakecloud implements **77 of 77** ElastiCache operations at 100% Smithy conformance. Cache clusters run in **real Docker containers** — your code connects to a real Redis, Valkey, or Memcached instance.
 
 ## Supported features
 

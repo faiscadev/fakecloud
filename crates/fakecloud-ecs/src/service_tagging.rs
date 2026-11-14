@@ -93,6 +93,13 @@ fn resource_tags_mut<'a>(
             .get_mut(tail)
             .map(|s| &mut s.tags)
             .ok_or_else(not_found),
+        // `gateway/<name>/<id>`, keyed by ARN; a deleted gateway is gone.
+        "gateway" => state
+            .gateways
+            .get_mut(arn)
+            .filter(|g| g.status != "DELETED")
+            .map(|g| &mut g.tags)
+            .ok_or_else(not_found),
         other => Err(invalid_parameter(format!(
             "Unknown ECS resource type: {other}"
         ))),

@@ -1,6 +1,6 @@
 +++
 title = "Local RDS for integration tests"
-description = "Run local RDS for integration tests with fakecloud. 164 RDS operations, real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 engines via Docker, snapshots, read replicas. Free, AGPL-3.0."
+description = "Run local RDS for integration tests with fakecloud. 168 RDS operations, real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 engines via Docker, snapshots, read replicas. Free, AGPL-3.0."
 template = "page.html"
 +++
 
@@ -15,7 +15,7 @@ Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud
 
 ## Why fakecloud for RDS
 
-- **164 RDS operations** at 100% conformance — DB instances, snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging, upgrades.
+- **168 RDS operations** at 100% conformance — DB instances, snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging, upgrades.
 - **Real database engines.** fakecloud pulls real PostgreSQL / MySQL / MariaDB / Oracle / SQL Server / Db2 Docker images and runs them as the RDS instance. Your SQL schema, indexes, triggers, and extensions all work because they are real engines. PostgreSQL uses a prebuilt `ghcr.io/faiscadev/fakecloud-postgres:<major>` image that bakes in `plpython3u` and the AWS RDS `aws_lambda` and `aws_s3` extensions.
 - **Endpoint works.** `DescribeDBInstances` returns a real connectable host. Your application connects with the usual PostgreSQL / MySQL / Oracle / SQL Server / Db2 driver.
 - **Paid on LocalStack; free here.** RDS has always been LocalStack Pro-only.

@@ -61,6 +61,7 @@ impl ResourceProvisioner {
             transformer: None,
             deletion_protection: false,
             log_group_class: Some("STANDARD".to_string()),
+            data_protection_deleted: false,
         };
 
         state

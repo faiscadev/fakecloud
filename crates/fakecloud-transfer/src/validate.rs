@@ -49,6 +49,9 @@ impl Rule {
     }
 }
 
+/// The model's `HostKeyStorageType` enum.
+const HOST_KEY_STORAGE_TYPES: &[&str] = &["SERVICE_MANAGED", "SECRETS_MANAGER"];
+
 fn invalid(msg: String) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidRequestException", &msg)
 }
@@ -183,6 +186,7 @@ fn rules_for(action: &str) -> &'static [Rule] {
                 Rule::str_("PreAuthenticationLoginBanner", Some(0), Some(4096)),
                 Rule::str_("SecurityPolicyName", Some(0), Some(100)),
                 Rule::enum_("IpAddressType", &["IPV4", "DUALSTACK"]),
+                Rule::enum_("HostKeyStorageType", HOST_KEY_STORAGE_TYPES),
             ];
             R
         }
@@ -355,6 +359,8 @@ fn rules_for(action: &str) -> &'static [Rule] {
                 Rule::str_("ServerId", Some(19), Some(19)),
                 Rule::str_("HostKeyBody", Some(0), Some(4096)),
                 Rule::str_("Description", Some(0), Some(200)),
+                Rule::enum_("StorageType", HOST_KEY_STORAGE_TYPES),
+                Rule::str_("KmsKey", Some(20), Some(1600)),
             ];
             R
         }
@@ -593,6 +599,8 @@ fn rules_for(action: &str) -> &'static [Rule] {
                 Rule::str_("ServerId", Some(19), Some(19)),
                 Rule::str_("HostKeyId", Some(25), Some(25)),
                 Rule::str_("Description", Some(0), Some(200)),
+                Rule::enum_("StorageType", HOST_KEY_STORAGE_TYPES),
+                Rule::str_("KmsKey", Some(20), Some(1600)),
             ];
             R
         }

@@ -288,6 +288,36 @@ pub(crate) fn input_rules(api: Api, action: &str) -> &'static [Rule] {
             Rule::LenMax("ARN", Src::Body, 2048),
             Rule::Required("TagList", Src::Body),
         ],
+        (Api::OpenSearch, "AddReplicationPeer")
+        | (Api::OpenSearch, "RemoveReplicationPeer")
+        | (Api::OpenSearch, "SwitchoverReplication") => &[
+            Rule::LenMin("DomainName", Src::Label, 3),
+            Rule::LenMax("DomainName", Src::Label, 28),
+            Rule::Required("PeerDomainArn", Src::Body),
+            Rule::LenMin("PeerDomainArn", Src::Body, 1),
+            Rule::LenMax("PeerDomainArn", Src::Body, 512),
+        ],
+        (Api::OpenSearch, "FailoverReplication") => &[
+            Rule::LenMin("DomainName", Src::Label, 3),
+            Rule::LenMax("DomainName", Src::Label, 28),
+            Rule::Required("PeerDomainArn", Src::Body),
+            Rule::LenMin("PeerDomainArn", Src::Body, 1),
+            Rule::LenMax("PeerDomainArn", Src::Body, 512),
+            Rule::Required("AllowDataLoss", Src::Body),
+        ],
+        (Api::OpenSearch, "DescribeDomainReplication") => &[
+            Rule::LenMin("DomainName", Src::Label, 3),
+            Rule::LenMax("DomainName", Src::Label, 28),
+        ],
+        (Api::OpenSearch, "CompareDomainConfiguration") => &[
+            Rule::Required("SourceDomainArn", Src::Body),
+            Rule::LenMin("SourceDomainArn", Src::Body, 1),
+            Rule::LenMax("SourceDomainArn", Src::Body, 512),
+            Rule::Required("TargetDomainArn", Src::Body),
+            Rule::LenMin("TargetDomainArn", Src::Body, 1),
+            Rule::LenMax("TargetDomainArn", Src::Body, 512),
+            Rule::Required("Categories", Src::Body),
+        ],
         (Api::OpenSearch, "AssociatePackage") => &[
             Rule::LenMin("DomainName", Src::Label, 3),
             Rule::LenMax("DomainName", Src::Label, 28),

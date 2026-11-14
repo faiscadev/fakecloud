@@ -877,10 +877,13 @@ pub(crate) fn deliver_to_logs(
             transformer: None,
             deletion_protection: false,
             log_group_class: Some("STANDARD".to_string()),
+            data_protection_deleted: false,
         });
 
-    // CloudWatch Logs rejects events older than the group's retention.
-    if group.retention_in_days.is_some_and(|days| {
+    // CloudWatch Logs rejects events older than the group's effective
+    // retention (an account-level retention policy overrides the group's own).
+    let retention = fakecloud_logs::retention::effective_retention(&state.account_policies, group);
+    if retention.is_some_and(|days| {
         ts_millis < chrono::Utc::now().timestamp_millis() - i64::from(days) * 86_400_000
     }) {
         return;

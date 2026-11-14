@@ -305,6 +305,12 @@ pub struct DbInstance {
     /// stream in describe responses.
     #[serde(default)]
     pub activity_stream: Option<ActivityStreamConfig>,
+    /// The DB capacity reservation this instance belongs to
+    /// (`DBCapacityReservationIdentifier`). A stopped instance keeps it
+    /// (unless stopped with `DetachFromDBCapacityReservation`) but holds no
+    /// unit until it starts again.
+    #[serde(default)]
+    pub capacity_reservation: Option<CapacityReservationUse>,
 }
 
 /// Database Activity Stream state for a DB instance. Persisted so that
@@ -361,6 +367,10 @@ pub struct PendingModifiedValues {
     pub port: Option<i32>,
     #[serde(default)]
     pub ca_certificate_identifier: Option<String>,
+    /// The reservation the instance moves onto when the pending change
+    /// applies. It already holds a unit there, as on AWS.
+    #[serde(default)]
+    pub capacity_reservation: Option<CapacityReservationUse>,
 }
 
 impl fmt::Debug for PendingModifiedValues {
@@ -399,6 +409,7 @@ impl fmt::Debug for PendingModifiedValues {
             .field("tde_credential_arn", &self.tde_credential_arn)
             .field("port", &self.port)
             .field("ca_certificate_identifier", &self.ca_certificate_identifier)
+            .field("capacity_reservation", &self.capacity_reservation)
             .finish()
     }
 }
@@ -579,6 +590,71 @@ pub struct RdsState {
     /// callers see their override on subsequent reads.
     #[serde(default)]
     pub default_certificate_identifier: Option<String>,
+    /// DB capacity reservations keyed by their `dbcr-` identifier.
+    #[serde(default)]
+    pub capacity_reservations: BTreeMap<String, DbCapacityReservation>,
+}
+
+/// A DB capacity reservation: `CapacityPerAvailabilityZone` units of one
+/// DB instance class + engine in each of its Availability Zones.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DbCapacityReservation {
+    /// `dbcr-` + 32 lowercase alphanumerics.
+    pub identifier: String,
+    pub name: String,
+    pub arn: String,
+    pub db_instance_class: String,
+    pub engine: String,
+    #[serde(default)]
+    pub license_model: Option<String>,
+    pub capacity_per_az: i32,
+    pub availability_zones: Vec<String>,
+    /// Set only for a future-dated reservation.
+    #[serde(default)]
+    pub start_date: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub end_date: Option<DateTime<Utc>>,
+    /// The capacity commitment of a future-dated reservation.
+    #[serde(default)]
+    pub committed_capacity_per_az: Option<i32>,
+    #[serde(default)]
+    pub commitment_end_date: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cancelled: bool,
+    pub create_date: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Vec<RdsTag>,
+}
+
+impl DbCapacityReservation {
+    /// The reservation's `State` at `now`. Time-driven transitions
+    /// (a future-dated reservation reaching its start date, any
+    /// reservation passing its end date) are derived rather than stored.
+    pub fn state_at(&self, now: DateTime<Utc>) -> &'static str {
+        if self.cancelled {
+            "cancelled"
+        } else if self.end_date.is_some_and(|end| end <= now) {
+            "expired"
+        } else if self.start_date.is_some_and(|start| start > now) {
+            "scheduled"
+        } else {
+            "active"
+        }
+    }
+
+    /// Inside the capacity commitment of a future-dated reservation.
+    pub fn in_commitment(&self, now: DateTime<Utc>) -> bool {
+        self.commitment_end_date.is_some_and(|end| now < end)
+    }
+}
+
+/// The reserved capacity a DB instance holds: the reservation and the
+/// Availability Zones it holds one unit in each (the primary first; a
+/// Multi-AZ instance holds two).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CapacityReservationUse {
+    pub identifier: String,
+    pub availability_zones: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -823,6 +899,7 @@ impl RdsState {
             extras: BTreeMap::new(),
             events: Vec::new(),
             default_certificate_identifier: None,
+            capacity_reservations: BTreeMap::new(),
         }
     }
 
@@ -886,6 +963,7 @@ impl RdsState {
         self.extras.clear();
         self.events.clear();
         self.default_certificate_identifier = None;
+        self.capacity_reservations.clear();
     }
 
     /// Append an event row to the in-memory ring, dropping the oldest
@@ -1443,6 +1521,7 @@ mod tests {
                 domain_dns_ips: Vec::new(),
                 db_cluster_identifier: None,
                 activity_stream: None,
+                capacity_reservation: None,
             },
         );
 
@@ -1616,6 +1695,7 @@ mod tests {
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
             activity_stream: None,
+            capacity_reservation: None,
         }
     }
 

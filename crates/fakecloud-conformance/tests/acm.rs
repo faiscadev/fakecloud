@@ -73,7 +73,7 @@ async fn acm_delete_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "ImportCertificate", checksum = "e4238636")]
+#[test_action("acm", "ImportCertificate", checksum = "27e63c61")]
 #[tokio::test]
 async fn acm_import_certificate() {
     let server = TestServer::start().await;

@@ -707,6 +707,7 @@ impl ResourceProvisioner {
                 .unwrap_or_default(),
             db_cluster_identifier: cluster_id.clone(),
             activity_stream: None,
+            capacity_reservation: None,
         };
         let endpoint = inst.endpoint_address.clone();
         let endpoint_port = inst.port;

@@ -740,7 +740,7 @@ async fn list_platform_branches() {
     assert!(!out.platform_branch_summary_list().is_empty());
 }
 
-#[test_action("elasticbeanstalk", "DescribePlatformVersion", checksum = "5608d56f")]
+#[test_action("elasticbeanstalk", "DescribePlatformVersion", checksum = "0778a449")]
 #[tokio::test]
 async fn describe_platform_version() {
     let s = server().await;

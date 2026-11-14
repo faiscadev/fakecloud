@@ -318,6 +318,7 @@ fn build_table(
         vector_indexes: Vec::new(),
         pitr_history: Default::default(),
         replica_regions: Vec::new(),
+        disassociation_protection_enabled: true,
         change_log: Default::default(),
     };
     table.recalculate_stats(); // fills item_count / size_bytes

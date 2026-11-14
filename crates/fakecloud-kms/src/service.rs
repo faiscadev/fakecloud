@@ -48,6 +48,9 @@ const VALID_KEY_SPECS: &[&str] = &[
     "ML_DSA_44",
     "ML_DSA_65",
     "ML_DSA_87",
+    "ML_KEM_512",
+    "ML_KEM_768",
+    "ML_KEM_1024",
     "RSA_2048",
     "RSA_3072",
     "RSA_4096",
@@ -116,6 +119,8 @@ static KMS_ACTIONS: &[&str] = &[
     "GenerateDataKeyPair",
     "GenerateDataKeyPairWithoutPlaintext",
     "DeriveSharedSecret",
+    "Encapsulate",
+    "Decapsulate",
     "GetParametersForImport",
     "ImportKeyMaterial",
     "DeleteImportedKeyMaterial",
@@ -313,6 +318,8 @@ impl AwsService for KmsService {
                 self.generate_data_key_pair_without_plaintext(&req)
             }
             "DeriveSharedSecret" => self.derive_shared_secret(&req),
+            "Encapsulate" => self.encapsulate(&req),
+            "Decapsulate" => self.decapsulate(&req),
             "GetParametersForImport" => self.get_parameters_for_import(&req),
             "ImportKeyMaterial" => self.import_key_material(&req),
             "DeleteImportedKeyMaterial" => self.delete_imported_key_material(&req),
@@ -491,6 +498,7 @@ impl CreateKeyInput {
                     "ENCRYPT_DECRYPT",
                     "GENERATE_VERIFY_MAC",
                     "KEY_AGREEMENT",
+                    "ENCAPSULATE_DECAPSULATE",
                 ],
             )
         })?;
@@ -686,6 +694,8 @@ impl KmsService {
             | "GenerateMac"
             | "VerifyMac"
             | "DeriveSharedSecret"
+            | "Encapsulate"
+            | "Decapsulate"
             | "GetPublicKey"
             | "DescribeKey" => true,
             "CreateGrant"
@@ -921,6 +931,15 @@ impl KmsService {
             })? {
                 return Ok((Some(p), Some(k)));
             }
+            if let Some((p, k)) = asym_mlkem::generate_keypair(key_spec).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("failed to generate ML-KEM key: {e}"),
+                )
+            })? {
+                return Ok((Some(p), Some(k)));
+            }
             Ok((None, None))
         }
 
@@ -985,7 +1004,8 @@ impl KmsService {
         // pure-Rust impl wired in.
         let is_asymmetric = input.key_spec.starts_with("ECC_")
             || input.key_spec.starts_with("RSA_")
-            || input.key_spec == "SM2";
+            || input.key_spec == "SM2"
+            || asym_mlkem::is_ml_kem_spec(&input.key_spec);
         if is_asymmetric && asym_priv.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1900,6 +1920,8 @@ impl KmsService {
 pub(crate) mod asym;
 #[path = "asym_ecdsa.rs"]
 pub(crate) mod asym_ecdsa;
+#[path = "asym_mlkem.rs"]
+pub(crate) mod asym_mlkem;
 #[path = "mac.rs"]
 pub(crate) mod mac;
 #[path = "service_aliases.rs"]

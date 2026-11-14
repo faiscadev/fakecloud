@@ -198,14 +198,21 @@ pub(crate) enum ReplicaUpdate {
     Delete {
         region: String,
     },
+    /// Leave the replication group, keeping the local replica as a
+    /// standalone regional table.
+    Disassociate {
+        region: String,
+        mode: Option<String>,
+    },
 }
 
 impl ReplicaUpdate {
     pub(crate) fn region(&self) -> &str {
         match self {
-            Self::Create { region, .. } | Self::Update { region, .. } | Self::Delete { region } => {
-                region
-            }
+            Self::Create { region, .. }
+            | Self::Update { region, .. }
+            | Self::Delete { region }
+            | Self::Disassociate { region, .. } => region,
         }
     }
 }
@@ -232,6 +239,14 @@ pub(crate) fn parse_replica_updates(body: &Value) -> Vec<ReplicaUpdate> {
                     region: c["RegionName"].as_str()?.to_string(),
                     read_capacity_override: rcu(c),
                     table_class: class(c),
+                });
+            }
+            if let Some(d) = u.get("Disassociate").filter(|d| d.is_object()) {
+                // Both members are required; a missing region is rejected by
+                // `validate_replica_updates`.
+                return Some(ReplicaUpdate::Disassociate {
+                    region: d["RegionName"].as_str().unwrap_or_default().to_string(),
+                    mode: d["DisassociationMode"].as_str().map(str::to_string),
                 });
             }
             let d = u.get("Delete").filter(|d| d.is_object())?;
@@ -269,6 +284,9 @@ pub(crate) fn validate_replica_updates(
         if target.is_empty() {
             return Err(validation("Replica RegionName must not be empty"));
         }
+        if let ReplicaUpdate::Disassociate { mode, .. } = update {
+            return validate_disassociate(table, region, target, mode.as_deref(), updates.len());
+        }
         if target == region {
             return Err(validation(format!(
                 "Replica update for table: {name} names the region of the table itself: {region}"
@@ -298,7 +316,63 @@ pub(crate) fn validate_replica_updates(
                     replicas.remove(target);
                 }
             }
+            ReplicaUpdate::Disassociate { .. } => unreachable!("handled above"),
         }
+    }
+    Ok(())
+}
+
+/// A `Disassociate` replica update: it names the region the request is sent
+/// to (the local replica), stands alone in `ReplicaUpdates`, uses the only
+/// supported mode, and needs a replica of a version 2019.11.21 global table
+/// whose disassociation protection is off.
+fn validate_disassociate(
+    table: &DynamoTable,
+    region: &str,
+    target: &str,
+    mode: Option<&str>,
+    update_count: usize,
+) -> Result<(), AwsServiceError> {
+    match mode {
+        Some("WAIT_FOR_REPLICATION") => {}
+        Some(other) => {
+            return Err(validation(format!(
+                "1 validation error detected: Value '{other}' at \
+                 'replicaUpdates.1.member.disassociate.disassociationMode' failed to satisfy \
+                 constraint: Member must satisfy enum value set: [WAIT_FOR_REPLICATION]"
+            )));
+        }
+        None => {
+            return Err(validation(
+                "1 validation error detected: Value null at \
+                 'replicaUpdates.1.member.disassociate.disassociationMode' failed to satisfy \
+                 constraint: Member must not be null",
+            ));
+        }
+    }
+    if update_count > 1 {
+        return Err(validation(
+            "A Disassociate replica update cannot be combined with other replica updates",
+        ));
+    }
+    if target != region {
+        return Err(validation(format!(
+            "Disassociate must name the Region of the request: {region}. To disassociate the \
+             replica in {target}, send the request to {target}."
+        )));
+    }
+    if table.replica_regions.is_empty() {
+        return Err(validation(format!(
+            "Table {} is not a replica of a global table",
+            table.name
+        )));
+    }
+    if table.disassociation_protection_enabled {
+        return Err(validation(format!(
+            "Replica {} in {region} has disassociation protection enabled. Disable \
+             disassociation protection before disassociating the replica.",
+            table.name
+        )));
     }
     Ok(())
 }
@@ -375,6 +449,21 @@ pub(crate) fn apply_replica_updates(
                             .stream_policies
                             .retain(|arn, _| !arn.starts_with(&prefix));
                     }
+                }
+                members.remove(target);
+            }
+            ReplicaUpdate::Disassociate { region: target, .. } => {
+                // Replication is synchronous here, so nothing is pending: the
+                // replica leaves the group at once, keeping its rows, indexes
+                // and settings, and the rest of the group carries on without
+                // it. Protection is a replica setting: the standalone table
+                // reports none and returns to the default.
+                if let Some(table) = accounts
+                    .regional_get_mut(account, target)
+                    .and_then(|s| s.tables.get_mut(name))
+                {
+                    table.replica_regions.clear();
+                    table.disassociation_protection_enabled = true;
                 }
                 members.remove(target);
             }
@@ -586,6 +675,7 @@ fn new_replica(
     table.contributor_insights_status = "DISABLED".to_string();
     table.contributor_insights_counters.clear();
     table.deletion_protection_enabled = false;
+    table.disassociation_protection_enabled = true;
     table.stream_records = std::sync::Arc::new(parking_lot::RwLock::new(Vec::new()));
     table.stream_arn = source.stream_enabled.then(|| {
         format!(

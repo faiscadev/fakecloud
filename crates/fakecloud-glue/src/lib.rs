@@ -1,3 +1,4 @@
+pub mod external;
 pub mod introspection;
 pub mod jobs;
 pub mod partition_filter;
@@ -13,6 +14,7 @@ pub(crate) mod common;
 pub(crate) mod connections;
 pub(crate) mod constraints;
 pub(crate) mod crawlers;
+pub(crate) mod dq_v2;
 pub(crate) mod generic;
 pub(crate) mod ml;
 pub(crate) mod schema_registry;
@@ -21,6 +23,7 @@ pub(crate) mod tail;
 #[cfg(test)]
 mod tests;
 pub(crate) mod triggers;
+pub(crate) mod upgrade;
 
 pub use common::resource_arn;
 pub use service::{parse_columns, parse_storage_descriptor, parse_string_map, GlueService};

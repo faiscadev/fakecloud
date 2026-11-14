@@ -868,6 +868,25 @@ mod tests {
         ))
     }
 
+    /// `contextualGroundingPolicyConfig.tierConfig` is stored verbatim and
+    /// reads back as `contextualGroundingPolicy.tier`.
+    #[test]
+    fn contextual_grounding_tier_config_reads_back_as_tier() {
+        let mut g = empty_guardrail("g1");
+        g.contextual_grounding_policy = Some(json!({
+            "filtersConfig": [{"type": "GROUNDING", "threshold": 0.7}],
+            "tierConfig": {"tierName": "STANDARD"}
+        }));
+        let out = guardrail_to_json(&g);
+        assert_eq!(
+            out["contextualGroundingPolicy"],
+            json!({
+                "filters": [{"type": "GROUNDING", "threshold": 0.7}],
+                "tier": {"tierName": "STANDARD"}
+            })
+        );
+    }
+
     #[test]
     fn word_boundary_matches_whole_word_only() {
         assert!(word_boundary_match("the damn cat", "damn"));
