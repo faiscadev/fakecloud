@@ -344,6 +344,7 @@ impl S3Service {
                 obj,
                 |store, obj, meta| {
                     store.put_object(
+                        account_id,
                         bucket,
                         &obj.key,
                         meta.version_id.as_deref(),
@@ -960,6 +961,7 @@ impl S3Service {
             dest_obj,
             |store, obj, meta| {
                 store.put_object(
+                    account_id,
                     dest_bucket,
                     &obj.key,
                     meta.version_id.as_deref(),
@@ -976,6 +978,7 @@ impl S3Service {
         for annotation in dest_annotations.values() {
             self.store
                 .put_annotation(
+                    account_id,
                     dest_bucket,
                     dest_key,
                     version_id.as_deref(),
@@ -1086,7 +1089,7 @@ impl S3Service {
         obj.restore_expiry = Some(expiry);
         let meta = object_meta_snapshot(obj);
         self.store
-            .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+            .put_object_meta(account_id, bucket, key, meta.version_id.as_deref(), &meta)
             .map_err(crate::service::persistence_error)?;
         Ok(AwsResponse {
             status,

@@ -203,7 +203,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.cors_config = Some(body_str.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Cors, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Cors, &body_str)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -244,7 +244,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.cors_config = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Cors)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Cors)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }

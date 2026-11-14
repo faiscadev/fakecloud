@@ -35,7 +35,7 @@ impl S3Service {
             crate::service::toml_or_internal_error(&snap)?
         };
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Inventory, &payload)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Inventory, &payload)
             .map_err(crate::service::persistence_error)?;
         // Real S3 delivers inventory reports on a daily/weekly schedule, not at
         // config time, so a bucket created and destroyed within a test never
@@ -117,7 +117,7 @@ impl S3Service {
         }
         if b.inventory_configs.is_empty() {
             self.store
-                .delete_bucket_subresource(bucket, BucketSubresource::Inventory)
+                .delete_bucket_subresource(account_id, bucket, BucketSubresource::Inventory)
                 .map_err(crate::service::persistence_error)?;
         } else {
             let snap = InventorySnapshot {
@@ -125,7 +125,7 @@ impl S3Service {
             };
             let payload = crate::service::toml_or_internal_error(&snap)?;
             self.store
-                .put_bucket_subresource(bucket, BucketSubresource::Inventory, &payload)
+                .put_bucket_subresource(account_id, bucket, BucketSubresource::Inventory, &payload)
                 .map_err(crate::service::persistence_error)?;
         }
         Ok(empty_response(StatusCode::NO_CONTENT))

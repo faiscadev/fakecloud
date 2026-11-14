@@ -519,11 +519,11 @@ impl ResetState {
     fn reset_s3(&self, account: Option<&str>, teardown: &mut Teardown) {
         let detached: Vec<PathBuf> = {
             let mut mas = self.s3.write();
-            let buckets: Vec<String> = match account {
+            let buckets_by_account: Vec<(String, String)> = match account {
                 None => {
-                    let buckets = mas
+                    let buckets: Vec<(String, String)> = mas
                         .iter()
-                        .flat_map(|(_, s)| s.buckets.keys().cloned())
+                        .flat_map(|(aid, s)| s.buckets.keys().map(move |b| (aid.to_string(), b.clone())))
                         .collect();
                     // The recreated default account must keep the shared
                     // runtime wiring (body cache, write side effects) the
@@ -542,7 +542,7 @@ impl ResetState {
                 }
                 Some(account) => match mas.get_mut(account) {
                     Some(state) => {
-                        let buckets = state.buckets.keys().cloned().collect();
+                        let buckets = state.buckets.keys().map(|b| (account.to_string(), b.clone())).collect();
                         state.reset();
                         buckets
                     }
@@ -552,9 +552,9 @@ impl ResetState {
             let Some(store) = self.late().s3_store.as_ref() else {
                 return;
             };
-            buckets
+            buckets_by_account
                 .iter()
-                .filter_map(|bucket| match store.detach_bucket(bucket) {
+                .filter_map(|(aid, bucket)| match store.detach_bucket(aid, bucket) {
                     Ok(path) => path,
                     Err(err) => {
                         tracing::error!(%bucket, %err, "reset could not remove the bucket from disk");

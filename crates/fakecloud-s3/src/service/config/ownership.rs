@@ -83,7 +83,7 @@ impl S3Service {
         // would otherwise leave memory ahead of disk, and a restart would
         // silently revert what the caller was told had failed.
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Ownership, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Ownership, &body_str)
             .map_err(crate::service::persistence_error)?;
         b.ownership_controls = Some(body_str.clone());
         Ok(empty_response(StatusCode::OK))
@@ -125,7 +125,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.ownership_controls = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Ownership)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Ownership)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
