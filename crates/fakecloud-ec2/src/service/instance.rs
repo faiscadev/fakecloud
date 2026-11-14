@@ -3095,6 +3095,45 @@ impl InstanceRequirementsQuery {
 /// Evaluates `InstanceRequirements` against the types sold in the request's
 /// Region. The three price protection members do not narrow the result, as recorded:
 /// at 1% each, real EC2 returned the same types as with none.
+/// The instance types sold in `region` that an
+/// `InstanceRequirementsWithMetadataRequest` sent under `prefix` resolves to
+/// (`<prefix>.ArchitectureType.N`, `<prefix>.VirtualizationType.N`,
+/// `<prefix>.InstanceRequirements.*`), the way
+/// `GetInstanceTypesFromInstanceRequirements` resolves the same members. An
+/// architecture or virtualization type left out admits every one.
+pub(crate) fn types_matching_requirements_with_metadata(
+    params: &HashMap<String, String>,
+    prefix: &str,
+    region: &str,
+) -> Result<Vec<&'static InstanceTypeSpec>, AwsServiceError> {
+    let lead = format!("{prefix}.");
+    let mut scoped: HashMap<String, String> = params
+        .iter()
+        .filter_map(|(k, v)| k.strip_prefix(&lead).map(|k| (k.to_string(), v.clone())))
+        .collect();
+    let mut admit_all = |member: &str, all: &[&str]| {
+        if !scoped.contains_key(&format!("{member}.1")) {
+            for (i, v) in all.iter().enumerate() {
+                scoped.insert(format!("{member}.{}", i + 1), (*v).to_string());
+            }
+        }
+    };
+    admit_all(
+        "ArchitectureType",
+        &["i386", "x86_64", "arm64", "x86_64_mac", "arm64_mac"],
+    );
+    admit_all("VirtualizationType", &["hvm", "paravirtual"]);
+    require_struct(&scoped, "InstanceRequirements").map_err(|_| {
+        crate::service_helpers::missing_parameter(&format!("{prefix}.InstanceRequirements"))
+    })?;
+    let query = InstanceRequirementsQuery::parse(&scoped)?;
+    let reference_usable = query.baseline_reference_usable_in(region);
+    Ok(crate::instance_types::catalog()
+        .iter()
+        .filter(|t| reference_usable && t.listed_by_requirements_in(region) && query.matches(t))
+        .collect())
+}
+
 pub(crate) fn get_instance_types_from_requirements(
     _svc: &Ec2Service,
     req: &AwsRequest,

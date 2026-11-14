@@ -831,37 +831,331 @@ pub(crate) fn get_capacity_reservation_usage(
 
 // ---- capacity reservation fleets ----
 
+const FLEET_INSTANCE_PLATFORMS: &[&str] = &[
+    "Linux/UNIX",
+    "Red Hat Enterprise Linux",
+    "SUSE Linux",
+    "Windows",
+    "Windows with SQL Server",
+    "Windows with SQL Server Enterprise",
+    "Windows with SQL Server Standard",
+    "Windows with SQL Server Web",
+    "Linux with SQL Server Standard",
+    "Linux with SQL Server Web",
+    "Linux with SQL Server Enterprise",
+    "RHEL with SQL Server Standard",
+    "RHEL with SQL Server Enterprise",
+    "RHEL with SQL Server Web",
+    "RHEL with HA",
+    "RHEL with HA and SQL Server Standard",
+    "RHEL with HA and SQL Server Enterprise",
+    "Ubuntu Pro",
+];
+
+/// Resolve an `AvailabilityZone` / `AvailabilityZoneId` pair under `prefix`
+/// against the request's Region: at most one may be given, and it must name
+/// one of the Region's zones. Returns both spellings.
+fn fleet_zone(
+    params: &std::collections::HashMap<String, String>,
+    prefix: &str,
+    region: &str,
+) -> Result<(Option<String>, Option<String>), AwsServiceError> {
+    let zone = params
+        .get(&format!("{prefix}AvailabilityZone"))
+        .filter(|v| !v.is_empty());
+    let zone_id = params
+        .get(&format!("{prefix}AvailabilityZoneId"))
+        .filter(|v| !v.is_empty());
+    match (zone, zone_id) {
+        (Some(_), Some(_)) => Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidParameterCombination",
+            "Specify either AvailabilityZone or AvailabilityZoneId, but not both",
+        )),
+        (Some(z), None) if crate::defaults::zone_in_region(region, z) => {
+            Ok((Some(z.clone()), Some(crate::defaults::zone_id_for(z))))
+        }
+        (None, Some(id)) => crate::defaults::zone_name_for_id(region, id)
+            .map(|z| (Some(z), Some(id.clone())))
+            .ok_or_else(|| invalid_parameter_value(format!("Invalid availability zone ID: {id}"))),
+        (Some(z), None) => Err(invalid_parameter_value(format!(
+            "Invalid availability zone: [{z}]"
+        ))),
+        (None, None) => Ok((None, None)),
+    }
+}
+
+fn parse_fleet_instance_type_specifications(
+    params: &std::collections::HashMap<String, String>,
+    region: &str,
+) -> Result<Vec<crate::state::FleetInstanceTypeSpecification>, AwsServiceError> {
+    let mut out = Vec::new();
+    let mut n = 1;
+    loop {
+        let prefix = format!("InstanceTypeSpecification.{n}.");
+        if !params.keys().any(|k| k.starts_with(&prefix)) {
+            break;
+        }
+        let key = |m: &str| format!("{prefix}{m}");
+        let instance_type = params
+            .get(&key("InstanceType"))
+            .filter(|v| !v.is_empty())
+            .cloned();
+        if let Some(t) = &instance_type {
+            if crate::instance_types::lookup(t).is_none() {
+                return Err(invalid_parameter_value(format!(
+                    "Invalid instance type: {t}"
+                )));
+            }
+        }
+        let instance_platform = params
+            .get(&key("InstancePlatform"))
+            .filter(|v| !v.is_empty())
+            .cloned();
+        validate_enum(params, &key("InstancePlatform"), FLEET_INSTANCE_PLATFORMS)?;
+        let weight = match params.get(&key("Weight")).filter(|v| !v.is_empty()) {
+            Some(w) => Some(
+                w.parse::<f64>()
+                    .ok()
+                    .filter(|w| (0.001..=99.999).contains(w))
+                    .ok_or_else(|| {
+                        invalid_parameter_value("Weight must be between 0.001 and 99.999")
+                    })?,
+            ),
+            None => None,
+        };
+        let priority = match params.get(&key("Priority")).filter(|v| !v.is_empty()) {
+            Some(p) => Some(
+                p.parse::<i64>()
+                    .ok()
+                    .filter(|p| *p >= 0)
+                    .ok_or_else(|| invalid_parameter_value("Priority must be at least 0"))?,
+            ),
+            None => None,
+        };
+        let (availability_zone, availability_zone_id) = fleet_zone(params, &prefix, region)?;
+        out.push(crate::state::FleetInstanceTypeSpecification {
+            instance_type,
+            instance_platform,
+            weight,
+            availability_zone,
+            availability_zone_id,
+            ebs_optimized: params
+                .get(&key("EbsOptimized"))
+                .map(|v| v.eq_ignore_ascii_case("true")),
+            priority,
+        });
+        n += 1;
+    }
+    Ok(out)
+}
+
+/// Render a structure sent as query parameters (`a.b`, `list.1`) back as
+/// XML under the same member names: each dotted segment is an element, each
+/// list index an `<item>`.
+fn query_tree_xml(entries: &std::collections::BTreeMap<String, String>) -> String {
+    #[derive(Default)]
+    struct Tree {
+        value: Option<String>,
+        children: Vec<(String, Tree)>,
+    }
+    fn insert(tree: &mut Tree, path: &[&str], value: &str) {
+        match path.split_first() {
+            None => tree.value = Some(value.to_string()),
+            Some((head, rest)) => {
+                let pos = tree.children.iter().position(|(k, _)| k == head);
+                let idx = pos.unwrap_or_else(|| {
+                    tree.children.push(((*head).to_string(), Tree::default()));
+                    tree.children.len() - 1
+                });
+                insert(&mut tree.children[idx].1, rest, value);
+            }
+        }
+    }
+    fn render(tree: &Tree) -> String {
+        if let Some(v) = &tree.value {
+            return fakecloud_aws::xml::xml_escape(v);
+        }
+        let mut children: Vec<&(String, Tree)> = tree.children.iter().collect();
+        // List items render in index order.
+        children.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(u64::MAX));
+        children
+            .iter()
+            .map(|(k, child)| {
+                let name = if k.parse::<u64>().is_ok() {
+                    "item"
+                } else {
+                    k.as_str()
+                };
+                format!("<{name}>{}</{name}>", render(child))
+            })
+            .collect()
+    }
+    let mut root = Tree::default();
+    for (k, v) in entries {
+        let path: Vec<&str> = k.split('.').collect();
+        insert(&mut root, &path, v);
+    }
+    render(&root)
+}
+
+fn fleet_instance_type_specification_xml(
+    s: &crate::state::FleetInstanceTypeSpecification,
+) -> String {
+    let opt = |name: &str, v: Option<String>| v.map(|v| ec2_elem(name, &v)).unwrap_or_default();
+    format!(
+        "{}{}{}{}{}{}{}",
+        opt("instanceType", s.instance_type.clone()),
+        opt("instancePlatform", s.instance_platform.clone()),
+        opt("availabilityZone", s.availability_zone.clone()),
+        opt("availabilityZoneId", s.availability_zone_id.clone()),
+        opt("ebsOptimized", s.ebs_optimized.map(|b| b.to_string())),
+        opt("weight", s.weight.map(|w| w.to_string())),
+        opt("priority", s.priority.map(|p| p.to_string())),
+    )
+}
+
+/// The members `CreateCapacityReservationFleet` and
+/// `DescribeCapacityReservationFleets` share.
+fn fleet_common_xml(f: &crate::state::CapacityReservationFleet, tags: &[Tag]) -> String {
+    let cap = f.total_target_capacity.to_string();
+    format!(
+        "{}{}{}{}{}{}{}{}{}{}",
+        ec2_elem("capacityReservationFleetId", &f.id),
+        ec2_elem("state", "active"),
+        ec2_elem("totalTargetCapacity", &cap),
+        // fakecloud's capacity pool is unbounded: every fleet is fulfilled.
+        ec2_elem("totalFulfilledCapacity", &format!("{cap}.0")),
+        ec2_elem("instanceMatchCriteria", &f.instance_match_criteria),
+        ec2_elem("allocationStrategy", &f.allocation_strategy),
+        ec2_elem("tenancy", &f.tenancy),
+        ec2_elem("createTime", &f.create_time),
+        f.end_date
+            .as_deref()
+            .map(|d| ec2_elem("endDate", d))
+            .unwrap_or_default(),
+        crate::service::tags::tag_set_xml(tags),
+    )
+}
+
+fn fleet_describe_xml(
+    f: &crate::state::CapacityReservationFleet,
+    tags: &[Tag],
+    owner: &str,
+    region: &str,
+) -> String {
+    let specs: Vec<String> = f
+        .instance_type_specifications
+        .iter()
+        .map(fleet_instance_type_specification_xml)
+        .collect();
+    let opt = |name: &str, v: &Option<String>| {
+        v.as_deref().map(|v| ec2_elem(name, v)).unwrap_or_default()
+    };
+    let requirements = if f.instance_requirements.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<instanceRequirements>{}</instanceRequirements>",
+            query_tree_xml(&f.instance_requirements)
+        )
+    };
+    format!(
+        "{}{}{}{}{}{}",
+        fleet_common_xml(f, tags),
+        ec2_elem(
+            "capacityReservationFleetArn",
+            &ec2_arn(
+                region,
+                owner,
+                &format!("capacity-reservation-fleet/{}", f.id)
+            ),
+        ),
+        ec2_list("instanceTypeSpecificationSet", &specs),
+        requirements,
+        opt("availabilityZone", &f.availability_zone),
+        opt("availabilityZoneId", &f.availability_zone_id),
+    )
+}
+
 pub(crate) fn create_capacity_reservation_fleet(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TotalTargetCapacity")?;
-    validate_enum(&req.query_params, "Tenancy", &["default"])?;
-    validate_enum(&req.query_params, "InstanceMatchCriteria", &["open"])?;
-    let id = gen_id("crf");
-    let cap = req
-        .query_params
-        .get("TotalTargetCapacity")
+    let params = &req.query_params;
+    let cap = require(params, "TotalTargetCapacity")?;
+    validate_enum(params, "Tenancy", &["default"])?;
+    validate_enum(params, "InstanceMatchCriteria", &["open"])?;
+    let total_target_capacity = cap
+        .parse::<i64>()
+        .ok()
+        .filter(|c| *c >= 1)
+        .ok_or_else(|| invalid_parameter_value("TotalTargetCapacity must be at least 1"))?;
+    let allocation_strategy = params
+        .get("AllocationStrategy")
+        .filter(|v| !v.is_empty())
         .cloned()
-        .unwrap_or_else(|| "1".to_string());
-    {
-        let mut accounts = svc.state.write();
-        // The map value stores the fleet's TotalTargetCapacity so Describe /
-        // Modify can round-trip it rather than reporting a hardcoded 1.
-        accounts
-            .regional_mut(&req.account_id, &req.region)
-            .capacity_reservation_fleets
-            .insert(id.clone(), cap.clone());
+        .unwrap_or_else(|| "prioritized".to_string());
+    if allocation_strategy != "prioritized" {
+        return Err(invalid_parameter_value(format!(
+            "Invalid allocation strategy: {allocation_strategy}. The only supported value is prioritized"
+        )));
     }
+    let end_date = ts_param(req, "EndDate")?.map(fmt_ts);
+    let region = if req.region.is_empty() {
+        "us-east-1"
+    } else {
+        req.region.as_str()
+    };
+    let instance_type_specifications = parse_fleet_instance_type_specifications(params, region)?;
+    let (availability_zone, availability_zone_id) = fleet_zone(params, "", region)?;
+    let instance_requirements: std::collections::BTreeMap<String, String> = params
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("InstanceRequirements.")
+                .map(|k| (k.to_string(), v.clone()))
+        })
+        .collect();
+    crate::service_helpers::refuse_dry_run(params)?;
+    let id = gen_id("crf");
+    let fleet = crate::state::CapacityReservationFleet {
+        id: id.clone(),
+        total_target_capacity,
+        allocation_strategy,
+        tenancy: params
+            .get("Tenancy")
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "default".to_string()),
+        instance_match_criteria: params
+            .get("InstanceMatchCriteria")
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "open".to_string()),
+        end_date,
+        create_time: fmt_ts(Utc::now()),
+        instance_type_specifications,
+        instance_requirements,
+        availability_zone,
+        availability_zone_id,
+    };
+    let tags = {
+        let mut accounts = svc.state.write();
+        let state = accounts.regional_mut(&req.account_id, &req.region);
+        crate::service::tags::apply_tag_specifications(
+            state,
+            params,
+            &id,
+            "capacity-reservation-fleet",
+        );
+        let tags = state.tags_for(&id).to_vec();
+        state.capacity_reservation_fleets.insert(id, fleet.clone());
+        tags
+    };
     let body = format!(
-        "{}{}<totalTargetCapacity>{}</totalTargetCapacity><totalFulfilledCapacity>{}</totalFulfilledCapacity>{}{}{}{}",
-        ec2_elem("capacityReservationFleetId", &id),
-        ec2_elem("state", "active"),
-        cap, cap,
-        ec2_elem("instanceMatchCriteria", "open"),
-        ec2_elem("allocationStrategy", "prioritized"),
-        ec2_elem("tenancy", "default"),
-        ec2_elem("createTime", FIXED_TIME),
+        "{}{}",
+        fleet_common_xml(&fleet, &tags),
+        ec2_list("fleetCapacityReservationSet", &[]),
     );
     Ok(Ec2Service::respond(
         "CreateCapacityReservationFleet",
@@ -883,16 +1177,9 @@ pub(crate) fn describe_capacity_reservation_fleets(
         .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .capacity_reservation_fleets
-        .iter()
-        .filter(|(id, _)| wanted.is_empty() || wanted.contains(id))
-        .map(|(id, cap)| {
-            format!(
-                "{}{}<totalTargetCapacity>{}</totalTargetCapacity>",
-                ec2_elem("capacityReservationFleetId", id),
-                ec2_elem("state", "active"),
-                cap,
-            )
-        })
+        .values()
+        .filter(|f| wanted.is_empty() || wanted.contains(&f.id))
+        .map(|f| fleet_describe_xml(f, state.tags_for(&f.id), &req.account_id, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -935,10 +1222,33 @@ pub(crate) fn modify_capacity_reservation_fleet(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "CapacityReservationFleetId")?;
+    let new_capacity =
+        match req
+            .query_params
+            .get("TotalTargetCapacity")
+            .filter(|v| !v.is_empty())
+        {
+            Some(c) => Some(c.parse::<i64>().ok().filter(|c| *c >= 1).ok_or_else(|| {
+                invalid_parameter_value("TotalTargetCapacity must be at least 1")
+            })?),
+            None => None,
+        };
+    let new_end_date = ts_param(req, "EndDate")?.map(fmt_ts);
+    let remove_end_date = req
+        .query_params
+        .get("RemoveEndDate")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    if remove_end_date && new_end_date.is_some() {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidParameterCombination",
+            "EndDate and RemoveEndDate cannot both be specified",
+        ));
+    }
     {
         let mut accounts = svc.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let cap = state
+        let fleet = state
             .capacity_reservation_fleets
             .get_mut(&id)
             .ok_or_else(|| {
@@ -948,8 +1258,13 @@ pub(crate) fn modify_capacity_reservation_fleet(
                     format!("The capacity reservation fleet ID '{id}' does not exist"),
                 )
             })?;
-        if let Some(tc) = req.query_params.get("TotalTargetCapacity") {
-            *cap = tc.clone();
+        if let Some(c) = new_capacity {
+            fleet.total_target_capacity = c;
+        }
+        if remove_end_date {
+            fleet.end_date = None;
+        } else if new_end_date.is_some() {
+            fleet.end_date = new_end_date;
         }
     }
     Ok(Ec2Service::respond(
@@ -2464,6 +2779,123 @@ mod crfleet_tests {
             ),
         ));
         assert_eq!(err.code(), "InvalidCapacityReservationFleetId.NotFound");
+    }
+
+    #[test]
+    fn cr_fleet_keeps_every_requested_member() {
+        let svc = Ec2Service::new();
+        let resp = create_capacity_reservation_fleet(
+            &svc,
+            &req(
+                "CreateCapacityReservationFleet",
+                &[
+                    ("TotalTargetCapacity", "6"),
+                    ("AllocationStrategy", "prioritized"),
+                    ("EndDate", "2030-01-01T00:00:00Z"),
+                    ("AvailabilityZoneId", "use1-az2"),
+                    ("InstanceRequirements.VCpuCount.Min", "2"),
+                    ("InstanceRequirements.VCpuCount.Max", "8"),
+                    ("InstanceRequirements.CpuManufacturer.1", "intel"),
+                    ("InstanceRequirements.CpuManufacturer.2", "amd"),
+                    ("InstanceTypeSpecification.1.InstanceType", "m5.large"),
+                    ("InstanceTypeSpecification.1.InstancePlatform", "Linux/UNIX"),
+                    ("InstanceTypeSpecification.1.Weight", "2"),
+                    ("InstanceTypeSpecification.1.Priority", "1"),
+                    ("InstanceTypeSpecification.1.AvailabilityZone", "us-east-1a"),
+                    (
+                        "TagSpecification.1.ResourceType",
+                        "capacity-reservation-fleet",
+                    ),
+                    ("TagSpecification.1.Tag.1.Key", "team"),
+                    ("TagSpecification.1.Tag.1.Value", "infra"),
+                ],
+            ),
+        )
+        .unwrap();
+        let created = body(resp);
+        assert!(
+            created.contains("<endDate>2030-01-01T00:00:00.000Z</endDate>"),
+            "{created}"
+        );
+        let desc = body(
+            describe_capacity_reservation_fleets(
+                &svc,
+                &req("DescribeCapacityReservationFleets", &[]),
+            )
+            .unwrap(),
+        );
+        for expected in [
+            "<availabilityZone>us-east-1b</availabilityZone>",
+            "<availabilityZoneId>use1-az2</availabilityZoneId>",
+            "<instanceRequirements><CpuManufacturer><item>intel</item><item>amd</item></CpuManufacturer><VCpuCount><Max>8</Max><Min>2</Min></VCpuCount></instanceRequirements>",
+            "<instanceTypeSpecificationSet><item><instanceType>m5.large</instanceType><instancePlatform>Linux/UNIX</instancePlatform><availabilityZone>us-east-1a</availabilityZone><availabilityZoneId>use1-az1</availabilityZoneId><weight>2</weight><priority>1</priority></item></instanceTypeSpecificationSet>",
+            "<capacityReservationFleetArn>arn:aws:ec2:us-east-1:000000000000:capacity-reservation-fleet/crf-",
+            "<key>team</key>",
+        ] {
+            assert!(desc.contains(expected), "missing {expected}: {desc}");
+        }
+
+        // Both zone spellings, a zone of another Region and an unknown type
+        // are refused.
+        for bad in [
+            vec![
+                ("AvailabilityZone", "us-east-1a"),
+                ("AvailabilityZoneId", "use1-az1"),
+            ],
+            vec![("AvailabilityZone", "us-west-2a")],
+            vec![
+                ("InstanceTypeSpecification.1.InstanceType", "m5.nope"),
+                ("InstanceTypeSpecification.1.InstancePlatform", "Linux/UNIX"),
+            ],
+        ] {
+            let mut q = vec![("TotalTargetCapacity", "1")];
+            q.extend(bad);
+            assert!(create_capacity_reservation_fleet(
+                &svc,
+                &req("CreateCapacityReservationFleet", &q)
+            )
+            .is_err());
+        }
+
+        // Modify replaces and removes the end date.
+        let id = desc
+            .split("<capacityReservationFleetId>")
+            .nth(1)
+            .unwrap()
+            .split('<')
+            .next()
+            .unwrap()
+            .to_string();
+        modify_capacity_reservation_fleet(
+            &svc,
+            &req(
+                "ModifyCapacityReservationFleet",
+                &[
+                    ("CapacityReservationFleetId", &id),
+                    ("RemoveEndDate", "true"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc = body(
+            describe_capacity_reservation_fleets(
+                &svc,
+                &req("DescribeCapacityReservationFleets", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(!desc.contains("<endDate>"), "{desc}");
+    }
+
+    #[test]
+    fn cr_fleets_persisted_as_a_bare_capacity_still_load() {
+        let mut stored = serde_json::to_value(crate::state::Ec2State::default()).unwrap();
+        stored["capacity_reservation_fleets"] = serde_json::json!({"crf-1": "7"});
+        let fleets: crate::state::Ec2State = serde_json::from_value(stored).unwrap();
+        let f = &fleets.capacity_reservation_fleets["crf-1"];
+        assert_eq!(f.id, "crf-1");
+        assert_eq!(f.total_target_capacity, 7);
+        assert_eq!(f.allocation_strategy, "prioritized");
     }
 }
 

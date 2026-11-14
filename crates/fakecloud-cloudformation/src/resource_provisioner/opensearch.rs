@@ -112,6 +112,7 @@ impl ResourceProvisioner {
             processing: None,
             data_plane_error: None,
             change_pending: false,
+            replication: None,
         };
         // With a container runtime the domain is backed by a real search
         // cluster, brought up in the background after provisioning (the same
@@ -258,6 +259,9 @@ impl ResourceProvisioner {
         let mut guard = self.opensearch_state.write();
         let st = guard.get_or_create(&self.account_id);
         let removed = st.domains.remove(physical_id);
+        if let Some(d) = &removed {
+            st.detach_replication_peer_of(&d.arn);
+        }
         drop(guard);
         // Reap the backing cluster off the request path. Untracked now so a
         // same-named recreate in this stack op never reuses the container.

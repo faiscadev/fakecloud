@@ -2544,3 +2544,446 @@ async fn status_operations_agree_with_processing() {
     );
     assert_eq!(deleted["DomainStatus"]["Deleted"], true);
 }
+
+// ---------------------------------------------------------------------------
+// Cross-Region replication
+// ---------------------------------------------------------------------------
+
+fn in_region(mut r: AwsRequest, region: &str) -> AwsRequest {
+    r.region = region.to_string();
+    r
+}
+
+async fn create_in(svc: &OpenSearchService, name: &str, region: &str) -> String {
+    let v = json_of(
+        &call(
+            svc,
+            in_region(
+                req(
+                    Method::POST,
+                    &format!("{OS}/opensearch/domain"),
+                    json!({"DomainName": name}),
+                ),
+                region,
+            ),
+        )
+        .await,
+    );
+    v["DomainStatus"]["ARN"].as_str().unwrap().to_string()
+}
+
+fn replication_op(domain: &str, op: &str, body: Value) -> AwsRequest {
+    req(
+        Method::POST,
+        &format!("{OS}/opensearch/domain/{domain}/replication/{op}"),
+        body,
+    )
+}
+
+async fn describe_replication(svc: &OpenSearchService, domain: &str) -> Value {
+    json_of(
+        &call(
+            svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/{domain}/replication"),
+                Value::Null,
+            ),
+        )
+        .await,
+    )
+}
+
+#[tokio::test]
+async fn replication_peers_pair_switch_over_fail_over_and_detach() {
+    let svc = service();
+    let east = create_in(&svc, "east", "us-east-1").await;
+    let west = create_in(&svc, "west", "us-west-2").await;
+    let other_east = create_in(&svc, "east-two", "us-east-1").await;
+
+    // Not replicating: no role, no peers.
+    let d = describe_replication(&svc, "east").await;
+    assert_eq!(d["DomainArn"], east.as_str());
+    assert!(d.get("Role").is_none());
+    assert_eq!(d["Peers"], json!([]));
+
+    // Same Region, unknown peer, self, other account are rejected.
+    for (body, code) in [
+        (json!({"PeerDomainArn": other_east}), "ValidationException"),
+        (json!({"PeerDomainArn": east}), "ValidationException"),
+        (
+            json!({"PeerDomainArn": "arn:aws:es:us-west-2:000000000000:domain/nope"}),
+            "ResourceNotFoundException",
+        ),
+        (
+            json!({"PeerDomainArn": "arn:aws:es:us-west-2:111111111111:domain/west"}),
+            "ValidationException",
+        ),
+    ] {
+        assert_eq!(
+            call_err(&svc, replication_op("east", "addPeer", body))
+                .await
+                .1,
+            code
+        );
+    }
+
+    // A dry run validates without pairing.
+    let dry = json_of(
+        &call(
+            &svc,
+            replication_op(
+                "east",
+                "addPeer",
+                json!({"PeerDomainArn": west, "DryRun": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(dry["DomainArn"], east.as_str());
+    assert!(dry.get("Status").is_none());
+    assert_eq!(describe_replication(&svc, "east").await["Peers"], json!([]));
+
+    let added = json_of(
+        &call(
+            &svc,
+            replication_op("east", "addPeer", json!({"PeerDomainArn": west})),
+        )
+        .await,
+    );
+    assert_eq!(added, json!({"DomainArn": east, "Status": "PENDING_SETUP"}));
+
+    // One peer per domain, on either side.
+    assert_eq!(
+        call_err(
+            &svc,
+            replication_op("east", "addPeer", json!({"PeerDomainArn": west}))
+        )
+        .await,
+        (409, "ResourceAlreadyExistsException".to_string())
+    );
+
+    let p = describe_replication(&svc, "east").await;
+    assert_eq!(p["Role"], "PRIMARY");
+    assert_eq!(
+        p["Peers"],
+        json!([{"PeerDomainArn": west, "PeerRole": "SECONDARY", "Status": "ACTIVE"}])
+    );
+    let s = describe_replication(&svc, "west").await;
+    assert_eq!(s["Role"], "SECONDARY");
+    assert_eq!(s["Peers"][0]["PeerDomainArn"], east.as_str());
+    assert_eq!(s["Peers"][0]["PeerRole"], "PRIMARY");
+
+    // Only the secondary can be promoted, and only over its own primary.
+    assert_eq!(
+        call_err(
+            &svc,
+            replication_op("east", "switchover", json!({"PeerDomainArn": west}))
+        )
+        .await
+        .1,
+        "ValidationException"
+    );
+    assert_eq!(
+        call_err(
+            &svc,
+            replication_op("west", "switchover", json!({"PeerDomainArn": other_east}))
+        )
+        .await
+        .1,
+        "ValidationException"
+    );
+
+    // Planned switchover: roles flip, the relationship stays ACTIVE.
+    let sw = json_of(
+        &call(
+            &svc,
+            replication_op("west", "switchover", json!({"PeerDomainArn": east})),
+        )
+        .await,
+    );
+    assert_eq!(sw, json!({"DomainArn": west, "Status": "SWITCHING_OVER"}));
+    let s = describe_replication(&svc, "west").await;
+    assert_eq!(s["Role"], "PRIMARY");
+    assert_eq!(s["Peers"][0]["PeerRole"], "SECONDARY");
+    assert_eq!(s["Peers"][0]["Status"], "ACTIVE");
+    assert_eq!(
+        describe_replication(&svc, "east").await["Role"],
+        "SECONDARY"
+    );
+
+    // Failover needs the data-loss acknowledgement.
+    assert_eq!(
+        call_err(
+            &svc,
+            replication_op(
+                "east",
+                "failover",
+                json!({"PeerDomainArn": west, "AllowDataLoss": false})
+            )
+        )
+        .await
+        .1,
+        "ValidationException"
+    );
+    let fo = json_of(
+        &call(
+            &svc,
+            replication_op(
+                "east",
+                "failover",
+                json!({"PeerDomainArn": west, "AllowDataLoss": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(fo, json!({"DomainArn": east, "Status": "FAILING_OVER"}));
+    let p = describe_replication(&svc, "east").await;
+    assert_eq!(p["Role"], "PRIMARY");
+    assert_eq!(p["Peers"][0]["Status"], "EJECTED");
+    assert!(p["Peers"][0]["StatusMessage"].is_string());
+    let w = describe_replication(&svc, "west").await;
+    assert_eq!(w["Role"], "SECONDARY");
+    assert_eq!(w["Peers"][0]["Status"], "EJECTED");
+    // An ejected relationship cannot be promoted again.
+    assert_eq!(
+        call_err(
+            &svc,
+            replication_op("west", "switchover", json!({"PeerDomainArn": east}))
+        )
+        .await
+        .1,
+        "ValidationException"
+    );
+
+    // Removing ends the relationship on both sides.
+    let rm = json_of(
+        &call(
+            &svc,
+            replication_op("west", "removePeer", json!({"PeerDomainArn": east})),
+        )
+        .await,
+    );
+    assert_eq!(rm, json!({"DomainArn": west, "Status": "PENDING_REMOVAL"}));
+    for name in ["east", "west"] {
+        let d = describe_replication(&svc, name).await;
+        assert!(d.get("Role").is_none(), "{name}");
+        assert_eq!(d["Peers"], json!([]), "{name}");
+    }
+    assert_eq!(
+        call_err(
+            &svc,
+            replication_op("west", "removePeer", json!({"PeerDomainArn": east}))
+        )
+        .await,
+        (409, "ResourceNotFoundException".to_string())
+    );
+
+    // Deleting a peer detaches the survivor, which can then pair again.
+    call(
+        &svc,
+        replication_op("east", "addPeer", json!({"PeerDomainArn": west})),
+    )
+    .await;
+    call(
+        &svc,
+        req(
+            Method::DELETE,
+            &format!("{OS}/opensearch/domain/west"),
+            json!({}),
+        ),
+    )
+    .await;
+    let p = describe_replication(&svc, "east").await;
+    assert_eq!(p["Peers"][0]["Status"], "DETACHED");
+    let fresh = create_in(&svc, "west-two", "us-west-2").await;
+    call(
+        &svc,
+        replication_op("east", "addPeer", json!({"PeerDomainArn": fresh})),
+    )
+    .await;
+    assert_eq!(
+        describe_replication(&svc, "east").await["Peers"][0]["PeerDomainArn"],
+        fresh.as_str()
+    );
+
+    assert_eq!(
+        call_err(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/missing/replication"),
+                Value::Null
+            )
+        )
+        .await,
+        (409, "ResourceNotFoundException".to_string())
+    );
+}
+
+/// A minimal search cluster answering each `GET`/`POST` path with a canned
+/// `(status, body)`; anything else is a 400 like an unknown route.
+async fn fake_cluster(routes: Vec<(&'static str, u16, Value)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let routes = routes.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split(' ').nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let (status, payload) = routes
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, s, b)| (*s, b.to_string()))
+                    .unwrap_or((400, r#"{"error":"no handler found for uri"}"#.to_string()));
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    format!("{}", addr.port())
+}
+
+#[tokio::test]
+async fn compare_domain_configuration_diffs_the_live_clusters() {
+    let (svc, state) = service_with_state();
+    let src = create_in(&svc, "src", "us-east-1").await;
+    let tgt = create_in(&svc, "tgt", "us-west-2").await;
+    let idle = create_in(&svc, "idle", "us-west-2").await;
+
+    let src_port = fake_cluster(vec![
+        (
+            "/_ingest/pipeline",
+            200,
+            json!({"shared": {"processors": []}, "renamer": {"description": "v1"}, "src-only": {}}),
+        ),
+        ("/_index_template", 404, json!({})),
+        (
+            "/_cluster/settings?flat_settings=true",
+            200,
+            json!({"persistent": {"cluster.max_shards_per_node": "2000"}, "transient": {}}),
+        ),
+    ])
+    .await;
+    let tgt_port = fake_cluster(vec![
+        (
+            "/_ingest/pipeline",
+            200,
+            json!({"shared": {"processors": []}, "renamer": {"description": "v2"}, "tgt-only": {}}),
+        ),
+        (
+            "/_index_template",
+            200,
+            json!({"index_templates": [{"name": "logs", "index_template": {"index_patterns": ["logs-*"]}}]}),
+        ),
+        (
+            "/_cluster/settings?flat_settings=true",
+            200,
+            json!({"persistent": {"cluster.max_shards_per_node": "2000"}, "transient": {}}),
+        ),
+    ])
+    .await;
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("000000000000");
+        for (name, port) in [("src", &src_port), ("tgt", &tgt_port)] {
+            st.domains.get_mut(name).unwrap().data_plane =
+                Some(fakecloud_opensearch::state::DomainDataPlane {
+                    container_id: "c".into(),
+                    host: "127.0.0.1".into(),
+                    port: port.parse().unwrap(),
+                });
+        }
+    }
+
+    let compare = |source: &str, target: &str, categories: Value| {
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/compareDomainConfiguration"),
+            json!({"SourceDomainArn": source, "TargetDomainArn": target, "Categories": categories}),
+        )
+    };
+    let v = json_of(
+        &call(
+            &svc,
+            compare(
+                &src,
+                &tgt,
+                json!([
+                    "ingest_pipelines",
+                    "templates",
+                    "cluster_settings",
+                    "security_roles"
+                ]),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(v["SourceDomainArn"], src.as_str());
+    assert_eq!(v["TargetDomainArn"], tgt.as_str());
+    let pipes = &v["Categories"]["ingest_pipelines"];
+    assert_eq!(pipes["Status"], "compared");
+    assert_eq!(
+        (
+            &pipes["InSync"],
+            &pipes["SourceOnly"],
+            &pipes["TargetOnly"],
+            &pipes["Diverged"]
+        ),
+        (&json!(1), &json!(1), &json!(1), &json!(1))
+    );
+    assert_eq!(pipes["Items"]["SourceOnly"], json!(["src-only"]));
+    assert_eq!(pipes["Items"]["TargetOnly"], json!(["tgt-only"]));
+    assert_eq!(
+        pipes["Items"]["Diverged"],
+        json!([{"Name": "renamer", "Fields": [
+            {"Path": "description", "SourceValue": "v1", "TargetValue": "v2"}
+        ]}])
+    );
+    // No template ever stored on the source: an empty category, not an error.
+    let templates = &v["Categories"]["templates"];
+    assert_eq!(templates["Status"], "compared");
+    assert_eq!(templates["Items"]["TargetOnly"], json!(["logs"]));
+    assert_eq!(v["Categories"]["cluster_settings"]["InSync"], 1);
+    // The security plugin is not running: the category cannot be read.
+    assert_eq!(v["Categories"]["security_roles"]["Status"], "error");
+    assert!(v["Categories"]["security_roles"].get("Items").is_none());
+
+    // A domain without a running cluster cannot be read.
+    let v = json_of(&call(&svc, compare(&src, &idle, json!(["aliases"]))).await);
+    assert_eq!(v["Categories"]["aliases"]["Status"], "error");
+
+    assert_eq!(
+        call_err(&svc, compare(&src, &tgt, json!(["bogus"])))
+            .await
+            .1,
+        "ValidationException"
+    );
+    assert_eq!(
+        call_err(
+            &svc,
+            compare(
+                &src,
+                "arn:aws:es:us-east-1:000000000000:domain/gone",
+                json!(["aliases"])
+            )
+        )
+        .await,
+        (409, "ResourceNotFoundException".to_string())
+    );
+}
