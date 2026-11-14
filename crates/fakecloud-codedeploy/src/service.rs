@@ -455,6 +455,40 @@ fn instance_arn(region: &str, account: &str, name: &str) -> String {
     Arn::regional("codedeploy", region, account, &format!("instance/{name}")).to_string()
 }
 
+/// Validate `ec2DeploymentOptions.autoScalingGroupProcessesToSuspend`: at most
+/// four of the model's `AutoScalingGroupProcess` values.
+fn check_ec2_deployment_options(b: &Value) -> Result<(), AwsServiceError> {
+    let Some(list) = b
+        .get("ec2DeploymentOptions")
+        .and_then(|o| o.get("autoScalingGroupProcessesToSuspend"))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(());
+    };
+    const PROCESSES: &[&str] = &[
+        "Terminate",
+        "AZRebalance",
+        "InstanceRefresh",
+        "ScheduledActions",
+    ];
+    let invalid = || {
+        e(
+            "InvalidAutoScalingGroupProcessToSuspendException",
+            "The Auto Scaling group processes to suspend must be up to four of \
+             Terminate, AZRebalance, InstanceRefresh and ScheduledActions.",
+        )
+    };
+    let items = list.as_array().ok_or_else(invalid)?;
+    if items.len() > 4
+        || items
+            .iter()
+            .any(|p| !p.as_str().is_some_and(|p| PROCESSES.contains(&p)))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn opt_enum(
     b: &Value,
     key: &str,
@@ -1164,6 +1198,7 @@ impl CodeDeployService {
             "ec2TagSet",
             "onPremisesTagSet",
             "ecsServices",
+            "ec2DeploymentOptions",
             "terminationHookEnabled",
         ] {
             if let Some(v) = b.get(k).filter(|v| !v.is_null()) {
@@ -1188,6 +1223,7 @@ impl CodeDeployService {
             "The outdated instances strategy is invalid.",
         )?;
         validate_deployment_group_config(&b)?;
+        check_ec2_deployment_options(&b)?;
         let Some(service_role) = str_field(&b, "serviceRoleArn") else {
             return Err(e("RoleRequiredException", "The role ID was not specified."));
         };
@@ -1285,6 +1321,7 @@ impl CodeDeployService {
             "The outdated instances strategy is invalid.",
         )?;
         validate_deployment_group_config(&b)?;
+        check_ec2_deployment_options(&b)?;
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -1338,6 +1375,7 @@ impl CodeDeployService {
                 "ec2TagSet",
                 "onPremisesTagSet",
                 "ecsServices",
+                "ec2DeploymentOptions",
                 "terminationHookEnabled",
             ] {
                 if let Some(v) = b.get(k).filter(|v| !v.is_null()) {
@@ -1579,6 +1617,7 @@ impl CodeDeployService {
             "InvalidInputException",
             "The specified deploymentMode value is invalid.",
         )?;
+        check_ec2_deployment_options(&b)?;
         if let Some(rev) = b.get("revision").filter(|v| !v.is_null()) {
             validate_revision(rev)?;
         }
@@ -1630,6 +1669,11 @@ impl CodeDeployService {
             .unwrap_or_else(|| {
                 json!({ "deploymentType": "IN_PLACE", "deploymentOption": "WITHOUT_TRAFFIC_CONTROL" })
             });
+        let group_ec2_options = st
+            .deployment_groups
+            .get(&app)
+            .and_then(|g| g.get(&dg_name))
+            .and_then(|g| g.get("ec2DeploymentOptions").cloned());
         let deployment_id = gen_deployment_id();
         let mut info = Map::new();
         info.insert("deploymentId".into(), json!(deployment_id));
@@ -1667,6 +1711,16 @@ impl CodeDeployService {
             if let Some(v) = b.get(in_key).filter(|v| !v.is_null()) {
                 info.insert(out_key.into(), v.clone());
             }
+        }
+        // The deployment's own ec2DeploymentOptions win; otherwise it runs
+        // with the deployment group's.
+        let ec2_options = b
+            .get("ec2DeploymentOptions")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .or_else(|| group_ec2_options.clone());
+        if let Some(v) = ec2_options {
+            info.insert("ec2DeploymentOptions".into(), v);
         }
         let info = Value::Object(info);
         st.deployments.insert(deployment_id.clone(), info);
@@ -3136,6 +3190,87 @@ mod tests {
             .as_array()
             .cloned()
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn ec2_deployment_options_round_trip_and_validate() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "ec2app" }),
+        ))
+        .unwrap();
+        let opts = json!({ "autoScalingGroupProcessesToSuspend": ["Terminate", "AZRebalance"] });
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({
+                "applicationName": "ec2app",
+                "deploymentGroupName": "g",
+                "serviceRoleArn": "arn:aws:iam::000000000000:role/cd",
+                "ec2DeploymentOptions": opts,
+            }),
+        ))
+        .unwrap();
+        let get_group = |s: &CodeDeployService| {
+            body_of(
+                s.get_deployment_group(&req(
+                    "GetDeploymentGroup",
+                    json!({ "applicationName": "ec2app", "deploymentGroupName": "g" }),
+                ))
+                .unwrap(),
+            )["deploymentGroupInfo"]["ec2DeploymentOptions"]
+                .clone()
+        };
+        assert_eq!(get_group(&s), opts);
+
+        // A deployment without its own options runs with the group's; its own
+        // options win.
+        let dep = |s: &CodeDeployService, extra: Value| {
+            let mut b = json!({ "applicationName": "ec2app", "deploymentGroupName": "g" });
+            if let Some(o) = extra.as_object() {
+                for (k, v) in o {
+                    b[k] = v.clone();
+                }
+            }
+            let id = body_of(s.create_deployment(&req("CreateDeployment", b)).unwrap())
+                ["deploymentId"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            body_of(
+                s.get_deployment(&req("GetDeployment", json!({ "deploymentId": id })))
+                    .unwrap(),
+            )["deploymentInfo"]["ec2DeploymentOptions"]
+                .clone()
+        };
+        assert_eq!(dep(&s, json!({})), opts);
+        let own = json!({ "autoScalingGroupProcessesToSuspend": ["ScheduledActions"] });
+        assert_eq!(dep(&s, json!({ "ec2DeploymentOptions": own })), own);
+
+        let upd = json!({ "autoScalingGroupProcessesToSuspend": ["InstanceRefresh"] });
+        s.update_deployment_group(&req(
+            "UpdateDeploymentGroup",
+            json!({
+                "applicationName": "ec2app",
+                "currentDeploymentGroupName": "g",
+                "ec2DeploymentOptions": upd,
+            }),
+        ))
+        .unwrap();
+        assert_eq!(get_group(&s), upd);
+
+        let bad = json!({ "autoScalingGroupProcessesToSuspend": ["Launch"] });
+        assert_eq!(
+            err_code(s.update_deployment_group(&req(
+                "UpdateDeploymentGroup",
+                json!({
+                    "applicationName": "ec2app",
+                    "currentDeploymentGroupName": "g",
+                    "ec2DeploymentOptions": bad,
+                }),
+            ))),
+            "InvalidAutoScalingGroupProcessToSuspendException"
+        );
     }
 
     #[test]

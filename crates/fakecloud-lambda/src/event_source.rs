@@ -155,6 +155,7 @@ pub fn validate_create(
     lookup: Option<&dyn EventSourceLookup>,
 ) -> Result<Vec<String>, AwsServiceError> {
     validate_settings(body)?;
+    validate_kafka_consumption_mode(body)?;
     match body["EventSourceArn"].as_str() {
         Some(event_source_arn) => {
             crate::extras::check_len("EventSourceArn", event_source_arn, 0, 10000)?;
@@ -170,6 +171,24 @@ pub fn validate_create(
         .ok_or_else(|| invalid_parameter("FunctionName is required".to_string()))?;
     check_function_region(function_name, region)?;
     filter_patterns(body)
+}
+
+/// `SelfManagedKafkaEventSourceConfig.ConsumptionMode` is `Stream` (the
+/// default) or `Queue`. It is fixed at creation: `UpdateEventSourceMapping`
+/// never rewrites the stored Kafka config.
+fn validate_kafka_consumption_mode(body: &Value) -> Result<(), AwsServiceError> {
+    match body
+        .get("SelfManagedKafkaEventSourceConfig")
+        .and_then(|c| c.get("ConsumptionMode"))
+    {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(m)) if m == "Stream" || m == "Queue" => Ok(()),
+        Some(other) => Err(invalid_parameter(format!(
+            "1 validation error detected: Value {other} at \
+             'selfManagedKafkaEventSourceConfig.consumptionMode' failed to satisfy \
+             constraint: Member must satisfy enum value set: [Stream, Queue]"
+        ))),
+    }
 }
 
 /// An event source mapping invokes a function of its own region; a function

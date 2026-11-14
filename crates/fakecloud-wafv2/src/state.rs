@@ -340,6 +340,9 @@ pub struct WebAcl {
     pub data_protection_config: Option<Value>,
     pub on_source_d_do_s_protection_config: Option<Value>,
     pub application_config: Option<Value>,
+    /// `MonetizationConfig` (AI bot pay-per-crawl settlement settings).
+    #[serde(default)]
+    pub monetization_config: Option<Value>,
     pub retrofitted_by_firewall_manager: bool,
     pub pre_process_firewall_manager_rule_groups: Vec<Value>,
     pub post_process_firewall_manager_rule_groups: Vec<Value>,
@@ -363,6 +366,9 @@ pub struct RuleGroup {
     pub available_labels: Vec<Value>,
     pub consumed_labels: Vec<Value>,
     pub created_time: DateTime<Utc>,
+    /// `MonetizationConfig` (AI bot pay-per-crawl settlement settings).
+    #[serde(default)]
+    pub monetization_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

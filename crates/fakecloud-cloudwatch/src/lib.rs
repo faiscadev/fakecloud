@@ -3,6 +3,7 @@ pub(crate) mod anomaly_detectors;
 pub(crate) mod composite_alarms;
 pub(crate) mod datasets;
 pub mod delivery;
+pub mod flat_members;
 pub(crate) mod insight_rules;
 pub mod introspection;
 pub(crate) mod json_protocol;

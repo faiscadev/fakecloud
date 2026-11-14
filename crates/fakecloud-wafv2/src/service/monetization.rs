@@ -19,6 +19,105 @@ const MAX_TIME_WINDOW_DAYS: i64 = 90;
 /// A recorded settlement. Nothing populates this yet — see the module note.
 type Settlement = serde_json::Map<String, Value>;
 
+/// Validate and return a web ACL's / rule group's `MonetizationConfig` (stored
+/// as supplied). Checks the model's constraints plus the documented rules:
+/// exactly one connected account, which settles in production only (no
+/// `TEST` currency mode), and a chain used by at most one of `CryptoConfig`
+/// and `ConnectedAccountConfigs`.
+pub(super) fn parse_monetization_config(body: &Value) -> Result<Option<Value>, AwsServiceError> {
+    let Some(cfg) = body.get("MonetizationConfig").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let field = |f: &str| format!("MonetizationConfig.{f}");
+    if let Some(mode) = cfg.get("CurrencyMode").and_then(Value::as_str) {
+        validate_enum(mode, &["REAL", "TEST"], &field("CurrencyMode"))?;
+    }
+    let networks = |v: &Value| -> Vec<Value> {
+        v.get("PaymentNetworks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let check_networks = |nets: &[Value], chains: &[&str], amount_max: usize, at: &str| {
+        if nets.is_empty() || nets.len() > 2 {
+            return Err(invalid_param(format!(
+                "{at}.PaymentNetworks must contain 1 or 2 networks"
+            )));
+        }
+        for n in nets {
+            let chain = n.get("Chain").and_then(Value::as_str).unwrap_or_default();
+            validate_enum(chain, chains, &format!("{at}.PaymentNetworks.Chain"))?;
+            let prices = n.get("Prices").and_then(Value::as_array);
+            let [price] = prices.map(Vec::as_slice).unwrap_or_default() else {
+                return Err(invalid_param(format!(
+                    "{at}.PaymentNetworks.Prices must contain exactly one price"
+                )));
+            };
+            let amount = price
+                .get("Amount")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            validate_str_len(amount, 1, amount_max, &format!("{at}.Prices.Amount"))?;
+            let currency = price
+                .get("Currency")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            validate_enum(currency, &["USDC"], &format!("{at}.Prices.Currency"))?;
+        }
+        Ok::<(), AwsServiceError>(())
+    };
+    let mut crypto_chains = Vec::new();
+    if let Some(crypto) = cfg.get("CryptoConfig").filter(|v| !v.is_null()) {
+        let nets = networks(crypto);
+        check_networks(
+            &nets,
+            &["BASE", "SOLANA", "BASE_SEPOLIA", "SOLANA_DEVNET"],
+            13,
+            &field("CryptoConfig"),
+        )?;
+        for n in &nets {
+            let wallet = n
+                .get("WalletAddress")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            validate_str_len(wallet, 26, 44, &field("CryptoConfig.WalletAddress"))?;
+            crypto_chains.push(n["Chain"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    if let Some(accounts) = cfg.get("ConnectedAccountConfigs").filter(|v| !v.is_null()) {
+        let accounts = accounts.as_array().map(Vec::as_slice).unwrap_or_default();
+        if accounts.len() != 1 {
+            return Err(invalid_param(
+                "MonetizationConfig.ConnectedAccountConfigs must contain exactly one connected account",
+            ));
+        }
+        if cfg.get("CurrencyMode").and_then(Value::as_str) == Some("TEST") {
+            return Err(invalid_param(
+                "TEST currency mode is not supported with ConnectedAccountConfigs",
+            ));
+        }
+        let at = field("ConnectedAccountConfigs");
+        let acct = &accounts[0];
+        let arn = acct
+            .get("ConnectedAccountArn")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        validate_str_len(arn, 56, 140, &format!("{at}.ConnectedAccountArn"))?;
+        let nets = networks(acct);
+        check_networks(&nets, &["BASE", "SOLANA"], 9, &at)?;
+        if let Some(shared) = nets
+            .iter()
+            .filter_map(|n| n["Chain"].as_str())
+            .find(|c| crypto_chains.iter().any(|x| x == c))
+        {
+            return Err(invalid_param(format!(
+                "Chain {shared} is used by both CryptoConfig and ConnectedAccountConfigs"
+            )));
+        }
+    }
+    Ok(Some(cfg.clone()))
+}
+
 fn invalid_operation(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "WAFInvalidOperationException", msg)
 }
@@ -253,6 +352,81 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    fn monetization(mode: &str, accounts: usize) -> Value {
+        let account = json!({
+            "ConnectedAccountArn": format!("arn:aws:payments:us-east-1:123456789012:connected-account/{}", "a".repeat(20)),
+            "PaymentNetworks": [{"Chain": "SOLANA", "Prices": [{"Amount": "0.01", "Currency": "USDC"}]}],
+        });
+        json!({
+            "CurrencyMode": mode,
+            "CryptoConfig": {"PaymentNetworks": [{
+                "Chain": "BASE",
+                "WalletAddress": "0x1111111111111111111111111111111111111111",
+                "Prices": [{"Amount": "0.002", "Currency": "USDC"}],
+            }]},
+            "ConnectedAccountConfigs": vec![account; accounts],
+        })
+    }
+
+    #[test]
+    fn monetization_config_round_trips_on_web_acls_and_rule_groups() {
+        let svc = Wafv2Service::default();
+        let cfg = monetization("REAL", 1);
+        svc.create_web_acl(&req(
+            "CreateWebACL",
+            json!({
+                "Name": "acl", "Scope": "CLOUDFRONT",
+                "DefaultAction": {"Allow": {}},
+                "VisibilityConfig": {"SampledRequestsEnabled": false, "CloudWatchMetricsEnabled": false, "MetricName": "m"},
+                "MonetizationConfig": cfg,
+            }),
+        ))
+        .unwrap();
+        let acl = body_of(
+            svc.get_web_acl(&req(
+                "GetWebACL",
+                json!({"Name": "acl", "Scope": "CLOUDFRONT"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(acl["WebACL"]["MonetizationConfig"], cfg);
+
+        svc.create_rule_group(&req(
+            "CreateRuleGroup",
+            json!({
+                "Name": "rg", "Scope": "CLOUDFRONT", "Capacity": 10,
+                "VisibilityConfig": {"SampledRequestsEnabled": false, "CloudWatchMetricsEnabled": false, "MetricName": "m"},
+                "MonetizationConfig": cfg,
+            }),
+        ))
+        .unwrap();
+        let rg = body_of(
+            svc.get_rule_group(&req(
+                "GetRuleGroup",
+                json!({"Name": "rg", "Scope": "CLOUDFRONT"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(rg["RuleGroup"]["MonetizationConfig"], cfg);
+    }
+
+    #[test]
+    fn monetization_config_is_validated() {
+        for bad in [
+            monetization("REAL", 2),
+            monetization("TEST", 1),
+            monetization("FAKE", 1),
+        ] {
+            let err = parse_monetization_config(&json!({"MonetizationConfig": bad}))
+                .expect_err("rejected");
+            assert_eq!(err.code(), "WAFInvalidParameterException");
+        }
+        // The same chain on both settlement paths is refused.
+        let mut shared = monetization("REAL", 1);
+        shared["ConnectedAccountConfigs"][0]["PaymentNetworks"][0]["Chain"] = json!("BASE");
+        assert!(parse_monetization_config(&json!({"MonetizationConfig": shared})).is_err());
     }
 
     /// A valid window: one day, well inside the 90-day ceiling.

@@ -122,11 +122,13 @@ pub fn validate_input(action: &str, body: &Value) -> Result<(), AwsServiceError>
             int_range(body, "priority", -50, 50)?;
             enum_opt(body, "statusUpdateInterval", STATUS_UPDATE_INTERVAL)?;
             validate_acceleration(body)?;
+            validate_elemental_inference(body)?;
         }
         "UpdateJobTemplate" => {
             int_range(body, "priority", -50, 50)?;
             enum_opt(body, "statusUpdateInterval", STATUS_UPDATE_INTERVAL)?;
             validate_acceleration(body)?;
+            validate_elemental_inference(body)?;
         }
         "CreateJob" => {
             require(body, "role")?;
@@ -135,6 +137,7 @@ pub fn validate_input(action: &str, body: &Value) -> Result<(), AwsServiceError>
             enum_opt(body, "billingTagsSource", BILLING_TAGS_SOURCE)?;
             enum_opt(body, "statusUpdateInterval", STATUS_UPDATE_INTERVAL)?;
             validate_acceleration(body)?;
+            validate_elemental_inference(body)?;
         }
         "PutPolicy" => {
             require(body, "policy")?;
@@ -157,6 +160,33 @@ pub fn validate_input(action: &str, body: &Value) -> Result<(), AwsServiceError>
         _ => {}
     }
     Ok(())
+}
+
+/// `elementalInferenceSettings.feedConfigurationSource.feedArn` must match the
+/// model's `^arn:aws:elemental-inference:.*:feed/[a-z0-9]{19}$`.
+fn validate_elemental_inference(b: &Value) -> Result<(), AwsServiceError> {
+    let Some(arn) = b
+        .pointer("/elementalInferenceSettings/feedConfigurationSource/feedArn")
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let valid = arn
+        .strip_prefix("arn:aws:elemental-inference:")
+        .and_then(|rest| rest.rsplit_once(":feed/"))
+        .is_some_and(|(_, id)| {
+            id.len() == 19
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(bad_request(&format!(
+            "elementalInferenceSettings.feedConfigurationSource.feedArn '{arn}' is not a valid Elemental Inference feed ARN"
+        )))
+    }
 }
 
 fn validate_acceleration(b: &Value) -> Result<(), AwsServiceError> {

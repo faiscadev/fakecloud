@@ -455,6 +455,10 @@ fn open_operation(exec: &mut DurableExecution, u: &Value, op_type: OpType, now: 
                     .unwrap_or_default()
                     .to_string(),
                 tenant_id: options.and_then(|o| s(o, "TenantId")).map(str::to_string),
+                trace_header: options
+                    .and_then(|o| s(o, "XAmznTraceId"))
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string),
                 payload: s(u, "Payload").map(str::to_string),
                 dispatched: false,
                 child_execution_arn: None,

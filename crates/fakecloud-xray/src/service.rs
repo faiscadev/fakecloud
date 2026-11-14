@@ -946,10 +946,22 @@ impl XrayService {
             .and_then(Value::as_str)
             .unwrap_or("XRay")
             .to_string();
+        let logs_config = body
+            .get("CloudWatchLogsConfiguration")
+            .filter(|v| !v.is_null())
+            .cloned();
         let mut guard = self.state.write();
-        guard
-            .regional_mut(&ctx.account, &ctx.region)
-            .trace_segment_destination = dest.clone();
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
+        data.trace_segment_destination = dest.clone();
+        // The logs configuration only applies to the CloudWatchLogs
+        // destination (validated up front); moving back to XRay drops it.
+        if dest == "CloudWatchLogs" {
+            if logs_config.is_some() {
+                data.trace_segment_logs_config = logs_config;
+            }
+        } else {
+            data.trace_segment_logs_config = None;
+        }
         Ok(ok(json!({ "Destination": dest, "Status": "ACTIVE" })))
     }
 
@@ -1434,6 +1446,48 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn trace_segment_destination_keeps_cloudwatch_logs_configuration() {
+        let s = svc();
+        let key = "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+        let body = json!({
+            "Destination": "CloudWatchLogs",
+            "CloudWatchLogsConfiguration": { "SpansLogGroupKmsKeyId": key },
+        });
+        crate::validate::validate_input("UpdateTraceSegmentDestination", &body).unwrap();
+        s.update_trace_segment_destination(&ctx(), &body).unwrap();
+        let stored = s
+            .state
+            .read()
+            .regional(&ctx().account, &ctx().region)
+            .unwrap()
+            .trace_segment_logs_config
+            .clone();
+        assert_eq!(stored, Some(json!({ "SpansLogGroupKmsKeyId": key })));
+        let got = body_json(&s.get_trace_segment_destination(&ctx()).unwrap());
+        assert_eq!(got["Destination"], "CloudWatchLogs");
+
+        // Back to XRay drops the logs configuration.
+        s.update_trace_segment_destination(&ctx(), &json!({ "Destination": "XRay" }))
+            .unwrap();
+        assert!(s
+            .state
+            .read()
+            .regional(&ctx().account, &ctx().region)
+            .unwrap()
+            .trace_segment_logs_config
+            .is_none());
+
+        for bad in [
+            json!({ "Destination": "XRay", "CloudWatchLogsConfiguration": { "SpansLogGroupKmsKeyId": key } }),
+            json!({ "Destination": "CloudWatchLogs", "CloudWatchLogsConfiguration": { "SpansLogGroupKmsKeyId": "alias/mine" } }),
+        ] {
+            let err = crate::validate::validate_input("UpdateTraceSegmentDestination", &bad)
+                .expect_err("rejected");
+            assert_eq!(err.code(), "InvalidRequestException");
+        }
     }
 
     #[test]

@@ -28,6 +28,7 @@ impl Wafv2Service {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let custom_response_bodies = parse_custom_response_bodies(body.get("CustomResponseBodies"));
+        let monetization_config = super::monetization::parse_monetization_config(&body)?;
         let available_labels = body
             .get("AvailableLabels")
             .and_then(Value::as_array)
@@ -83,6 +84,7 @@ impl Wafv2Service {
             available_labels,
             consumed_labels,
             created_time: Utc::now(),
+            monetization_config,
         };
         account.rule_groups.insert(key, rg);
         if !tags.is_empty() {
@@ -189,6 +191,7 @@ impl Wafv2Service {
             .get("Description")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let monetization_config = super::monetization::parse_monetization_config(&body)?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id, &req.region);
         let rg = account
@@ -214,6 +217,7 @@ impl Wafv2Service {
         rg.description = description;
         // Update is full-replace: an omitted CustomResponseBodies clears it.
         rg.custom_response_bodies = parse_custom_response_bodies(body.get("CustomResponseBodies"));
+        rg.monetization_config = monetization_config;
         rg.lock_token = synth_uuid();
         Ok(AwsResponse::ok_json(
             json!({ "NextLockToken": rg.lock_token }),

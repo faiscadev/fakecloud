@@ -6073,6 +6073,54 @@ async fn layer_listings_apply_their_compatibility_filters() {
 }
 
 #[tokio::test]
+async fn self_managed_kafka_consumption_mode_round_trips_and_is_validated() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "kafkafn").await;
+    let body = |mode: &str| {
+        json!({
+            "FunctionName": "kafkafn",
+            "Topics": ["orders"],
+            "SelfManagedEventSource": {"Endpoints": {"KAFKA_BOOTSTRAP_SERVERS": ["broker:9092"]}},
+            "SelfManagedKafkaEventSourceConfig": {"ConsumerGroupId": "g1", "ConsumptionMode": mode},
+        })
+    };
+    let created = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &[],
+        body("Queue"),
+    )
+    .await
+    .unwrap();
+    let uuid = json_of(&created)["UUID"].as_str().unwrap().to_string();
+    let got = call_with(
+        &svc,
+        Method::GET,
+        &format!("/2015-03-31/event-source-mappings/{uuid}"),
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        json_of(&got)["SelfManagedKafkaEventSourceConfig"],
+        json!({"ConsumerGroupId": "g1", "ConsumptionMode": "Queue"})
+    );
+    let err = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &[],
+        body("Batch"),
+    )
+    .await
+    .err()
+    .expect("unknown ConsumptionMode refused");
+    assert_eq!(err.code(), "InvalidParameterValueException");
+}
+
+#[tokio::test]
 async fn update_event_source_mapping_validates_like_create() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "esmfn").await;
