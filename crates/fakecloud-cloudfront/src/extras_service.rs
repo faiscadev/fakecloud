@@ -52,12 +52,7 @@ impl CloudFrontService {
             .map_err(|e| invalid_argument(format!("invalid CreateVpcOriginRequest XML: {e}")))?;
         let cfg = parsed.vpc_origin_endpoint_config;
         let tags = tags_to_state(&parsed.tags);
-        if cfg.name.is_empty() {
-            return Err(invalid_argument("Name is required"));
-        }
-        if cfg.arn.is_empty() {
-            return Err(invalid_argument("Arn is required"));
-        }
+        validate_vpc_origin_endpoint_config(&cfg)?;
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
         if account
@@ -119,6 +114,7 @@ impl CloudFrontService {
         let if_match = require_if_match(req)?;
         let cfg: VpcOriginEndpointConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid VpcOriginEndpointConfig XML: {e}")))?;
+        validate_vpc_origin_endpoint_config(&cfg)?;
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -130,12 +126,6 @@ impl CloudFrontService {
             .ok_or_else(|| not_found("VpcOrigin", &id))?;
         if v.etag != if_match {
             return Err(precondition_failed());
-        }
-        if cfg.name.is_empty() {
-            return Err(invalid_argument("Name is required"));
-        }
-        if cfg.arn.is_empty() {
-            return Err(invalid_argument("Arn is required"));
         }
         v.config = cfg;
         v.etag = generate_id_with_prefix("E");
@@ -211,10 +201,16 @@ impl CloudFrontService {
                 rfc3339(&v.last_modified_time)
             ));
             body.push_str(&format!("<Arn>{}</Arn>", esc(&v.arn)));
+            if let Some(account) = vpc_origin_account(v) {
+                body.push_str(&format!("<AccountId>{}</AccountId>", esc(account)));
+            }
             body.push_str(&format!(
                 "<OriginEndpointArn>{}</OriginEndpointArn>",
                 esc(&v.config.arn)
             ));
+            if let Some(t) = &v.config.ip_address_type {
+                body.push_str(&format!("<IpAddressType>{}</IpAddressType>", esc(t)));
+            }
             body.push_str("</VpcOriginSummary>");
         }
         body.push_str("</Items>");
@@ -669,6 +665,9 @@ fn render_vpc_origin(v: &StoredVpcOrigin) -> String {
     out.push_str(&format!("<VpcOrigin xmlns=\"{NS}\">"));
     out.push_str(&format!("<Id>{}</Id>", esc(&v.id)));
     out.push_str(&format!("<Arn>{}</Arn>", esc(&v.arn)));
+    if let Some(account) = vpc_origin_account(v) {
+        out.push_str(&format!("<AccountId>{}</AccountId>", esc(account)));
+    }
     out.push_str(&format!("<Status>{}</Status>", esc(&v.status)));
     out.push_str(&format!(
         "<CreatedTime>{}</CreatedTime>",
@@ -704,8 +703,45 @@ fn render_vpc_origin_endpoint_config(c: &VpcOriginEndpointConfig) -> String {
         out.push_str("</Items>");
         out.push_str("</OriginSslProtocols>");
     }
+    if let Some(t) = &c.ip_address_type {
+        out.push_str(&format!("<IpAddressType>{}</IpAddressType>", esc(t)));
+    }
     out.push_str("</VpcOriginEndpointConfig>");
     out
+}
+
+/// Owning account of a VPC origin, read from its ARN
+/// (`arn:<partition>:cloudfront::<account>:vpc-origin/<id>`).
+fn vpc_origin_account(v: &StoredVpcOrigin) -> Option<&str> {
+    v.arn.split(':').nth(4).filter(|a| !a.is_empty())
+}
+
+/// Shared Create/UpdateVpcOrigin input checks: the model's required
+/// members plus its `OriginProtocolPolicy` and `VpcIpAddressType` enums.
+fn validate_vpc_origin_endpoint_config(c: &VpcOriginEndpointConfig) -> Result<(), AwsServiceError> {
+    if c.name.is_empty() {
+        return Err(invalid_argument("Name is required"));
+    }
+    if c.arn.is_empty() {
+        return Err(invalid_argument("Arn is required"));
+    }
+    if !matches!(
+        c.origin_protocol_policy.as_str(),
+        "http-only" | "match-viewer" | "https-only"
+    ) {
+        return Err(invalid_argument(format!(
+            "OriginProtocolPolicy must be one of http-only, match-viewer, https-only; got {}",
+            c.origin_protocol_policy
+        )));
+    }
+    if let Some(t) = &c.ip_address_type {
+        if !matches!(t.as_str(), "ipv4" | "dualstack") {
+            return Err(invalid_argument(format!(
+                "IpAddressType must be one of ipv4, dualstack; got {t}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn render_anycast_ip_list(a: &StoredAnycastIpList) -> String {
@@ -915,6 +951,96 @@ mod extras_create_tests {
         let txml = body_str(&tags);
         assert!(txml.contains("<Key>team</Key>"), "tag listed: {txml}");
         assert!(txml.contains("<Value>edge</Value>"));
+    }
+
+    fn vpc_origin_body(root: &str, ip_type: &str) -> String {
+        let cfg = format!(
+            "<Name>vo1</Name>\
+             <Arn>arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/x/y</Arn>\
+             <HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>\
+             <OriginProtocolPolicy>https-only</OriginProtocolPolicy>\
+             <IpAddressType>{ip_type}</IpAddressType>"
+        );
+        if root == "CreateVpcOriginRequest" {
+            format!(
+                r#"<CreateVpcOriginRequest xmlns="{NS}"><VpcOriginEndpointConfig>{cfg}</VpcOriginEndpointConfig></CreateVpcOriginRequest>"#
+            )
+        } else {
+            format!(r#"<VpcOriginEndpointConfig xmlns="{NS}">{cfg}</VpcOriginEndpointConfig>"#)
+        }
+    }
+
+    #[tokio::test]
+    async fn vpc_origin_ip_address_type_round_trips() {
+        let s = svc();
+        let created = s
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/vpc-origin",
+                "",
+                &vpc_origin_body("CreateVpcOriginRequest", "dualstack"),
+            ))
+            .await
+            .unwrap();
+        let xml = body_str(&created);
+        assert_eq!(between(&xml, "IpAddressType"), Some("dualstack"), "{xml}");
+        assert_eq!(between(&xml, "AccountId"), Some(DEFAULT_ACCOUNT), "{xml}");
+        let id = between(&xml, "Id").unwrap().to_string();
+        let etag = created
+            .headers
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let listed = s
+            .handle(req(http::Method::GET, "/2020-05-31/vpc-origin", "", ""))
+            .await
+            .unwrap();
+        let lxml = body_str(&listed);
+        let summary = between(&lxml, "VpcOriginSummary").unwrap();
+        assert_eq!(between(summary, "IpAddressType"), Some("dualstack"));
+        assert_eq!(between(summary, "AccountId"), Some(DEFAULT_ACCOUNT));
+
+        let mut update = req(
+            http::Method::PUT,
+            &format!("/2020-05-31/vpc-origin/{id}"),
+            "",
+            &vpc_origin_body("VpcOriginEndpointConfig", "ipv4"),
+        );
+        update
+            .headers
+            .insert("if-match", http::HeaderValue::from_str(&etag).unwrap());
+        let updated = s.handle(update).await.unwrap();
+        assert_eq!(between(&body_str(&updated), "IpAddressType"), Some("ipv4"));
+
+        let got = s
+            .handle(req(
+                http::Method::GET,
+                &format!("/2020-05-31/vpc-origin/{id}"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(between(&body_str(&got), "IpAddressType"), Some("ipv4"));
+    }
+
+    #[tokio::test]
+    async fn vpc_origin_rejects_unknown_ip_address_type() {
+        let s = svc();
+        let err = s
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/vpc-origin",
+                "",
+                &vpc_origin_body("CreateVpcOriginRequest", "ipv6"),
+            ))
+            .await
+            .err()
+            .expect("ipv6 is not a VpcIpAddressType");
+        assert_eq!(err.code(), "InvalidArgument");
     }
 
     #[tokio::test]
