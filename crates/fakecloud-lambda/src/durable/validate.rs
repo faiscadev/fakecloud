@@ -70,7 +70,11 @@ static UPDATE_SCHEMA: [(&str, Schema); 13] = [
     ),
     (
         "ChainedInvokeOptions",
-        Schema::Struct(&[("FunctionName", Schema::Str), ("TenantId", Schema::Str)]),
+        Schema::Struct(&[
+            ("FunctionName", Schema::Str),
+            ("TenantId", Schema::Str),
+            ("XAmznTraceId", Schema::Str),
+        ]),
     ),
     (
         "ContextOptions",
@@ -314,6 +318,18 @@ fn validate_model(updates: &[Value]) -> Result<(), AwsServiceError> {
                 min: 1,
                 max: 256,
                 pattern: Some((&TENANT_RE, TENANT_PATTERN)),
+            },
+            &mut errors,
+        );
+        check_str(
+            u.get("ChainedInvokeOptions"),
+            "XAmznTraceId",
+            &p("chainedInvokeOptions.xAmznTraceId"),
+            &StrConstraint {
+                required: false,
+                min: 0,
+                max: 8192,
+                pattern: None,
             },
             &mut errors,
         );

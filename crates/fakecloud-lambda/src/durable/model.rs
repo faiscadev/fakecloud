@@ -126,6 +126,10 @@ pub struct ChainedInvokeState {
     pub function_name: String,
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// `ChainedInvokeOptions.XAmznTraceId`: the trace header the chained
+    /// invocation starts with; the parent execution's when unset.
+    #[serde(default)]
+    pub trace_header: Option<String>,
     /// The input handed to the invoked function.
     #[serde(default)]
     pub payload: Option<String>,
