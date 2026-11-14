@@ -50,6 +50,39 @@ pub struct AccountState {
     pub capacity_assignment_config: Option<CapacityAssignmentConfiguration>,
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
     pub initialized: bool,
+    /// System table configurations keyed by `SystemTableName` (`ALL`).
+    #[serde(default)]
+    pub system_table_configurations: BTreeMap<String, SystemTableConfiguration>,
+}
+
+/// An account's system table configuration (CreateSystemTableConfiguration).
+/// While one exists, every system table (`SystemTableType`) is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemTableConfiguration {
+    pub table_name: String,
+    pub kms_key_arn: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_modified_at: DateTime<Utc>,
+    #[serde(default)]
+    pub client_request_token: Option<String>,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+}
+
+/// Every `SystemTableType` Athena exposes, in the order ListSystemTableStatuses
+/// reports them.
+pub const SYSTEM_TABLE_TYPES: &[&str] = &["QUERY_EXECUTIONS"];
+
+impl AccountState {
+    /// `SystemTableStatus` entries derived from the stored configurations: a
+    /// system table is enabled while a configuration covering it exists.
+    pub fn system_table_statuses(&self) -> Vec<Value> {
+        let enabled = self.system_table_configurations.contains_key("ALL");
+        SYSTEM_TABLE_TYPES
+            .iter()
+            .map(|t| serde_json::json!({"TableName": t, "Enabled": enabled}))
+            .collect()
+    }
 }
 
 /// (De)serialize a `(workgroup, name) -> PreparedStatement` map as a sequence
