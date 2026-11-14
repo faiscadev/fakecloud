@@ -79,6 +79,10 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListPullTimeUpdateExclusions",
     "ListImageReferrers",
     "UpdateImageStorageClass",
+    "StartReplicationBackfill",
+    "StopReplicationBackfill",
+    "ListReplicationBackfills",
+    "DescribeReplicationBackfillResults",
 ];
 
 pub struct EcrService {
@@ -95,6 +99,7 @@ pub struct EcrService {
     session_roles: Option<fakecloud_iam::evaluator::SessionRoleResolver>,
 }
 
+mod backfill;
 mod images;
 mod layers;
 mod lifecycle;
@@ -362,6 +367,12 @@ impl AwsService for EcrService {
             "ListPullTimeUpdateExclusions" => self.list_pull_time_update_exclusions(&request),
             "ListImageReferrers" => self.list_image_referrers(&request),
             "UpdateImageStorageClass" => self.update_image_storage_class(&request),
+            "StartReplicationBackfill" => self.start_replication_backfill(&request),
+            "StopReplicationBackfill" => self.stop_replication_backfill(&request),
+            "ListReplicationBackfills" => self.list_replication_backfills(&request),
+            "DescribeReplicationBackfillResults" => {
+                self.describe_replication_backfill_results(&request)
+            }
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,

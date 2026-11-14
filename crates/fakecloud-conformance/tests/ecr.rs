@@ -1270,3 +1270,150 @@ async fn ecr_update_image_storage_class() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Replication backfills (driven over raw awsJson1.1: the pinned SDK predates
+// them)
+// ---------------------------------------------------------------------------
+
+async fn ecr_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header(
+            "x-amz-target",
+            format!("AmazonEC2ContainerRegistry_V20150921.{op}"),
+        )
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/ecr/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+const BACKFILL_DEST: &str = r#"{"region": "us-west-2", "registryId": "222222222222"}"#;
+
+/// A registry with one tagged image in `bf-app` and a rule replicating `bf-`
+/// repositories to [`BACKFILL_DEST`]; returns the started backfill's ID.
+async fn start_backfill(server: &TestServer) -> String {
+    let dest: serde_json::Value = serde_json::from_str(BACKFILL_DEST).unwrap();
+    let (s, b) = ecr_raw(
+        server,
+        "CreateRepository",
+        serde_json::json!({"repositoryName": "bf-app"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = ecr_raw(
+        server,
+        "PutImage",
+        serde_json::json!({"repositoryName": "bf-app", "imageManifest": "{\"bf\":1}", "imageTag": "v1"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = ecr_raw(
+        server,
+        "PutReplicationConfiguration",
+        serde_json::json!({"replicationConfiguration": {"rules": [{
+            "destinations": [dest],
+            "repositoryFilters": [{"filter": "bf-", "filterType": "PREFIX_MATCH"}],
+        }]}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = ecr_raw(
+        server,
+        "StartReplicationBackfill",
+        serde_json::json!({"destination": dest}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["status"], "PREPARING");
+    b["replicationBackfillId"].as_str().unwrap().to_string()
+}
+
+#[test_action("ecr", "StartReplicationBackfill", checksum = "6d4094e3")]
+#[tokio::test]
+async fn ecr_start_replication_backfill() {
+    let server = TestServer::start().await;
+    start_backfill(&server).await;
+    // One backfill per destination Region at a time.
+    let dest: serde_json::Value = serde_json::from_str(BACKFILL_DEST).unwrap();
+    let (s, b) = ecr_raw(
+        &server,
+        "StartReplicationBackfill",
+        serde_json::json!({"destination": dest}),
+    )
+    .await;
+    assert_eq!(s, 400);
+    assert!(b["__type"]
+        .as_str()
+        .unwrap()
+        .contains("ReplicationBackfillInProgressException"));
+}
+
+#[test_action("ecr", "StopReplicationBackfill", checksum = "9fd0c7ef")]
+#[tokio::test]
+async fn ecr_stop_replication_backfill() {
+    let server = TestServer::start().await;
+    let id = start_backfill(&server).await;
+    let (s, b) = ecr_raw(
+        &server,
+        "StopReplicationBackfill",
+        serde_json::json!({"replicationBackfillId": id}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["status"], "STOPPED");
+}
+
+#[test_action("ecr", "ListReplicationBackfills", checksum = "15644564")]
+#[tokio::test]
+async fn ecr_list_replication_backfills() {
+    let server = TestServer::start().await;
+    let id = start_backfill(&server).await;
+    let (s, b) = ecr_raw(&server, "ListReplicationBackfills", serde_json::json!({})).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["backfills"][0]["replicationBackfillId"], id);
+    assert_eq!(b["backfills"][0]["destination"]["region"], "us-west-2");
+}
+
+#[test_action("ecr", "DescribeReplicationBackfillResults", checksum = "79c75712")]
+#[tokio::test]
+async fn ecr_describe_replication_backfill_results() {
+    let server = TestServer::start().await;
+    let id = start_backfill(&server).await;
+    let mut body = serde_json::Value::Null;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let (s, b) = ecr_raw(
+            &server,
+            "DescribeReplicationBackfillResults",
+            serde_json::json!({"replicationBackfillId": id}),
+        )
+        .await;
+        assert_eq!(s, 200, "{b}");
+        body = b;
+        if body["status"] == "COMPLETE" {
+            break;
+        }
+    }
+    assert_eq!(body["status"], "COMPLETE", "{body}");
+    assert_eq!(body["progress"]["completedReplicationCount"], 1);
+    assert_eq!(body["results"][0]["repositoryName"], "bf-app");
+    assert_eq!(body["results"][0]["imageId"]["imageTag"], "v1");
+    assert_eq!(body["results"][0]["status"], "COMPLETE");
+}
