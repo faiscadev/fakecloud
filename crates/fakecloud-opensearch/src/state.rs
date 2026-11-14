@@ -101,6 +101,41 @@ pub struct Domain {
     /// restart's recovery: only then is that change reported in progress.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub change_pending: bool,
+    /// This domain's side of the cross-Region replication relationship it
+    /// takes part in (`AddReplicationPeer`), if any. Both domains of a
+    /// relationship carry a link naming the other, with the same status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication: Option<ReplicationLink>,
+}
+
+/// One domain's side of a replication relationship.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicationLink {
+    /// The ARN of the other domain of the relationship.
+    pub peer_arn: String,
+    /// This domain's `ReplicationRole` (`PRIMARY` or `SECONDARY`).
+    pub role: String,
+    /// The relationship's `ReplicationStatus`.
+    pub status: String,
+    /// Why the relationship is in its current state, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
+}
+
+impl OpenSearchState {
+    /// Mark the relationship of the domain peered with `deleted_arn` as
+    /// `DETACHED`: the domain it replicated with no longer exists.
+    pub fn detach_replication_peer_of(&mut self, deleted_arn: &str) {
+        for d in self.domains.values_mut() {
+            if let Some(link) = d.replication.as_mut() {
+                if link.peer_arn == deleted_arn {
+                    link.status = "DETACHED".to_string();
+                    link.status_message =
+                        Some(format!("The peer domain {deleted_arn} was deleted."));
+                }
+            }
+        }
+    }
 }
 
 /// Where a domain's backing search cluster listens.
