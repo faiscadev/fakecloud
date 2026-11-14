@@ -160,9 +160,42 @@ impl RdsService {
 
         // Register the replica against its source synchronously so a concurrent
         // DescribeDBInstances of the source sees the linkage immediately.
+        if let Some(az) = optional_query_param(request, "AvailabilityZone") {
+            replica.availability_zone = Some(az);
+        }
+        let capacity_reservation_ref =
+            optional_query_param(request, "DBCapacityReservationIdentifier");
         let source_missing = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            // A replica takes one unit of the reservation it names, and
+            // inherits its license model from the source.
+            if let Some(ref reference) = capacity_reservation_ref {
+                let license = replica
+                    .license_model
+                    .clone()
+                    .unwrap_or_else(|| license_model_for_engine(&replica.engine).to_string());
+                let claim = super::capacity_reservations::CapacityClaim {
+                    instance: None,
+                    db_instance_class: &replica.db_instance_class,
+                    engine: &replica.engine,
+                    license_model: Some(&license),
+                    availability_zone: replica.availability_zone.as_deref(),
+                    multi_az: replica.multi_az,
+                };
+                match super::capacity_reservations::claim_capacity(state, reference, &claim) {
+                    Ok(used) => {
+                        if replica.availability_zone.is_none() {
+                            replica.availability_zone = used.availability_zones.first().cloned();
+                        }
+                        replica.capacity_reservation = Some(used);
+                    }
+                    Err(e) => {
+                        state.cancel_instance_creation(&db_instance_identifier);
+                        return Err(e);
+                    }
+                }
+            }
             match state.instances.get_mut(&source_db_instance_identifier) {
                 Some(source) => {
                     source

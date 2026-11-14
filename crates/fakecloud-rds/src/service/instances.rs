@@ -197,6 +197,10 @@ impl RdsService {
         // ListTagsForResource without a follow-up AddTagsToResource call),
         // so persist them on the instance rather than dropping them.
         let request_tags = parse_tags(request)?;
+        let capacity_reservation_ref =
+            optional_query_param(request, "DBCapacityReservationIdentifier");
+        let license_model = optional_query_param(request, "LicenseModel");
+        let mut capacity_reservation = None;
 
         validate_create_request(
             &db_instance_identifier,
@@ -261,7 +265,30 @@ impl RdsService {
                 &db_instance_identifier,
                 db_subnet_group_name.as_deref(),
             )?;
+            if let Some(ref reference) = capacity_reservation_ref {
+                let claim = super::capacity_reservations::CapacityClaim {
+                    instance: None,
+                    db_instance_class: &db_instance_class,
+                    engine: &engine,
+                    license_model: license_model.as_deref(),
+                    availability_zone: availability_zone.as_deref(),
+                    multi_az,
+                };
+                match super::capacity_reservations::claim_capacity(state, reference, &claim) {
+                    Ok(used) => capacity_reservation = Some(used),
+                    Err(e) => {
+                        state.cancel_instance_creation(&db_instance_identifier);
+                        return Err(e);
+                    }
+                }
+            }
         }
+        // Placed by its reservation when no zone was named.
+        let availability_zone = availability_zone.or_else(|| {
+            capacity_reservation
+                .as_ref()
+                .and_then(|u| u.availability_zones.first().cloned())
+        });
 
         let logical_db_name = db_name
             .clone()
@@ -334,7 +361,7 @@ impl RdsService {
                 copy_tags_to_snapshot,
                 master_user_secret_arn: None,
                 master_user_secret_kms_key_id: None,
-                license_model: None,
+                license_model: license_model.clone(),
                 max_allocated_storage: None,
                 multi_tenant: None,
                 storage_throughput: None,
@@ -354,6 +381,7 @@ impl RdsService {
                 domain_dns_ips: parse_string_member_list(request, "DomainDnsIps"),
                 db_cluster_identifier: db_cluster_identifier.clone(),
                 activity_stream: None,
+                capacity_reservation,
             };
             state.finish_instance_creation(placeholder.clone());
             placeholder
@@ -895,8 +923,28 @@ impl RdsService {
             || new_db_instance_identifier
                 .as_deref()
                 .is_some_and(|new_id| new_id != db_instance_identifier);
+        let capacity_reservation_ref =
+            optional_query_param(request, "DBCapacityReservationIdentifier");
+        let requested_subnet_group = optional_query_param(request, "DBSubnetGroupName");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
+        let capacity_change = {
+            let current = state
+                .instances
+                .get(&db_instance_identifier)
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+            super::capacity_reservations::plan_modify_capacity(
+                state,
+                current,
+                &super::capacity_reservations::ModifyCapacity {
+                    requested: capacity_reservation_ref.as_deref(),
+                    db_instance_class: db_instance_class.as_deref(),
+                    multi_az,
+                    license_model: license_model.as_deref(),
+                    db_subnet_group_name: requested_subnet_group.as_deref(),
+                },
+            )?
+        };
         let instance = state
             .instances
             .get_mut(&db_instance_identifier)
@@ -1203,6 +1251,32 @@ impl RdsService {
                 }
                 if let Some(interval) = monitoring_interval {
                     pending.monitoring_interval = Some(interval);
+                }
+            }
+        }
+
+        // Reserved capacity follows the hardware change: at once when it
+        // applies now; otherwise the instance keeps its current reservation
+        // and the pending change already holds the new one's units
+        // (`apply_pending_to_instance` releases or moves it later).
+        match capacity_change {
+            super::capacity_reservations::CapacityChange::Keep => {}
+            super::capacity_reservations::CapacityChange::Release => {
+                if immediate {
+                    instance.capacity_reservation = None;
+                }
+            }
+            super::capacity_reservations::CapacityChange::Move(used) => {
+                if immediate {
+                    if instance.availability_zone.is_none() {
+                        instance.availability_zone = used.availability_zones.first().cloned();
+                    }
+                    instance.capacity_reservation = Some(used);
+                } else {
+                    instance
+                        .pending_modified_values
+                        .get_or_insert(Default::default())
+                        .capacity_reservation = Some(used);
                 }
             }
         }

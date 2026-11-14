@@ -59,6 +59,54 @@ pub struct ServerlessV2Scaling {
     pub max_capacity: Option<f64>,
 }
 
+/// One Amazon DocumentDB Serverless v2 platform version
+/// (`ServerlessV2PlatformVersionInfo`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ServerlessV2PlatformVersion {
+    pub version: &'static str,
+    pub engine: &'static str,
+    pub description: &'static str,
+    /// `enabled` (in use) or `disabled` (no longer in use).
+    pub status: &'static str,
+    pub is_default: bool,
+    /// DCU bounds the platform supports (`ServerlessV2FeaturesSupport`).
+    pub min_capacity: f64,
+    pub max_capacity: f64,
+}
+
+/// The serverless platform versions the emulator offers. New serverless
+/// clusters land on the engine's default (enabled) version, which is what
+/// `DBCluster.ServerlessV2PlatformVersion` reports.
+pub const SERVERLESS_V2_PLATFORM_VERSIONS: &[ServerlessV2PlatformVersion] = &[
+    ServerlessV2PlatformVersion {
+        version: "1",
+        engine: "docdb",
+        description: "Amazon DocumentDB Serverless platform version 1",
+        status: "disabled",
+        is_default: false,
+        min_capacity: 0.5,
+        max_capacity: 128.0,
+    },
+    ServerlessV2PlatformVersion {
+        version: "2",
+        engine: "docdb",
+        description: "Amazon DocumentDB Serverless platform version 2",
+        status: "enabled",
+        is_default: true,
+        min_capacity: 0.5,
+        max_capacity: 256.0,
+    },
+];
+
+/// The default serverless platform version for `engine`, if it has one.
+pub fn default_serverless_v2_platform_version(
+    engine: &str,
+) -> Option<&'static ServerlessV2PlatformVersion> {
+    SERVERLESS_V2_PLATFORM_VERSIONS
+        .iter()
+        .find(|p| p.engine == engine && p.is_default)
+}
+
 /// A DocumentDB DB cluster (control-plane record).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DbCluster {

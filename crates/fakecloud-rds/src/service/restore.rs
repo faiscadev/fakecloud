@@ -208,10 +208,16 @@ impl RdsService {
             instance.latest_restorable_time = source_instance.latest_restorable_time;
         }
 
-        self.state
-            .write()
-            .get_or_create(&request.account_id)
-            .finish_instance_creation(instance.clone());
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            super::capacity_reservations::place_on_requested_capacity(
+                state,
+                request,
+                &mut instance,
+            )?;
+            state.finish_instance_creation(instance.clone());
+        }
 
         self.spawn_finalize_restored_instance(
             runtime.clone(),
@@ -367,10 +373,16 @@ impl RdsService {
         }
         (instance.storage_encrypted, instance.kms_key_id) = storage_encryption;
 
-        self.state
-            .write()
-            .get_or_create(&request.account_id)
-            .finish_instance_creation(instance.clone());
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            super::capacity_reservations::place_on_requested_capacity(
+                state,
+                request,
+                &mut instance,
+            )?;
+            state.finish_instance_creation(instance.clone());
+        }
 
         self.spawn_finalize_restored_instance(
             runtime.clone(),

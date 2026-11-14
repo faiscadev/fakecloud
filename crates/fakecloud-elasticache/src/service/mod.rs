@@ -155,7 +155,9 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CopySnapshot",
     "CopyServerlessCacheSnapshot",
     "ExportServerlessCacheSnapshot",
+    "PrepareMigration",
     "StartMigration",
+    "StopMigration",
     "CompleteMigration",
     "TestMigration",
 ];
@@ -204,6 +206,7 @@ pub struct ElastiCacheService {
 }
 
 mod clusters;
+mod migrations;
 mod misc;
 mod parameter_groups;
 mod replication;
@@ -1038,7 +1041,9 @@ impl AwsService for ElastiCacheService {
             "CopySnapshot" => self.copy_snapshot(&request),
             "CopyServerlessCacheSnapshot" => self.copy_serverless_cache_snapshot(&request),
             "ExportServerlessCacheSnapshot" => self.export_serverless_cache_snapshot(&request),
-            "StartMigration" => self.start_migration(&request),
+            "PrepareMigration" => self.prepare_migration(&request),
+            "StartMigration" => self.start_migration(&request).await,
+            "StopMigration" => self.stop_migration(&request),
             "CompleteMigration" => self.complete_migration(&request),
             "TestMigration" => self.test_migration(&request),
             _ => Err(AwsServiceError::action_not_implemented(
@@ -1058,107 +1063,6 @@ impl AwsService for ElastiCacheService {
 }
 
 impl ElastiCacheService {
-    // ── Migrations ──
-
-    fn start_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        self.migration_op(request, "StartMigration", "queued")
-    }
-
-    fn complete_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_query_param(request, "ReplicationGroupId")?;
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-        // Validate all prerequisites BEFORE mutating migration.status —
-        // the prior order flipped status to "complete" and only then
-        // surfaced ReplicationGroupNotFoundFault on the lookup, leaving
-        // a stale "complete" status on the migration.
-        if !state.migrations.contains_key(&id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ReplicationGroupNotUnderMigrationFault",
-                format!("ReplicationGroup {id} is not currently being migrated."),
-            ));
-        }
-        if !state.replication_groups.contains_key(&id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ReplicationGroupNotFoundFault",
-                format!("ReplicationGroup {id} not found."),
-            ));
-        }
-        let migration = state.migrations.get_mut(&id).expect("checked above");
-        migration.status = "complete".to_string();
-        let group = state.replication_groups.get(&id).expect("checked above");
-        let region = request.region.clone();
-        let xml = replication_group_xml(group, &region);
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            query_response_xml(
-                "CompleteMigration",
-                ELASTICACHE_NS,
-                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
-                &request.request_id,
-            ),
-        ))
-    }
-
-    fn test_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        self.migration_op(request, "TestMigration", "test-passed")
-    }
-
-    fn migration_op(
-        &self,
-        request: &AwsRequest,
-        action: &str,
-        status: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_query_param(request, "ReplicationGroupId")?;
-        // AWS Query protocol nests indexed members under .{index}.{Field},
-        // not .{Field}.{index}.
-        let endpoint_addr =
-            collect_member_field(request, "CustomerNodeEndpointList.member", "Address")
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| "127.0.0.1".to_string());
-        let endpoint_port =
-            collect_member_field(request, "CustomerNodeEndpointList.member", "Port")
-                .into_iter()
-                .next()
-                .and_then(|v| v.parse::<i32>().ok())
-                .unwrap_or(6379);
-
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-        let group = state.replication_groups.get(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ReplicationGroupNotFoundFault",
-                format!("ReplicationGroup {id} not found."),
-            )
-        })?;
-        let region = request.region.clone();
-        let xml = replication_group_xml(group, &region);
-        state.migrations.insert(
-            id.clone(),
-            crate::state::Migration {
-                replication_group_id: id,
-                customer_node_endpoint_address: endpoint_addr,
-                customer_node_endpoint_port: endpoint_port,
-                status: status.to_string(),
-                started_at: chrono::Utc::now().to_rfc3339(),
-            },
-        );
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            query_response_xml(
-                action,
-                ELASTICACHE_NS,
-                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
-                &request.request_id,
-            ),
-        ))
-    }
-
     /// Best-effort parameter application: run `CONFIG SET` for every
     /// user-modified parameter on every Redis/Valkey cluster and
     /// replication group that uses the given parameter group.

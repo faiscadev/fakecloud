@@ -612,6 +612,22 @@ pub(super) fn option_group_xml(v: &Value) -> String {
     } else {
         format!("<Options>{options}</Options>")
     };
+    // Provenance of a copied option group (CopyOptionGroup, or
+    // CopyDBSnapshot with CopyOptionGroup).
+    let provenance: String = [
+        "SourceOptionGroup",
+        "SourceAccountId",
+        "CopyTimestamp",
+        "SourceRegion",
+    ]
+    .iter()
+    .filter_map(|tag| {
+        v.get(*tag)
+            .and_then(|x| x.as_str())
+            .map(|x| format!("<{tag}>{}</{tag}>", xml_escape(x)))
+    })
+    .collect();
+    let options_xml = format!("{options_xml}{provenance}");
     format!(
         "          <OptionGroupName>{}</OptionGroupName>\n          <OptionGroupArn>{}</OptionGroupArn>\n          <EngineName>{}</EngineName>\n          <MajorEngineVersion>{}</MajorEngineVersion>\n          <OptionGroupDescription>{}</OptionGroupDescription>\n          <AllowsVpcAndNonVpcInstanceMemberships>true</AllowsVpcAndNonVpcInstanceMemberships>\n          {}",
         xml_escape(v["OptionGroupName"].as_str().unwrap_or("")),
@@ -621,6 +637,214 @@ pub(super) fn option_group_xml(v: &Value) -> String {
         xml_escape(v["OptionGroupDescription"].as_str().unwrap_or("")),
         options_xml,
     )
+}
+
+/// One orderable option of the option-group catalog
+/// (`DescribeOptionGroupOptions`).
+struct CatalogOption {
+    name: &'static str,
+    description: &'static str,
+    engines: &'static [&'static str],
+    major_versions: &'static [&'static str],
+    default_port: Option<i32>,
+    persistent: bool,
+    permanent: bool,
+    vpc_only: bool,
+    /// Whether an option group holding this option can be copied to
+    /// another account / Region (an option bound to account- or
+    /// Region-scoped keys, like TDE, cannot).
+    copyable_cross_account: bool,
+    copyable_cross_region: bool,
+}
+
+const MYSQL_VERSIONS: &[&str] = &["5.7", "8.0", "8.4"];
+const MARIADB_VERSIONS: &[&str] = &["10.5", "10.6", "10.11", "11.4"];
+const ORACLE_ENGINES: &[&str] = &["oracle-ee", "oracle-ee-cdb", "oracle-se2", "oracle-se2-cdb"];
+const ORACLE_VERSIONS: &[&str] = &["19", "21"];
+const SQLSERVER_ENGINES: &[&str] = &[
+    "sqlserver-ee",
+    "sqlserver-se",
+    "sqlserver-ex",
+    "sqlserver-web",
+];
+const SQLSERVER_VERSIONS: &[&str] = &["15.00", "16.00"];
+
+const OPTION_CATALOG: &[CatalogOption] = &[
+    CatalogOption {
+        name: "MARIADB_AUDIT_PLUGIN",
+        description: "MariaDB Audit Plugin",
+        engines: &["mysql"],
+        major_versions: MYSQL_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "MARIADB_AUDIT_PLUGIN",
+        description: "MariaDB Audit Plugin",
+        engines: &["mariadb"],
+        major_versions: MARIADB_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "OEM",
+        description: "Oracle Enterprise Manager (Database Express)",
+        engines: ORACLE_ENGINES,
+        major_versions: ORACLE_VERSIONS,
+        default_port: Some(5500),
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "NATIVE_NETWORK_ENCRYPTION",
+        description: "Oracle Native Network Encryption",
+        engines: ORACLE_ENGINES,
+        major_versions: ORACLE_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "S3_INTEGRATION",
+        description: "S3 Integration",
+        engines: ORACLE_ENGINES,
+        major_versions: ORACLE_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "STATSPACK",
+        description: "Oracle Statspack",
+        engines: ORACLE_ENGINES,
+        major_versions: ORACLE_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "Timezone",
+        description: "Change time zone",
+        engines: ORACLE_ENGINES,
+        major_versions: ORACLE_VERSIONS,
+        default_port: None,
+        persistent: true,
+        permanent: true,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "TDE",
+        description: "Oracle Advanced Security - Transparent Data Encryption",
+        engines: &["oracle-ee", "oracle-ee-cdb"],
+        major_versions: ORACLE_VERSIONS,
+        default_port: None,
+        persistent: true,
+        permanent: true,
+        vpc_only: false,
+        copyable_cross_account: false,
+        copyable_cross_region: false,
+    },
+    CatalogOption {
+        name: "SQLSERVER_BACKUP_RESTORE",
+        description: "SQL Server - Backup and Restore",
+        engines: SQLSERVER_ENGINES,
+        major_versions: SQLSERVER_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "SQLSERVER_AUDIT",
+        description: "SQL Server - Audit",
+        engines: SQLSERVER_ENGINES,
+        major_versions: SQLSERVER_VERSIONS,
+        default_port: None,
+        persistent: false,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: true,
+        copyable_cross_region: true,
+    },
+    CatalogOption {
+        name: "TDE",
+        description: "SQL Server - Transparent Data Encryption",
+        engines: &["sqlserver-ee", "sqlserver-se"],
+        major_versions: SQLSERVER_VERSIONS,
+        default_port: None,
+        persistent: true,
+        permanent: false,
+        vpc_only: false,
+        copyable_cross_account: false,
+        copyable_cross_region: false,
+    },
+];
+
+/// `<OptionGroupOptions>` for `engine`, optionally narrowed to one major
+/// engine version. An engine with no orderable options lists none.
+pub(super) fn option_group_options_xml(engine: &str, major_version: Option<&str>) -> String {
+    let mut out = String::new();
+    for option in OPTION_CATALOG
+        .iter()
+        .filter(|o| o.engines.contains(&engine))
+    {
+        for major in option
+            .major_versions
+            .iter()
+            .filter(|m| major_version.is_none_or(|wanted| wanted == **m))
+        {
+            let port = option
+                .default_port
+                .map(|p| format!("<DefaultPort>{p}</DefaultPort>"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "<OptionGroupOption><Name>{name}</Name><Description>{desc}</Description>\
+                 <EngineName>{engine}</EngineName><MajorEngineVersion>{major}</MajorEngineVersion>\
+                 <PortRequired>{port_required}</PortRequired>{port}\
+                 <OptionsDependedOn/><OptionsConflictsWith/>\
+                 <Persistent>{persistent}</Persistent><Permanent>{permanent}</Permanent>\
+                 <RequiresAutoMinorEngineVersionUpgrade>false</RequiresAutoMinorEngineVersionUpgrade>\
+                 <VpcOnly>{vpc_only}</VpcOnly><SupportsOptionVersionDowngrade>false</SupportsOptionVersionDowngrade>\
+                 <OptionGroupOptionSettings/><OptionGroupOptionVersions/>\
+                 <CopyableCrossAccount>{cross_account}</CopyableCrossAccount>\
+                 <CopyableCrossRegion>{cross_region}</CopyableCrossRegion></OptionGroupOption>",
+                name = option.name,
+                desc = xml_escape(option.description),
+                engine = xml_escape(engine),
+                port_required = option.default_port.is_some(),
+                persistent = option.persistent,
+                permanent = option.permanent,
+                vpc_only = option.vpc_only,
+                cross_account = option.copyable_cross_account,
+                cross_region = option.copyable_cross_region,
+            ));
+        }
+    }
+    format!("    <OptionGroupOptions>{out}</OptionGroupOptions>")
 }
 
 pub(super) fn event_sub_xml(v: &Value) -> String {

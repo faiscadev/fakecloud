@@ -504,6 +504,54 @@ pub struct ServerlessCache {
     /// [`ElastiCacheState::resolve_data_volumes`] binds against the daemon.
     #[serde(default)]
     pub data_volume: Option<DataVolumeBinding>,
+    /// The online migration into this cache (`ServerlessCache.Migration`),
+    /// opened by PrepareMigration. Kept after it finishes so the final
+    /// status stays visible until the next PrepareMigration.
+    #[serde(default)]
+    pub migration: Option<ServerlessCacheMigration>,
+}
+
+/// Lifecycle of a serverless-cache online migration:
+/// PrepareMigration -> `prepared`; StartMigration -> `syncing` (or
+/// straight to `completed` under `AutoCutover`, the sync being established
+/// as soon as it starts); StopMigration `syncing` -> `stopped`, restartable
+/// by StartMigration with `ClearTargetCacheData`; CompleteMigration
+/// `syncing` -> `completed`, or with `Force` from `prepared`/`stopped`
+/// -> `cancelled`.
+pub mod migration_status {
+    pub const PREPARED: &str = "prepared";
+    pub const SYNCING: &str = "syncing";
+    pub const STOPPED: &str = "stopped";
+    pub const COMPLETED: &str = "completed";
+    pub const CANCELLED: &str = "cancelled";
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ServerlessCacheMigration {
+    pub status: String,
+    /// `manual` or `auto`; unset until StartMigration picks one.
+    #[serde(default)]
+    pub cutover_mode: Option<String>,
+    /// The single source endpoint given to PrepareMigration.
+    pub source_address: String,
+    pub source_port: i32,
+    #[serde(default)]
+    pub source_secret_arn: Option<String>,
+    #[serde(default)]
+    pub source_tls_mode: Option<String>,
+    #[serde(default)]
+    pub source_tls_certificate: Option<String>,
+    pub prepared_at: String,
+}
+
+impl ServerlessCacheMigration {
+    /// Still open: neither completed nor cancelled.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            migration_status::PREPARED | migration_status::SYNCING | migration_status::STOPPED
+        )
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1602,6 +1650,7 @@ pub(crate) mod tests {
             container_id: "cid".to_string(),
             host_port: 6379,
             data_volume: None,
+            migration: None,
         };
 
         state.finish_serverless_cache_creation(cache.clone());
@@ -2071,6 +2120,7 @@ pub(crate) mod tests {
                 container_id: "cid".to_string(),
                 host_port: 6379,
                 data_volume: None,
+                migration: None,
             },
         );
         state.serverless_cache_snapshots.insert(

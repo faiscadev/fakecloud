@@ -794,6 +794,7 @@ pub(crate) fn build_restored_instance(
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
         activity_stream: None,
+        capacity_reservation: None,
     }
 }
 
@@ -882,6 +883,7 @@ pub(crate) fn build_s3_restored_instance(
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
         activity_stream: None,
+        capacity_reservation: None,
     }
 }
 
@@ -977,6 +979,7 @@ pub(crate) fn build_pit_restored_instance(
         domain_dns_ips: source.domain_dns_ips.clone(),
         db_cluster_identifier: source.db_cluster_identifier.clone(),
         activity_stream: source.activity_stream.clone(),
+        capacity_reservation: None,
     }
 }
 
@@ -1061,6 +1064,7 @@ pub(crate) fn build_read_replica_instance(
         domain_dns_ips: source.domain_dns_ips.clone(),
         db_cluster_identifier: source.db_cluster_identifier.clone(),
         activity_stream: source.activity_stream.clone(),
+        capacity_reservation: None,
     }
 }
 
@@ -1508,6 +1512,12 @@ pub(crate) fn db_instance_xml(
                 xml_escape(ca)
             ));
         }
+        if let Some(ref used) = pending.capacity_reservation {
+            fields.push(format!(
+                "<DBCapacityReservationIdentifier>{}</DBCapacityReservationIdentifier>",
+                xml_escape(&used.identifier)
+            ));
+        }
         if !fields.is_empty() {
             format!(
                 "<PendingModifiedValues>{}</PendingModifiedValues>",
@@ -1836,7 +1846,16 @@ pub(crate) fn db_instance_xml(
          <DeletionProtection>{deletion_protection}</DeletionProtection>\
          {pending_modified_values_xml}\
          <TagList>{tag_list}</TagList>\
-         <DBInstanceArn>{arn}</DBInstanceArn>",
+         <DBInstanceArn>{arn}</DBInstanceArn>\
+         {capacity_reservation_xml}",
+        capacity_reservation_xml = instance
+            .capacity_reservation
+            .as_ref()
+            .map(|used| format!(
+                "<DBCapacityReservationIdentifier>{}</DBCapacityReservationIdentifier>",
+                xml_escape(&used.identifier)
+            ))
+            .unwrap_or_default(),
         tag_list = instance.tags.iter().map(tag_xml).collect::<String>(),
         identifier = xml_escape(&instance.db_instance_identifier),
         class = xml_escape(&instance.db_instance_class),
@@ -2250,7 +2269,7 @@ fn extras_bucket_for_resource_type(kind: &str) -> Option<&'static str> {
 fn is_known_tag_resource_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "db" | "snapshot" | "subgrp" | "pg" | "secgrp" | "og" | "es"
+        "db" | "snapshot" | "subgrp" | "pg" | "secgrp" | "og" | "es" | "db-capacity-reservation"
     ) || extras_bucket_for_resource_type(kind).is_some()
 }
 
@@ -2304,6 +2323,10 @@ fn resource_not_found_for_kind(kind: &str, name: &str) -> AwsServiceError {
             "SubscriptionNotFound",
             format!("EventSubscription {name} not found."),
         ),
+        "db-capacity-reservation" => (
+            "DBCapacityReservationNotFound",
+            format!("DB capacity reservation {name} not found."),
+        ),
         _ => unreachable!("kind already validated by is_known_tag_resource_kind"),
     };
     AwsServiceError::aws_error(StatusCode::NOT_FOUND, code, msg)
@@ -2353,6 +2376,11 @@ pub(crate) fn resolve_tag_target_mut<'a>(
             .get_mut(&name)
             .map(|g| TagTargetMut::Vec(&mut g.tags))
             .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
+        "db-capacity-reservation" => state
+            .capacity_reservations
+            .get_mut(&name)
+            .map(|r| TagTargetMut::Vec(&mut r.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         other => extras_bucket_for_resource_type(other)
             .and_then(|bucket| state.extras.get_mut(bucket))
             .and_then(|map| map.get_mut(&name))
@@ -2390,6 +2418,11 @@ pub(crate) fn resolve_tag_target<'a>(
             .get(&name)
             .map(|g| TagTargetRef::Vec(&g.tags))
             .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
+        "db-capacity-reservation" => state
+            .capacity_reservations
+            .get(&name)
+            .map(|r| TagTargetRef::Vec(&r.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         other => extras_bucket_for_resource_type(other)
             .and_then(|bucket| state.extras.get(bucket))
             .and_then(|map| map.get(&name))
@@ -2405,6 +2438,21 @@ pub(crate) fn apply_pending_to_instance(
     instance: &mut DbInstance,
     pending: crate::state::PendingModifiedValues,
 ) {
+    // A change of class, Multi-AZ or license model moves the instance to
+    // other hardware: onto the reservation the Modify named, else onto
+    // unreserved capacity.
+    let moves_hardware = pending
+        .db_instance_class
+        .as_ref()
+        .is_some_and(|c| *c != instance.db_instance_class)
+        || pending.multi_az.is_some_and(|m| m != instance.multi_az)
+        || pending
+            .license_model
+            .as_ref()
+            .is_some_and(|l| instance.license_model.as_ref() != Some(l));
+    if pending.capacity_reservation.is_some() || moves_hardware {
+        instance.capacity_reservation = pending.capacity_reservation;
+    }
     if let Some(class) = pending.db_instance_class {
         instance.db_instance_class = class;
     }

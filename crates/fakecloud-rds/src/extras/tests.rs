@@ -679,7 +679,11 @@ fn option_groups_event_subs_global_clusters() {
     ok_on(
         &svc,
         "CopyOptionGroup",
-        &[("TargetOptionGroupIdentifier", "og2")],
+        &[
+            ("SourceOptionGroupIdentifier", "og1"),
+            ("TargetOptionGroupIdentifier", "og2"),
+            ("TargetOptionGroupDescription", "copy"),
+        ],
     );
     ok_on(&svc, "DescribeOptionGroups", &[]);
     ok_on(&svc, "DescribeOptionGroupOptions", &[]);
@@ -998,6 +1002,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
             activity_stream: None,
+            capacity_reservation: None,
         },
     );
     // Replica points at source.
@@ -1071,6 +1076,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
             activity_stream: None,
+            capacity_reservation: None,
         },
     );
 }
@@ -1783,6 +1789,7 @@ fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
             activity_stream: None,
+            capacity_reservation: None,
         },
     );
 }
@@ -5574,6 +5581,112 @@ fn copy_db_snapshot_prefers_the_account_the_arn_names() {
         copied.db_instance_identifier, "their-db",
         "copied the local snapshot instead of the shared one"
     );
+}
+
+/// CopyDBSnapshot with CopyOptionGroup brings a shared snapshot's option
+/// group into the caller's account, tagged from the `og`
+/// TagSpecifications and carrying its provenance (`SourceRegion` etc.).
+#[test]
+fn copy_db_snapshot_copies_the_option_group_across_accounts() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = local_snapshot("snap-1", "their-db", "999999999999");
+        shared.option_group_name = Some("their-og".to_string());
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["000000000000".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+        other
+            .extras
+            .entry("option_groups".to_string())
+            .or_default()
+            .insert(
+                "their-og".to_string(),
+                json!({
+                    "OptionGroupName": "their-og",
+                    "OptionGroupArn": "arn:aws:rds:us-east-1:999999999999:og:their-og",
+                    "EngineName": "mysql",
+                    "MajorEngineVersion": "8.0",
+                    "OptionGroupDescription": "theirs",
+                }),
+            );
+    }
+    ok_on(
+        &svc,
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-1"),
+            ("CopyOptionGroup", "true"),
+            ("TagSpecifications.item.1.ResourceType", "og"),
+            ("TagSpecifications.item.1.Tags.Tag.1.Key", "copied"),
+            ("TagSpecifications.item.1.Tags.Tag.1.Value", "yes"),
+        ],
+    );
+    let resp = svc
+        .handle_extra_action(&req(
+            "DescribeOptionGroups",
+            &[("OptionGroupName", "their-og")],
+        ))
+        .unwrap();
+    let xml = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        xml.contains("<SourceAccountId>999999999999</SourceAccountId>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<SourceRegion>us-east-1</SourceRegion>"),
+        "{xml}"
+    );
+    let tags = svc
+        .state_handle()
+        .read()
+        .get("000000000000")
+        .and_then(|s| s.extras.get("option_groups")?.get("their-og").cloned())
+        .expect("option group copied")["Tags"]
+        .clone();
+    assert_eq!(tags, json!([{"Key": "copied", "Value": "yes"}]));
+
+    // CopyOptionGroup copies the source's engine and options and records
+    // the source Region; an unknown source is OptionGroupNotFoundFault.
+    let resp = svc
+        .handle_extra_action(&req(
+            "CopyOptionGroup",
+            &[
+                (
+                    "SourceOptionGroupIdentifier",
+                    "arn:aws:rds:us-east-1:000000000000:og:their-og",
+                ),
+                ("TargetOptionGroupIdentifier", "og-copy"),
+                ("TargetOptionGroupDescription", "copy"),
+            ],
+        ))
+        .unwrap();
+    let xml = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(xml.contains("<OptionGroup>"), "{xml}");
+    assert!(xml.contains("<EngineName>mysql</EngineName>"), "{xml}");
+    assert!(
+        xml.contains("<SourceRegion>us-east-1</SourceRegion>"),
+        "{xml}"
+    );
+    let err = svc
+        .handle_extra_action(&req(
+            "CopyOptionGroup",
+            &[
+                ("SourceOptionGroupIdentifier", "missing"),
+                ("TargetOptionGroupIdentifier", "og-2"),
+                ("TargetOptionGroupDescription", "copy"),
+            ],
+        ))
+        .err()
+        .expect("unknown source");
+    assert_eq!(err.code(), "OptionGroupNotFoundFault");
 }
 
 /// A copy records where it came from, and `db-instance-id` uses that to

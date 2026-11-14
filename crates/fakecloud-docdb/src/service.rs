@@ -66,6 +66,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeGlobalClusters",
     "DescribeOrderableDBInstanceOptions",
     "DescribePendingMaintenanceActions",
+    "DescribeServerlessV2PlatformVersions",
     "FailoverDBCluster",
     "FailoverGlobalCluster",
     "ListTagsForResource",
@@ -2390,6 +2391,51 @@ impl DocDbService {
         ))
     }
 
+    /// DescribeServerlessV2PlatformVersions: the static platform catalog,
+    /// narrowed by `ServerlessV2PlatformVersion`, `Engine` and `DefaultOnly`,
+    /// with disabled versions only under `IncludeAll`. `Filters` is
+    /// documented as unsupported and ignored. Paged by `MaxRecords`
+    /// (clamped to 20..=100, default 100) with an offset `Marker`.
+    fn describe_serverless_v2_platform_versions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let version = optional_query_param(req, "ServerlessV2PlatformVersion");
+        let engine = optional_query_param(req, "Engine");
+        let default_only = optional_query_param(req, "DefaultOnly").as_deref() == Some("true");
+        let include_all = optional_query_param(req, "IncludeAll").as_deref() == Some("true");
+        let matching: Vec<_> = crate::state::SERVERLESS_V2_PLATFORM_VERSIONS
+            .iter()
+            .filter(|p| version.as_deref().is_none_or(|v| p.version == v))
+            .filter(|p| engine.as_deref().is_none_or(|e| p.engine == e))
+            .filter(|p| !default_only || p.is_default)
+            .filter(|p| include_all || p.status == "enabled")
+            .collect();
+        let max_records = optional_query_param(req, "MaxRecords")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100)
+            .clamp(20, 100);
+        let start = optional_query_param(req, "Marker")
+            .and_then(|m| m.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(matching.len());
+        let end = (start + max_records).min(matching.len());
+        let inner: String = matching[start..end]
+            .iter()
+            .map(|p| xml::serverless_v2_platform_version_info(p))
+            .collect();
+        let marker = if end < matching.len() {
+            format!("<Marker>{end}</Marker>")
+        } else {
+            String::new()
+        };
+        Ok(ok_xml(
+            "DescribeServerlessV2PlatformVersions",
+            format!("{marker}<ServerlessV2PlatformVersions>{inner}</ServerlessV2PlatformVersions>"),
+            &req.request_id,
+        ))
+    }
+
     fn describe_orderable_db_instance_options(
         &self,
         req: &AwsRequest,
@@ -2723,6 +2769,9 @@ impl AwsService for DocDbService {
             "ApplyPendingMaintenanceAction" => self.apply_pending_maintenance_action(&request),
             "DescribePendingMaintenanceActions" => {
                 self.describe_pending_maintenance_actions(&request)
+            }
+            "DescribeServerlessV2PlatformVersions" => {
+                self.describe_serverless_v2_platform_versions(&request)
             }
             other => Err(AwsServiceError::action_not_implemented("docdb", other)),
         };

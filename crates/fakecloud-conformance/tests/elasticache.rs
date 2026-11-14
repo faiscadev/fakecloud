@@ -1788,3 +1788,117 @@ async fn elasticache_migration_lifecycle() {
         .await
         .unwrap();
 }
+
+/// PrepareMigration / StopMigration are newer than the workspace's
+/// `aws-sdk-elasticache`, so they go over the Query wire directly.
+async fn elasticache_post(
+    server: &TestServer,
+    action: &str,
+    params: &[(&str, &str)],
+) -> (reqwest::StatusCode, String) {
+    let mut body = format!("Action={action}&Version=2015-02-02");
+    for (k, v) in params {
+        body.push_str(&format!("&{k}={v}"));
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/elasticache/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.text().await.unwrap())
+}
+
+#[test_action("elasticache", "PrepareMigration", checksum = "78d29a87")]
+#[test_action("elasticache", "StopMigration", checksum = "41734f0f")]
+#[tokio::test]
+async fn elasticache_serverless_cache_migration() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_serverless_cache()
+        .serverless_cache_name("mig1")
+        .engine("valkey")
+        .send()
+        .await
+        .unwrap();
+    // The runtime may still be bringing the cache up; migrations need it
+    // available.
+    for _ in 0..120 {
+        let caches = client
+            .describe_serverless_caches()
+            .serverless_cache_name("mig1")
+            .send()
+            .await
+            .unwrap();
+        if caches.serverless_caches()[0].status() == Some("available") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let name = ("ServerlessCacheName", "mig1");
+    let (status, xml) = elasticache_post(
+        &server,
+        "PrepareMigration",
+        &[
+            name,
+            ("CustomerNodeEndpointList.member.1.Address", "10.0.0.1"),
+            ("CustomerNodeEndpointList.member.1.Port", "6379"),
+            ("SourceTlsConfiguration.SourceTlsMode", "none"),
+        ],
+    )
+    .await;
+    assert!(status.is_success(), "{xml}");
+    assert!(
+        xml.contains("<Migration><Status>prepared</Status>"),
+        "{xml}"
+    );
+
+    // StartMigration by ServerlessCacheName, then pause it.
+    let (status, xml) = elasticache_post(&server, "StartMigration", &[name]).await;
+    assert!(status.is_success(), "{xml}");
+    assert!(xml.contains("<Status>syncing</Status>"), "{xml}");
+    let (status, xml) = elasticache_post(&server, "StopMigration", &[name]).await;
+    assert!(status.is_success(), "{xml}");
+    assert!(xml.contains("<Status>stopped</Status>"), "{xml}");
+    let (status, xml) = elasticache_post(&server, "StopMigration", &[name]).await;
+    assert_eq!(status, 400, "{xml}");
+    assert!(xml.contains("InvalidServerlessCacheStateFault"), "{xml}");
+
+    // Restart with ClearTargetCacheData, then cut over.
+    let (status, xml) = elasticache_post(
+        &server,
+        "StartMigration",
+        &[name, ("ClearTargetCacheData", "true")],
+    )
+    .await;
+    assert!(status.is_success(), "{xml}");
+    let (status, xml) = elasticache_post(&server, "CompleteMigration", &[name]).await;
+    assert!(status.is_success(), "{xml}");
+    assert!(xml.contains("<ServerlessCache>"), "{xml}");
+    assert!(xml.contains("<Status>completed</Status>"), "{xml}");
+
+    // The summary is visible through the SDK's DescribeServerlessCaches.
+    let described = client
+        .describe_serverless_caches()
+        .serverless_cache_name("mig1")
+        .send()
+        .await
+        .unwrap();
+    assert!(described.serverless_caches()[0].status().is_some());
+
+    let (status, xml) = elasticache_post(
+        &server,
+        "StopMigration",
+        &[("ServerlessCacheName", "ghost")],
+    )
+    .await;
+    assert_eq!(status, 404, "{xml}");
+    assert!(xml.contains("ServerlessCacheNotFoundFault"), "{xml}");
+}
