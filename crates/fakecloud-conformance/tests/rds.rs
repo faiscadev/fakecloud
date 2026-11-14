@@ -2249,3 +2249,154 @@ async fn rds_closure_routes_exist() {
     rds_route(&server, "DisableHttpEndpoint", &[("ResourceArn", "x")]).await;
     rds_route(&server, "EnableHttpEndpoint", &[("ResourceArn", "x")]).await;
 }
+
+async fn rds_ok(server: &TestServer, action: &str, params: &[(&str, &str)]) -> String {
+    let resp = rds_post(server, action, params).await;
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    assert!(status.is_success(), "{action} failed: {status} {text}");
+    text
+}
+
+fn xml_field(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let start = xml
+        .find(&open)
+        .unwrap_or_else(|| panic!("no <{tag}> in {xml}"))
+        + open.len();
+    let end = xml[start..].find(&format!("</{tag}>")).unwrap() + start;
+    xml[start..end].to_string()
+}
+
+#[test_action("rds", "CreateDBCapacityReservation", checksum = "0ac92b58")]
+#[test_action("rds", "DescribeDBCapacityReservations", checksum = "5a513d96")]
+#[test_action("rds", "ModifyDBCapacityReservation", checksum = "8a53ae36")]
+#[test_action("rds", "CancelDBCapacityReservation", checksum = "94c5cab9")]
+#[tokio::test]
+async fn rds_db_capacity_reservation_lifecycle() {
+    let server = TestServer::start().await;
+    let created = rds_ok(
+        &server,
+        "CreateDBCapacityReservation",
+        &[
+            ("DBCapacityReservationName", "my-mysql-reservation"),
+            ("DBInstanceClass", "db.m5.large"),
+            ("Engine", "mysql"),
+            ("CapacityPerAvailabilityZone", "2"),
+            ("AvailabilityZones.AvailabilityZone.1", "us-east-1a"),
+            ("AvailabilityZones.AvailabilityZone.2", "us-east-1b"),
+            ("Tags.Tag.1.Key", "team"),
+            ("Tags.Tag.1.Value", "db"),
+        ],
+    )
+    .await;
+    let id = xml_field(&created, "DBCapacityReservationIdentifier");
+    assert!(id.starts_with("dbcr-"), "{created}");
+    assert!(created.contains("<State>active</State>"), "{created}");
+    assert!(
+        created.contains("<AvailabilityZone>us-east-1b</AvailabilityZone><AvailableCapacity>2</AvailableCapacity>"),
+        "{created}"
+    );
+    let arn = xml_field(&created, "DBCapacityReservationArn");
+    assert!(
+        arn.ends_with(&format!(":db-capacity-reservation:{id}")),
+        "{arn}"
+    );
+
+    // Names are unique.
+    let dup = rds_post(
+        &server,
+        "CreateDBCapacityReservation",
+        &[
+            ("DBCapacityReservationName", "my-mysql-reservation"),
+            ("DBInstanceClass", "db.m5.large"),
+            ("Engine", "mysql"),
+            ("CapacityPerAvailabilityZone", "1"),
+            ("AvailabilityZones.AvailabilityZone.1", "us-east-1a"),
+        ],
+    )
+    .await;
+    assert_eq!(dup.status(), 400);
+    assert!(dup
+        .text()
+        .await
+        .unwrap()
+        .contains("DBCapacityReservationAlreadyExists"));
+
+    // Describe by name and by filter.
+    let by_name = rds_ok(
+        &server,
+        "DescribeDBCapacityReservations",
+        &[("DBCapacityReservationIdentifier", "my-mysql-reservation")],
+    )
+    .await;
+    assert!(by_name.contains(&id), "{by_name}");
+    let filtered = rds_ok(
+        &server,
+        "DescribeDBCapacityReservations",
+        &[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "postgres"),
+        ],
+    )
+    .await;
+    assert!(!filtered.contains(&id), "{filtered}");
+
+    let tags = rds_ok(&server, "ListTagsForResource", &[("ResourceName", &arn)]).await;
+    assert!(tags.contains("<Key>team</Key>"), "{tags}");
+
+    let modified = rds_ok(
+        &server,
+        "ModifyDBCapacityReservation",
+        &[
+            ("DBCapacityReservationIdentifier", &id),
+            ("CapacityPerAvailabilityZone", "3"),
+            ("EndDateType", "limited"),
+            ("EndDate", "2099-12-31T23:59:59Z"),
+        ],
+    )
+    .await;
+    assert!(
+        modified.contains(
+            "<ReservedCapacityPerAvailabilityZone>3</ReservedCapacityPerAvailabilityZone>"
+        ),
+        "{modified}"
+    );
+    assert!(
+        modified.contains("<EndDate>2099-12-31T23:59:59.000Z</EndDate>"),
+        "{modified}"
+    );
+
+    let cancelled = rds_ok(
+        &server,
+        "CancelDBCapacityReservation",
+        &[("DBCapacityReservationIdentifier", &id)],
+    )
+    .await;
+    assert!(
+        cancelled.contains("<State>cancelled</State>"),
+        "{cancelled}"
+    );
+    assert!(
+        cancelled.contains("<AvailableCapacity>0</AvailableCapacity>"),
+        "{cancelled}"
+    );
+    let again = rds_post(
+        &server,
+        "CancelDBCapacityReservation",
+        &[("DBCapacityReservationIdentifier", &id)],
+    )
+    .await;
+    assert!(again
+        .text()
+        .await
+        .unwrap()
+        .contains("InvalidDBCapacityReservationState"));
+    let missing = rds_post(
+        &server,
+        "DescribeDBCapacityReservations",
+        &[("DBCapacityReservationIdentifier", "nope")],
+    )
+    .await;
+    assert_eq!(missing.status(), 404);
+}

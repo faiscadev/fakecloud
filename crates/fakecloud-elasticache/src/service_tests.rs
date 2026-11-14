@@ -1329,6 +1329,7 @@ fn service_with_serverless_cache(cache_name: &str) -> ElastiCacheService {
                 container_id: "cid".to_string(),
                 host_port: 6379,
                 data_volume: None,
+                migration: None,
             },
         );
     }
@@ -2119,6 +2120,7 @@ fn describe_serverless_caches_returns_all() {
                 container_id: "cid".to_string(),
                 host_port: 6380,
                 data_volume: None,
+                migration: None,
             },
         );
     }
@@ -4741,15 +4743,242 @@ fn copy_serverless_snapshot_unknown_source_errors() {
     assert_eq!(err.code(), "ServerlessCacheSnapshotNotFoundFault");
 }
 
-#[test]
-fn migration_ops_unknown_replication_group_errors() {
+#[tokio::test]
+async fn migration_ops_unknown_replication_group_errors() {
     let svc = fresh_service();
     let req = request("StartMigration", &[("ReplicationGroupId", "ghost")]);
-    let err = match svc.start_migration(&req) {
+    let err = match svc.start_migration(&req).await {
         Err(e) => e,
         Ok(_) => panic!("expected error"),
     };
     assert_eq!(err.code(), "ReplicationGroupNotFoundFault");
+}
+
+async fn migration_call(
+    svc: &ElastiCacheService,
+    action: &str,
+    params: &[(&str, &str)],
+) -> Result<String, AwsServiceError> {
+    svc.handle(request(action, params))
+        .await
+        .map(|resp| String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap())
+}
+
+const SOURCE: [(&str, &str); 2] = [
+    ("CustomerNodeEndpointList.member.1.Address", "10.0.0.5"),
+    ("CustomerNodeEndpointList.member.1.Port", "6379"),
+];
+
+#[tokio::test]
+async fn serverless_migration_lifecycle() {
+    let svc = service_with_serverless_cache("sc1");
+    let name = ("ServerlessCacheName", "sc1");
+
+    // Nothing to start, stop or complete before PrepareMigration.
+    for action in ["StartMigration", "StopMigration", "CompleteMigration"] {
+        let err = migration_call(&svc, action, &[name]).await.unwrap_err();
+        assert_eq!(
+            err.code(),
+            "ServerlessCacheNotUnderMigrationFault",
+            "{action}"
+        );
+    }
+
+    let mut prep = vec![name];
+    prep.extend(SOURCE);
+    prep.push(("SourceTlsConfiguration.SourceTlsMode", "none"));
+    let xml = migration_call(&svc, "PrepareMigration", &prep)
+        .await
+        .unwrap();
+    assert!(
+        xml.contains("<Migration><Status>prepared</Status>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<MigrationEndpoint><Address>"), "{xml}");
+    assert!(!xml.contains("<CutoverMode>"), "{xml}");
+    let err = migration_call(&svc, "PrepareMigration", &prep)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "ServerlessCacheAlreadyUnderMigrationFault");
+
+    // Not syncing yet: stop is refused, complete needs Force.
+    let err = migration_call(&svc, "StopMigration", &[name])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidServerlessCacheStateFault");
+    let err = migration_call(&svc, "CompleteMigration", &[name])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MigrationHealthFault");
+
+    let xml = migration_call(&svc, "StartMigration", &[name])
+        .await
+        .unwrap();
+    assert!(xml.contains("<Status>syncing</Status>"), "{xml}");
+    assert!(xml.contains("<CutoverMode>manual</CutoverMode>"), "{xml}");
+    let err = migration_call(&svc, "StartMigration", &[name])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidServerlessCacheStateFault");
+
+    let xml = migration_call(&svc, "StopMigration", &[name])
+        .await
+        .unwrap();
+    assert!(xml.contains("<Status>stopped</Status>"), "{xml}");
+    // A stopped migration only restarts with ClearTargetCacheData.
+    let err = migration_call(&svc, "StartMigration", &[name])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterCombination");
+    // Deleting the cache mid-migration is refused.
+    let err = migration_call(&svc, "DeleteServerlessCache", &[name])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidServerlessCacheStateFault");
+    migration_call(
+        &svc,
+        "StartMigration",
+        &[name, ("ClearTargetCacheData", "true")],
+    )
+    .await
+    .unwrap();
+
+    let xml = migration_call(&svc, "CompleteMigration", &[name])
+        .await
+        .unwrap();
+    assert!(
+        xml.contains("<CompleteMigrationResult><ServerlessCache>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<Status>completed</Status>"), "{xml}");
+    let described = migration_call(&svc, "DescribeServerlessCaches", &[name])
+        .await
+        .unwrap();
+    assert!(
+        described.contains("<Migration><Status>completed</Status>"),
+        "{described}"
+    );
+
+    // A finished migration can be followed by a new one; AutoCutover
+    // completes it as soon as the sync starts.
+    migration_call(&svc, "PrepareMigration", &prep)
+        .await
+        .unwrap();
+    let xml = migration_call(&svc, "StartMigration", &[name, ("AutoCutover", "true")])
+        .await
+        .unwrap();
+    assert!(xml.contains("<Status>completed</Status>"), "{xml}");
+    assert!(xml.contains("<CutoverMode>auto</CutoverMode>"), "{xml}");
+
+    // Force abandons a migration whose sync never started.
+    migration_call(&svc, "PrepareMigration", &prep)
+        .await
+        .unwrap();
+    let xml = migration_call(&svc, "CompleteMigration", &[name, ("Force", "true")])
+        .await
+        .unwrap();
+    assert!(xml.contains("<Status>cancelled</Status>"), "{xml}");
+    migration_call(&svc, "DeleteServerlessCache", &[name])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn serverless_migration_validates_input() {
+    let svc = service_with_serverless_cache("sc1");
+    let name = ("ServerlessCacheName", "sc1");
+    let err = migration_call(&svc, "PrepareMigration", &[name])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterValue");
+    let two = [
+        name,
+        ("CustomerNodeEndpointList.member.1.Address", "10.0.0.5"),
+        ("CustomerNodeEndpointList.member.2.Address", "10.0.0.6"),
+    ];
+    let err = migration_call(&svc, "PrepareMigration", &two)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterValue");
+    let mut bad_tls = vec![name];
+    bad_tls.extend(SOURCE);
+    bad_tls.push(("SourceTlsConfiguration.SourceTlsMode", "verify-ca"));
+    let err = migration_call(&svc, "PrepareMigration", &bad_tls)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterValue");
+    let mut bad_secret = vec![name];
+    bad_secret.extend(SOURCE);
+    bad_secret.push((
+        "SourceAuthenticationConfiguration.SecretManagerConfig.SecretArn",
+        "not-an-arn",
+    ));
+    let err = migration_call(&svc, "PrepareMigration", &bad_secret)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterValue");
+    let mut ghost = vec![("ServerlessCacheName", "ghost")];
+    ghost.extend(SOURCE);
+    let err = migration_call(&svc, "PrepareMigration", &ghost)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "ServerlessCacheNotFoundFault");
+
+    // Exactly one of ReplicationGroupId / ServerlessCacheName.
+    let err = migration_call(&svc, "StartMigration", &[])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterCombination");
+    let err = migration_call(
+        &svc,
+        "CompleteMigration",
+        &[name, ("ReplicationGroupId", "rg")],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterCombination");
+
+    // The serverless sync uses the PrepareMigration endpoint only.
+    let mut prep = vec![name];
+    prep.extend(SOURCE);
+    migration_call(&svc, "PrepareMigration", &prep)
+        .await
+        .unwrap();
+    let err = migration_call(&svc, "StartMigration", &prep)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterCombination");
+}
+
+#[tokio::test]
+async fn replication_group_migration_refuses_a_second_start() {
+    let svc = service_with_replication_group("rg1", 1);
+    let mut params = vec![("ReplicationGroupId", "rg1")];
+    params.extend(SOURCE);
+    migration_call(&svc, "StartMigration", &params)
+        .await
+        .unwrap();
+    let err = migration_call(&svc, "StartMigration", &params)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "ReplicationGroupAlreadyUnderMigrationFault");
+    let err = migration_call(
+        &svc,
+        "StartMigration",
+        &[
+            ("ReplicationGroupId", "rg1"),
+            ("ClearTargetCacheData", "true"),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterCombination");
+    migration_call(&svc, "CompleteMigration", &[("ReplicationGroupId", "rg1")])
+        .await
+        .unwrap();
+    migration_call(&svc, "StartMigration", &params)
+        .await
+        .unwrap();
 }
 
 // ── cache cluster create field round-trip (N2) ──

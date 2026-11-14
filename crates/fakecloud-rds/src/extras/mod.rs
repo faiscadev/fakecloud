@@ -2405,15 +2405,90 @@ impl RdsService {
             "DescribeDBSecurityGroups" => list_extras_xml(self, &aid, "security_groups", "DBSecurityGroups", "DBSecurityGroup", "DescribeDBSecurityGroups", security_group_xml, &rid),
 
             // ── Option groups ──
-            "CreateOptionGroup" | "CopyOptionGroup" => {
-                let name = get_param(req, "OptionGroupName").or_else(|| get_param(req, "TargetOptionGroupIdentifier"))
-                    .ok_or_else(|| missing("OptionGroupName"))?;
+            "CreateOptionGroup" => {
+                let name = get_param(req, "OptionGroupName").ok_or_else(|| missing("OptionGroupName"))?;
                 let arn = rds_arn(region, &aid, "og", &name);
                 let entry = json!({"OptionGroupName": name, "OptionGroupArn": arn, "EngineName": get_param(req, "EngineName").unwrap_or_else(|| "mysql".to_string()), "MajorEngineVersion": get_param(req, "MajorEngineVersion").unwrap_or_else(|| "8.0".to_string()), "OptionGroupDescription": get_param(req, "OptionGroupDescription").unwrap_or_default()});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "option_groups").insert(name.clone(), entry.clone());
-                Ok(xml_response(action.as_str(), option_group_xml(&entry), &rid))
+                Ok(xml_response(
+                    action.as_str(),
+                    format!("    <OptionGroup>\n{}\n    </OptionGroup>", option_group_xml(&entry)),
+                    &rid,
+                ))
+            }
+            "CopyOptionGroup" => {
+                let source = get_param(req, "SourceOptionGroupIdentifier")
+                    .ok_or_else(|| missing("SourceOptionGroupIdentifier"))?;
+                let target = get_param(req, "TargetOptionGroupIdentifier")
+                    .ok_or_else(|| missing("TargetOptionGroupIdentifier"))?;
+                let description = get_param(req, "TargetOptionGroupDescription").unwrap_or_default();
+                let tags = crate::service::service_helpers::parse_tags(req)?;
+                // The source is a name, or an ARN (which may name another
+                // account or Region).
+                let source_arn_parts = source.parse::<Arn>().ok();
+                let source_name = normalized_identifier(Some(source.clone()), "og")
+                    .unwrap_or_else(|| source.clone());
+                let source_account = source_arn_parts
+                    .as_ref()
+                    .map(|a| a.account_id.clone())
+                    .filter(|a| !a.is_empty())
+                    .unwrap_or_else(|| aid.clone());
+                let source_region = source_arn_parts
+                    .as_ref()
+                    .map(|a| a.region.clone())
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or_else(|| region.to_string());
+                let not_found = || {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "OptionGroupNotFoundFault",
+                        format!("OptionGroup {source} not found."),
+                    )
+                };
+                let mut accounts = write_state!();
+                let source_group = accounts
+                    .get(&source_account)
+                    .and_then(|s| s.extras.get("option_groups"))
+                    .and_then(|m| m.get(&source_name))
+                    .cloned()
+                    .ok_or_else(not_found)?;
+                let state = accounts.get_or_create(&aid);
+                let groups = store(&mut state.extras, "option_groups");
+                if groups.contains_key(&target) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "OptionGroupAlreadyExistsFault",
+                        format!("OptionGroup {target} already exists."),
+                    ));
+                }
+                let mut entry = json!({
+                    "OptionGroupName": target,
+                    "OptionGroupArn": rds_arn(region, &aid, "og", &target),
+                    "EngineName": source_group["EngineName"],
+                    "MajorEngineVersion": source_group["MajorEngineVersion"],
+                    "OptionGroupDescription": description,
+                    "Options": source_group.get("Options").cloned().unwrap_or_else(|| json!([])),
+                    "SourceRegion": source_region,
+                });
+                if source_account != aid {
+                    entry["SourceOptionGroup"] = source_group["OptionGroupArn"].clone();
+                    entry["SourceAccountId"] = json!(source_account);
+                    entry["CopyTimestamp"] = json!(chrono::Utc::now().to_rfc3339());
+                }
+                if !tags.is_empty() {
+                    entry["Tags"] = json!(tags
+                        .iter()
+                        .map(|t| json!({"Key": t.key, "Value": t.value}))
+                        .collect::<Vec<_>>());
+                }
+                groups.insert(target, entry.clone());
+                Ok(xml_response(
+                    "CopyOptionGroup",
+                    format!("    <OptionGroup>\n{}\n    </OptionGroup>", option_group_xml(&entry)),
+                    &rid,
+                ))
             }
             "ModifyOptionGroup" => {
                 let name = get_param(req, "OptionGroupName").ok_or_else(|| missing("OptionGroupName"))?;
@@ -2511,7 +2586,14 @@ impl RdsService {
                     &rid,
                 ))
             }
-            "DescribeOptionGroupOptions" => Ok(xml_response("DescribeOptionGroupOptions", "    <OptionGroupOptions/>".to_string(), &rid)),
+            "DescribeOptionGroupOptions" => Ok(xml_response(
+                "DescribeOptionGroupOptions",
+                option_group_options_xml(
+                    get_param(req, "EngineName").as_deref().unwrap_or_default(),
+                    get_param(req, "MajorEngineVersion").as_deref(),
+                ),
+                &rid,
+            )),
 
             // ── Event subscriptions ──
             "CreateEventSubscription" => {
@@ -3587,6 +3669,26 @@ impl RdsService {
                 let request_tags = crate::service::service_helpers::parse_tags(req)?;
                 let copy_source_tags =
                     optional_flag(get_param(req, "CopyTags").as_deref()) == Some(true);
+                let copy_option_group =
+                    optional_flag(get_param(req, "CopyOptionGroup").as_deref()) == Some(true);
+                // `TagSpecifications` entries of ResourceType `og` tag the
+                // copied option group (the only type CopyDBSnapshot takes).
+                let option_group_tags: Vec<crate::state::RdsTag> = (1..)
+                    .map_while(|i| {
+                        get_param(req, &format!("TagSpecifications.item.{i}.ResourceType"))
+                            .map(|kind| (i, kind))
+                    })
+                    .filter(|(_, kind)| kind == "og")
+                    .flat_map(|(i, _)| {
+                        (1..).map_while(move |j| {
+                            let prefix = format!("TagSpecifications.item.{i}.Tags.Tag.{j}");
+                            get_param(req, &format!("{prefix}.Key")).map(|key| crate::state::RdsTag {
+                                key,
+                                value: get_param(req, &format!("{prefix}.Value")).unwrap_or_default(),
+                            })
+                        })
+                    })
+                    .collect();
                 // Reported as the key's ARN: resolved through KMS before the
                 // RDS lock, or formatted as one when KMS doesn't know it.
                 // Only for a copy that can succeed (the target is free and the
@@ -3663,6 +3765,35 @@ impl RdsService {
                                 crate::service::service_helpers::db_snapshot_not_found(&source_id)
                             })?,
                     };
+                    // CopyOptionGroup: a snapshot copied from another
+                    // account brings the option group it references along,
+                    // under the same name, tagged with the `og`
+                    // TagSpecifications. Within one account and Region the
+                    // group is already there, so nothing is copied.
+                    let source_account = source_owner.clone().unwrap_or_else(|| aid.clone());
+                    if copy_option_group && source_account != aid {
+                        if let Some(og_name) = snapshot.option_group_name.clone() {
+                            let source_group = accounts
+                                .get(&source_account)
+                                .and_then(|s| s.extras.get("option_groups"))
+                                .and_then(|m| m.get(&og_name))
+                                .cloned();
+                            let groups = store(&mut accounts.get_or_create(&aid).extras, "option_groups");
+                            if let (Some(source_group), false) = (source_group, groups.contains_key(&og_name)) {
+                                let mut copied = source_group.clone();
+                                copied["OptionGroupArn"] = json!(rds_arn(region, &aid, "og", &og_name));
+                                copied["SourceOptionGroup"] = source_group["OptionGroupArn"].clone();
+                                copied["SourceAccountId"] = json!(source_account);
+                                copied["SourceRegion"] = json!(region);
+                                copied["CopyTimestamp"] = json!(chrono::Utc::now().to_rfc3339());
+                                copied["Tags"] = json!(option_group_tags
+                                    .iter()
+                                    .map(|t| json!({"Key": t.key, "Value": t.value}))
+                                    .collect::<Vec<_>>());
+                                groups.insert(og_name, copied);
+                            }
+                        }
+                    }
                     let state = accounts.get_or_create(&aid);
                     let arn = state.db_snapshot_arn(region, &target_id);
                     // Recorded before the copy's own ARN overwrites it:
@@ -4714,6 +4845,12 @@ mod parse;
 #[cfg(test)]
 mod tests;
 mod xml_renderers;
+
+/// The DescribeOptionGroupOptions catalog rendering, for crate tests.
+#[cfg(test)]
+pub(crate) fn option_group_options_xml_for_tests(engine: &str, major: Option<&str>) -> String {
+    option_group_options_xml(engine, major)
+}
 use cluster_actions::*;
 use parse::*;
 use xml_renderers::*;

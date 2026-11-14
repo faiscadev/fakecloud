@@ -139,6 +139,7 @@ impl ElastiCacheService {
             container_id: String::new(),
             host_port: 0,
             data_volume: Some(fakecloud_core::data_volume::DataVolumeBinding::Scoped),
+            migration: None,
         };
 
         let xml = serverless_cache_xml(&cache);
@@ -312,6 +313,21 @@ impl ElastiCacheService {
         let cache = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            if let Some(m) = state
+                .serverless_caches
+                .get(&serverless_cache_name)
+                .and_then(|c| c.migration.as_ref())
+                .filter(|m| m.is_active())
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidServerlessCacheStateFault",
+                    format!(
+                        "ServerlessCache {serverless_cache_name} has a migration in progress ({}); complete it before deleting the cache.",
+                        m.status
+                    ),
+                ));
+            }
             let cache = state
                 .serverless_caches
                 .remove(&serverless_cache_name)

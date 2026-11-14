@@ -55,6 +55,46 @@ fn serverless_v2_scaling(scaling: Option<&ServerlessV2Scaling>) -> String {
     )
 }
 
+/// `<ServerlessV2PlatformVersion>` for a serverless cluster: the engine's
+/// default platform version (the one new serverless clusters run on).
+/// Omitted for a provisioned cluster.
+fn serverless_v2_platform(c: &DbCluster) -> String {
+    if c.serverless_v2_scaling.is_none() {
+        return String::new();
+    }
+    crate::state::default_serverless_v2_platform_version(&c.engine)
+        .map(|p| {
+            format!(
+                "<ServerlessV2PlatformVersion>{}</ServerlessV2PlatformVersion>",
+                p.version
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// One `<ServerlessV2PlatformVersionInfo>` element.
+pub(crate) fn serverless_v2_platform_version_info(
+    p: &crate::state::ServerlessV2PlatformVersion,
+) -> String {
+    format!(
+        "<ServerlessV2PlatformVersionInfo>\
+         <ServerlessV2PlatformVersion>{v}</ServerlessV2PlatformVersion>\
+         <ServerlessV2PlatformVersionDescription>{d}</ServerlessV2PlatformVersionDescription>\
+         <Engine>{e}</Engine>\
+         <ServerlessV2FeaturesSupport><MinCapacity>{min}</MinCapacity><MaxCapacity>{max}</MaxCapacity></ServerlessV2FeaturesSupport>\
+         <Status>{s}</Status>\
+         <IsDefault>{def}</IsDefault>\
+         </ServerlessV2PlatformVersionInfo>",
+        v = xml_escape(p.version),
+        d = xml_escape(p.description),
+        e = xml_escape(p.engine),
+        min = p.min_capacity,
+        max = p.max_capacity,
+        s = p.status,
+        def = p.is_default,
+    )
+}
+
 pub(crate) fn db_cluster(c: &DbCluster) -> String {
     let azs = string_list(
         "AvailabilityZones",
@@ -144,7 +184,8 @@ pub(crate) fn db_cluster(c: &DbCluster) -> String {
         pbw = xml_escape(&c.preferred_backup_window),
         pmw = xml_escape(&c.preferred_maintenance_window),
         st = xml_escape(&c.storage_type),
-        serverless = serverless_v2_scaling(c.serverless_v2_scaling.as_ref()),
+        serverless =
+            serverless_v2_scaling(c.serverless_v2_scaling.as_ref()) + &serverless_v2_platform(c),
         cct = ts(&c.cluster_create_time),
     )
 }

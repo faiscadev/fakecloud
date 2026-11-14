@@ -998,6 +998,7 @@ mod tests {
                 domain_dns_ips: Vec::new(),
                 db_cluster_identifier: None,
                 activity_stream: None,
+                capacity_reservation: None,
             },
         );
 

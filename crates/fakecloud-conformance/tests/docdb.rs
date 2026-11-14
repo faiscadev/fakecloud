@@ -70,3 +70,74 @@ use helpers::TestServer;
 async fn docdb_probe() {
     let _server = TestServer::start().await;
 }
+
+/// DocumentDB shares the `rds` SigV4 scope and endpoint; the `api/docdb`
+/// user-agent token is what routes a request to DocumentDB.
+async fn docdb_post(server: &TestServer, action: &str, params: &[(&str, &str)]) -> String {
+    let mut body = format!("Action={action}&Version=2014-10-31");
+    for (k, v) in params {
+        body.push_str(&format!("&{k}={v}"));
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/rds/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .header("user-agent", "aws-sdk-rust/1.0 api/docdb/1.0")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    assert!(status.is_success(), "{action} failed: {status} {text}");
+    text
+}
+
+#[test_action("docdb", "DescribeServerlessV2PlatformVersions", checksum = "09479f4f")]
+#[tokio::test]
+async fn docdb_describe_serverless_v2_platform_versions() {
+    let server = TestServer::start().await;
+    let xml = docdb_post(
+        &server,
+        "DescribeServerlessV2PlatformVersions",
+        &[("Engine", "docdb"), ("DefaultOnly", "true")],
+    )
+    .await;
+    assert!(
+        xml.contains("<DescribeServerlessV2PlatformVersionsResult>"),
+        "{xml}"
+    );
+    assert_eq!(
+        xml.matches("<ServerlessV2PlatformVersionInfo>").count(),
+        1,
+        "{xml}"
+    );
+    assert!(xml.contains("<IsDefault>true</IsDefault>"), "{xml}");
+
+    docdb_post(
+        &server,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "sls"),
+            ("Engine", "docdb"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "password123"),
+            ("ServerlessV2ScalingConfiguration.MinCapacity", "0.5"),
+            ("ServerlessV2ScalingConfiguration.MaxCapacity", "4"),
+        ],
+    )
+    .await;
+    let clusters = docdb_post(
+        &server,
+        "DescribeDBClusters",
+        &[("DBClusterIdentifier", "sls")],
+    )
+    .await;
+    assert!(
+        clusters.contains("<ServerlessV2PlatformVersion>2</ServerlessV2PlatformVersion>"),
+        "{clusters}"
+    );
+}
