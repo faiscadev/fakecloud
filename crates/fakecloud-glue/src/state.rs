@@ -92,6 +92,17 @@ pub struct GlueState {
     pub jobs: BTreeMap<String, Job>,
     #[serde(default)]
     pub job_runs: BTreeMap<String, JobRun>,
+    /// Auto-upgrade analyses of `GlueVersion=auto` jobs, keyed by analysis id.
+    #[serde(default)]
+    pub job_upgrade_analyses: BTreeMap<String, JobUpgradeAnalysis>,
+    /// Data quality results published through PublishDataQualityResultV2,
+    /// keyed by result id.
+    #[serde(default)]
+    pub dq_results_v2: JsonStore,
+    /// PublishDataQualityResultV2 idempotency: client token -> the result id
+    /// it created and the request it was created from.
+    #[serde(default)]
+    pub dq_results_v2_tokens: JsonStore,
 
     // --- generic JSON-backed control-plane resource families ---
     #[serde(default)]
@@ -263,6 +274,24 @@ pub struct Job {
     pub job_mode: Option<String>,
     #[serde(default)]
     pub job_run_queuing_enabled: Option<bool>,
+    /// The job's current auto-upgrade analysis, while `GlueVersion` is `auto`.
+    #[serde(default)]
+    pub auto_upgrade_analysis_id: Option<String>,
+}
+
+/// An auto-upgrade analysis of a job configured with `GlueVersion=auto`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobUpgradeAnalysis {
+    pub analysis_id: String,
+    pub job_name: String,
+    /// `Status` enum: OBSERVING, WAITING_FOR_CONSENT, UPGRADING, SUCCEEDED,
+    /// FAILED, TIMEOUT, STOPPED.
+    pub status: String,
+    pub source_version: Option<String>,
+    pub target_version: String,
+    pub started_on: DateTime<Utc>,
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

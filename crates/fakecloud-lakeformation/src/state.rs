@@ -145,6 +145,80 @@ pub struct LakeFormationState {
     /// Governed-table object lists keyed by `catalog\u{1}db\u{1}table`.
     #[serde(default)]
     pub table_objects: BTreeMap<String, Vec<Value>>,
+    /// Row-level security policies keyed by name (unique within the
+    /// account's Data Catalog).
+    #[serde(default)]
+    pub rls_policies: BTreeMap<String, RLSPolicyRecord>,
+    /// Row-level security policy attachments, in attach order.
+    #[serde(default)]
+    pub rls_policy_attachments: Vec<RLSPolicyAttachmentRecord>,
+}
+
+/// A row-level security policy (CreateRLSPolicy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLSPolicyRecord {
+    pub name: String,
+    /// The `AttachmentColumns` list of `Column` structures, stored verbatim.
+    pub attachment_columns: Vec<Value>,
+    pub filter_expression: String,
+}
+
+/// The attachment of an RLS policy to a table for a principal (AttachRLSPolicy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLSPolicyAttachmentRecord {
+    pub policy_name: String,
+    pub resource: Value,
+    pub principal: Option<Value>,
+    pub condition: Option<Value>,
+    /// Whether this attachment is the resource's default RLS policy.
+    pub default: bool,
+}
+
+impl LakeFormationState {
+    /// The default row-level security policy attached to a Glue table (the
+    /// attachment made with `SetDefault`), read by Glue's
+    /// `Table.RLSProperties`. A resource's catalog defaults to `account_id`.
+    pub fn default_rls_policy(
+        &self,
+        account_id: &str,
+        catalog_id: &str,
+        database: &str,
+        table: &str,
+    ) -> Option<String> {
+        self.rls_policy_attachments
+            .iter()
+            .filter(|a| a.default)
+            .find(|a| {
+                let Some(t) = a
+                    .resource
+                    .get("Table")
+                    .or_else(|| a.resource.get("TableWithColumns"))
+                else {
+                    return false;
+                };
+                let s = |k: &str| t.get(k).and_then(Value::as_str);
+                s("CatalogId").unwrap_or(account_id) == catalog_id
+                    && s("DatabaseName") == Some(database)
+                    && s("Name") == Some(table)
+            })
+            .map(|a| a.policy_name.clone())
+    }
+
+    /// Whether an `s3://bucket/prefix` location is covered by a registered
+    /// data-lake resource (`arn:<partition>:s3:::bucket[/prefix]`).
+    pub fn location_registered(&self, location: &str) -> bool {
+        let Some(path) = location.strip_prefix("s3://") else {
+            return false;
+        };
+        let path = path.trim_end_matches('/');
+        self.resources.keys().any(|arn| {
+            let Some((_, registered)) = arn.split_once(":s3:::") else {
+                return false;
+            };
+            let registered = registered.trim_end_matches('/');
+            path == registered || path.starts_with(&format!("{registered}/"))
+        })
+    }
 }
 
 impl AccountState for LakeFormationState {

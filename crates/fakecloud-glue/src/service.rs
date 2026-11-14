@@ -39,6 +39,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "BatchGetCrawlers",
     "BatchGetCustomEntityTypes",
     "BatchGetDataQualityResult",
+    "BatchGetDataQualityResultV2",
     "BatchGetDataQualityRulesetEvaluationRun",
     "BatchGetDevEndpoints",
     "BatchGetJobs",
@@ -148,6 +149,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetDataQualityModel",
     "GetDataQualityModelResult",
     "GetDataQualityResult",
+    "GetDataQualityResultV2",
     "GetDataQualityRuleRecommendationRun",
     "GetDataQualityRuleset",
     "GetDataQualityRulesetEvaluationRun",
@@ -161,6 +163,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetJobBookmark",
     "GetJobRun",
     "GetJobRuns",
+    "GetJobUpgradeAnalysis",
     "GetJobs",
     "GetMapping",
     "GetMaterializedViewRefreshTaskRun",
@@ -212,6 +215,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListCrawls",
     "ListCustomEntityTypes",
     "ListDataQualityResults",
+    "ListDataQualityResultsV2",
     "ListDataQualityRuleRecommendationRuns",
     "ListDataQualityRulesetEvaluationRuns",
     "ListDataQualityRulesets",
@@ -235,6 +239,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListWorkflows",
     "ModifyIntegration",
     "PutDataCatalogEncryptionSettings",
+    "PublishDataQualityResultV2",
     "PutDataQualityProfileAnnotation",
     "PutResourcePolicy",
     "PutSchemaVersionMetadata",
@@ -257,6 +262,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "StartExportLabelsTaskRun",
     "StartImportLabelsTaskRun",
     "StartJobRun",
+    "StartJobUpgradeAnalysis",
     "StartMaterializedViewRefreshTaskRun",
     "StartMLEvaluationTaskRun",
     "StartMLLabelingSetGenerationTaskRun",
@@ -266,6 +272,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "StopColumnStatisticsTaskRunSchedule",
     "StopCrawler",
     "StopCrawlerSchedule",
+    "StopJobUpgradeAnalysis",
     "StopMaterializedViewRefreshTaskRun",
     "StopSession",
     "StopTrigger",
@@ -338,6 +345,7 @@ pub struct GlueService {
     pub(crate) state: SharedGlueState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    pub(crate) external: Option<Arc<dyn crate::external::GlueExternalView>>,
 }
 
 impl GlueService {
@@ -346,6 +354,27 @@ impl GlueService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            external: None,
+        }
+    }
+
+    /// Wire the Lake Formation / S3 view Glue reads RLS defaults, registered
+    /// locations and resource timestamps from.
+    pub fn with_external_view(mut self, view: Arc<dyn crate::external::GlueExternalView>) -> Self {
+        self.external = Some(view);
+        self
+    }
+
+    /// Add `RLSProperties` to a rendered table when Lake Formation has a
+    /// default row-level security policy attached to it.
+    pub(crate) fn decorate_table(&self, account_id: &str, tj: &mut Value) {
+        let Some(view) = &self.external else { return };
+        let catalog = tj["CatalogId"].as_str().unwrap_or(account_id).to_string();
+        let (Some(db), Some(name)) = (tj["DatabaseName"].as_str(), tj["Name"].as_str()) else {
+            return;
+        };
+        if let Some(policy) = view.default_rls_policy(account_id, &catalog, db, name) {
+            tj["RLSProperties"] = json!({ "DefaultRLSPolicy": policy });
         }
     }
 
@@ -728,6 +757,13 @@ impl AwsService for GlueService {
             }
             "StartTrigger" => self.start_trigger(&req),
             "StartWorkflowRun" => self.start_workflow_run(&req),
+            "PublishDataQualityResultV2" => self.publish_data_quality_result_v2(&req),
+            "GetDataQualityResultV2" => self.get_data_quality_result_v2(&req),
+            "BatchGetDataQualityResultV2" => self.batch_get_data_quality_result_v2(&req),
+            "ListDataQualityResultsV2" => self.list_data_quality_results_v2(&req),
+            "GetJobUpgradeAnalysis" => self.get_job_upgrade_analysis(&req),
+            "StartJobUpgradeAnalysis" => self.start_job_upgrade_analysis(&req),
+            "StopJobUpgradeAnalysis" => self.stop_job_upgrade_analysis(&req),
             "StopColumnStatisticsTaskRun" => self.stop_column_statistics_task_run(&req),
             "StopColumnStatisticsTaskRunSchedule" => {
                 self.stop_column_statistics_task_run_schedule(&req)
@@ -1293,6 +1329,7 @@ impl GlueService {
             .ok_or_else(|| entity_not_found(format!("Table {name} not found")))?;
         let mut tj = table_json(t);
         tj["VersionId"] = json!(current_table_version(state, db_name, name));
+        self.decorate_table(&req.account_id, &mut tj);
         Ok(AwsResponse::ok_json(json!({"Table": tj})))
     }
 
@@ -1331,6 +1368,7 @@ impl GlueService {
                     if name_filter.as_ref().is_none_or(|re| re.is_match(&t.name)) {
                         let mut tj = table_json(t);
                         tj["VersionId"] = json!(current_table_version(s, db_name, &t.name));
+                        self.decorate_table(&req.account_id, &mut tj);
                         tables.push(tj);
                     }
                 }

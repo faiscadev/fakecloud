@@ -23,6 +23,98 @@ const CATALOG_INPUT_FIELDS: &[&str] = &[
     "AllowFullTableExternalDataAccess",
 ];
 
+/// The `FunctionInput.GovernanceMode`, validated against the `GovernanceMode`
+/// enum, or `None` when omitted.
+fn udf_governance_mode(input: &Value) -> Result<Option<&str>, AwsServiceError> {
+    match input.get("GovernanceMode") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(m)) if m == "IAM_ONLY" || m == "LAKE_FORMATION" => Ok(Some(m)),
+        Some(_) => Err(crate::common::invalid_input(
+            "FunctionInput.GovernanceMode must be IAM_ONLY or LAKE_FORMATION.",
+        )),
+    }
+}
+
+/// A stored function as `UserDefinedFunction` reports it: `ArtifactLocation`
+/// is returned only for functions governed by Lake Formation.
+fn udf_json(f: &Value) -> Value {
+    let mut out = f.clone();
+    if f.get("GovernanceMode").and_then(Value::as_str) != Some("LAKE_FORMATION") {
+        if let Some(o) = out.as_object_mut() {
+            o.remove("ArtifactLocation");
+        }
+    }
+    out
+}
+
+/// Whether `uri` is `location` or lies under it (`s3://b/p` covers `s3://b/p/x`).
+fn s3_uri_under(uri: &str, location: &str) -> bool {
+    let loc = location.trim_end_matches('/');
+    uri == loc || uri.starts_with(&format!("{loc}/"))
+}
+
+impl GlueService {
+    /// The function's `ResourceUris` as stored: `LastModified` is output-only,
+    /// so a caller-supplied value is dropped. For a `LAKE_FORMATION` function
+    /// the artifact location is required and must be registered with Lake
+    /// Formation, every resource must lie under it, and each resource is
+    /// stamped with its S3 object's last-modified time.
+    fn governed_resource_uris(
+        &self,
+        account_id: &str,
+        mode: &str,
+        artifact: Option<&str>,
+        input: &Value,
+    ) -> Result<Option<Value>, AwsServiceError> {
+        let mut uris: Option<Vec<Value>> =
+            input.get("ResourceUris").and_then(Value::as_array).cloned();
+        for u in uris.iter_mut().flatten() {
+            if let Some(o) = u.as_object_mut() {
+                o.remove("LastModified");
+            }
+        }
+        if mode == "LAKE_FORMATION" {
+            let location = artifact.ok_or_else(|| {
+                crate::common::invalid_input(
+                    "FunctionInput.ArtifactLocation is required when GovernanceMode is LAKE_FORMATION.",
+                )
+            })?;
+            if !location.starts_with("s3://") {
+                return Err(crate::common::invalid_input(
+                    "FunctionInput.ArtifactLocation must be an Amazon S3 location.",
+                ));
+            }
+            if let Some(view) = &self.external {
+                if !view.location_registered(account_id, location) {
+                    return Err(crate::common::invalid_input(format!(
+                        "ArtifactLocation {location} is not registered with Lake Formation."
+                    )));
+                }
+            }
+            for u in uris.iter_mut().flatten() {
+                let uri = u
+                    .get("Uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !s3_uri_under(&uri, location) {
+                    return Err(crate::common::invalid_input(format!(
+                        "Resource URI {uri} is not under the function's ArtifactLocation {location}."
+                    )));
+                }
+                if let Some(modified) = self
+                    .external
+                    .as_ref()
+                    .and_then(|v| v.s3_object_last_modified(account_id, &uri))
+                {
+                    u["LastModified"] = json!(modified.timestamp() as f64);
+                }
+            }
+        }
+        Ok(uris.map(Value::Array))
+    }
+}
+
 /// Merge the non-null members of a `CatalogInput` into a stored catalog.
 fn apply_catalog_input(catalog: &mut Value, input: &Value) {
     for f in CATALOG_INPUT_FIELDS {
@@ -223,14 +315,30 @@ impl GlueService {
             .ok_or_else(|| missing("FunctionInput.FunctionName"))?
             .to_string();
         let now = now_ts();
-        let stored = json!({
+        let mode = udf_governance_mode(input)?
+            .unwrap_or("IAM_ONLY")
+            .to_string();
+        let artifact = input
+            .get("ArtifactLocation")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let resource_uris =
+            self.governed_resource_uris(&req.account_id, &mode, artifact.as_deref(), input)?;
+        let mut stored = json!({
             "FunctionName": name, "DatabaseName": db, "CatalogId": req.account_id,
             "ClassName": input.get("ClassName").cloned().unwrap_or(Value::Null),
             "OwnerName": input.get("OwnerName").cloned().unwrap_or(Value::Null),
             "OwnerType": input.get("OwnerType").cloned().unwrap_or(Value::Null),
-            "ResourceUris": input.get("ResourceUris").cloned().unwrap_or(Value::Null),
+            "ResourceUris": resource_uris.unwrap_or(Value::Null),
             "CreateTime": now,
+            "GovernanceMode": mode,
         });
+        if let Some(t) = input.get("FunctionType").filter(|v| !v.is_null()) {
+            stored["FunctionType"] = t.clone();
+        }
+        if let Some(a) = artifact {
+            stored["ArtifactLocation"] = json!(a);
+        }
         let key = Self::udf_key(&db, &name);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
@@ -251,7 +359,9 @@ impl GlueService {
             .get(&req.account_id)
             .and_then(|s| s.udfs.get(&key))
             .ok_or_else(|| entity_not_found(format!("Function {name} not found")))?;
-        Ok(AwsResponse::ok_json(json!({ "UserDefinedFunction": f })))
+        Ok(AwsResponse::ok_json(
+            json!({ "UserDefinedFunction": udf_json(f) }),
+        ))
     }
 
     pub(crate) fn get_user_defined_functions(
@@ -270,7 +380,7 @@ impl GlueService {
                     .filter(|f| {
                         db.is_none_or(|d| f.get("DatabaseName").and_then(|v| v.as_str()) == Some(d))
                     })
-                    .cloned()
+                    .map(udf_json)
                     .collect()
             })
             .unwrap_or_default();
@@ -291,8 +401,9 @@ impl GlueService {
         let name = req_str(&body, "FunctionName")?;
         let input = req_present(&body, "FunctionInput")?;
         let key = Self::udf_key(db, name);
+        let requested_mode = udf_governance_mode(input)?.map(str::to_owned);
         let mut updates: Vec<(&str, Value)> = Vec::new();
-        for f in ["ClassName", "OwnerName", "OwnerType", "ResourceUris"] {
+        for f in ["ClassName", "OwnerName", "OwnerType", "FunctionType"] {
             if let Some(v) = input.get(f) {
                 if !v.is_null() {
                     updates.push((f, v.clone()));
@@ -301,6 +412,47 @@ impl GlueService {
         }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
+        let existing = st
+            .udfs
+            .get(&key)
+            .ok_or_else(|| entity_not_found(format!("UserDefinedFunction {key} not found")))?;
+        let mode = existing
+            .get("GovernanceMode")
+            .and_then(Value::as_str)
+            .unwrap_or("IAM_ONLY")
+            .to_string();
+        if requested_mode.as_deref().is_some_and(|m| m != mode) {
+            return Err(crate::common::invalid_input(
+                "The governance mode of a function cannot be changed after it is created.",
+            ));
+        }
+        let artifact = input
+            .get("ArtifactLocation")
+            .and_then(Value::as_str)
+            .or_else(|| existing.get("ArtifactLocation").and_then(Value::as_str))
+            .map(str::to_owned);
+        // A governed function's resources are re-checked (and re-stamped)
+        // against its artifact location whenever either changes.
+        let uris_source = if input.get("ResourceUris").is_some_and(|v| !v.is_null()) {
+            input.clone()
+        } else {
+            json!({ "ResourceUris": existing.get("ResourceUris").cloned().unwrap_or(Value::Null) })
+        };
+        let touches_resources = input.get("ResourceUris").is_some_and(|v| !v.is_null())
+            || input.get("ArtifactLocation").is_some_and(|v| !v.is_null());
+        if touches_resources {
+            if let Some(uris) = self.governed_resource_uris(
+                &req.account_id,
+                &mode,
+                artifact.as_deref(),
+                &uris_source,
+            )? {
+                updates.push(("ResourceUris", uris));
+            }
+            if let Some(a) = artifact {
+                updates.push(("ArtifactLocation", json!(a)));
+            }
+        }
         generic::update_merge(&mut st.udfs, &key, "UserDefinedFunction", updates)?;
         Ok(AwsResponse::ok_json(json!({})))
     }

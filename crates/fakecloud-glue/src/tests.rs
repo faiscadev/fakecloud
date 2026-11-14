@@ -3173,3 +3173,468 @@ fn job_runs_prefer_the_jobs_allocated_capacity() {
         5
     );
 }
+
+/// A Lake Formation / S3 stand-in: one default RLS policy on `db.t`, one
+/// registered location, one S3 object.
+struct FakeExternal;
+
+impl crate::external::GlueExternalView for FakeExternal {
+    fn default_rls_policy(
+        &self,
+        account: &str,
+        catalog: &str,
+        db: &str,
+        table: &str,
+    ) -> Option<String> {
+        (account == catalog && db == "db" && table == "t").then(|| "us-only".to_string())
+    }
+    fn location_registered(&self, _account: &str, location: &str) -> bool {
+        location.starts_with("s3://governed/")
+    }
+    fn s3_object_last_modified(
+        &self,
+        _account: &str,
+        uri: &str,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        (uri == "s3://governed/udf/lib.jar")
+            .then(|| chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap())
+    }
+}
+
+fn governed_service() -> GlueService {
+    GlueService::default().with_external_view(std::sync::Arc::new(FakeExternal))
+}
+
+#[test]
+fn tables_report_their_default_rls_policy() {
+    let svc = governed_service();
+    svc.create_database(&req(
+        "CreateDatabase",
+        json!({"DatabaseInput": {"Name": "db"}}),
+    ))
+    .unwrap();
+    for t in ["t", "other"] {
+        svc.create_table(&req(
+            "CreateTable",
+            json!({"DatabaseName": "db", "TableInput": {"Name": t}}),
+        ))
+        .unwrap();
+    }
+    let got = body_of(
+        svc.get_table(&req("GetTable", json!({"DatabaseName": "db", "Name": "t"})))
+            .unwrap(),
+    );
+    assert_eq!(got["Table"]["RLSProperties"]["DefaultRLSPolicy"], "us-only");
+    let list = body_of(
+        svc.get_tables(&req("GetTables", json!({"DatabaseName": "db"})))
+            .unwrap(),
+    );
+    let tables = list["TableList"].as_array().unwrap();
+    let rls: Vec<&Value> = tables.iter().map(|t| &t["RLSProperties"]).collect();
+    assert!(rls.contains(&&json!({"DefaultRLSPolicy": "us-only"})));
+    assert!(rls.contains(&&Value::Null));
+}
+
+#[test]
+fn lake_formation_governed_udf() {
+    let svc = governed_service();
+    let create = |input: Value| {
+        svc.create_user_defined_function(&req(
+            "CreateUserDefinedFunction",
+            json!({"DatabaseName": "db", "FunctionInput": input}),
+        ))
+    };
+    // ArtifactLocation is required, registered, and must contain every resource.
+    for bad in [
+        json!({"FunctionName": "f", "GovernanceMode": "LAKE_FORMATION"}),
+        json!({"FunctionName": "f", "GovernanceMode": "LAKE_FORMATION",
+               "ArtifactLocation": "s3://unregistered/udf/"}),
+        json!({"FunctionName": "f", "GovernanceMode": "LAKE_FORMATION",
+               "ArtifactLocation": "s3://governed/udf/",
+               "ResourceUris": [{"ResourceType": "JAR", "Uri": "s3://elsewhere/lib.jar"}]}),
+        json!({"FunctionName": "f", "GovernanceMode": "SOMETHING"}),
+    ] {
+        assert_eq!(create(bad).err().unwrap().code(), "InvalidInputException");
+    }
+    create(json!({
+        "FunctionName": "f", "ClassName": "C", "FunctionType": "REGULAR_FUNCTION",
+        "GovernanceMode": "LAKE_FORMATION", "ArtifactLocation": "s3://governed/udf/",
+        "ResourceUris": [{"ResourceType": "JAR", "Uri": "s3://governed/udf/lib.jar", "LastModified": 1}],
+    }))
+    .unwrap();
+    let get = || {
+        body_of(
+            svc.get_user_defined_function(&req(
+                "GetUserDefinedFunction",
+                json!({"DatabaseName": "db", "FunctionName": "f"}),
+            ))
+            .unwrap(),
+        )["UserDefinedFunction"]
+            .clone()
+    };
+    let f = get();
+    assert_eq!(f["GovernanceMode"], "LAKE_FORMATION");
+    assert_eq!(f["ArtifactLocation"], "s3://governed/udf/");
+    assert_eq!(f["FunctionType"], "REGULAR_FUNCTION");
+    assert_eq!(f["ResourceUris"][0]["LastModified"], 1_700_000_000.0);
+
+    // The governance mode is fixed at creation.
+    let e = svc
+        .update_user_defined_function(&req(
+            "UpdateUserDefinedFunction",
+            json!({"DatabaseName": "db", "FunctionName": "f",
+                   "FunctionInput": {"FunctionName": "f", "GovernanceMode": "IAM_ONLY"}}),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "InvalidInputException");
+    // A new resource is checked against the stored location; one with no
+    // S3 object carries no LastModified.
+    svc.update_user_defined_function(&req(
+        "UpdateUserDefinedFunction",
+        json!({"DatabaseName": "db", "FunctionName": "f", "FunctionInput": {
+            "FunctionName": "f",
+            "ResourceUris": [{"ResourceType": "JAR", "Uri": "s3://governed/udf/v2.jar"}]}}),
+    ))
+    .unwrap();
+    let f = get();
+    assert_eq!(f["ResourceUris"][0]["Uri"], "s3://governed/udf/v2.jar");
+    assert!(f["ResourceUris"][0].get("LastModified").is_none());
+
+    // An IAM_ONLY function reports its mode but not an artifact location.
+    create(json!({"FunctionName": "plain", "ArtifactLocation": "s3://x/y/"})).unwrap();
+    let plain = body_of(
+        svc.get_user_defined_function(&req(
+            "GetUserDefinedFunction",
+            json!({"DatabaseName": "db", "FunctionName": "plain"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(plain["UserDefinedFunction"]["GovernanceMode"], "IAM_ONLY");
+    assert!(plain["UserDefinedFunction"]
+        .get("ArtifactLocation")
+        .is_none());
+}
+
+#[test]
+fn integration_target_namespace_requires_an_s3_tables_target() {
+    let svc = GlueService::default();
+    let create = |name: &str, target: &str, ns: &str| {
+        svc.create_integration(&req(
+            "CreateIntegration",
+            json!({"IntegrationName": name, "SourceArn": "arn:aws:dynamodb:us-east-1:123456789012:table/t",
+                   "TargetArn": target, "IntegrationConfig": {"TargetNamespace": ns}}),
+        ))
+    };
+    let bucket = "arn:aws:s3tables:us-east-1:123456789012:bucket/lake";
+    let made = body_of(create("ok", bucket, "sales_ns").unwrap());
+    assert_eq!(made["IntegrationConfig"]["TargetNamespace"], "sales_ns");
+    assert_eq!(
+        create(
+            "bad-target",
+            "arn:aws:redshift:us-east-1:123456789012:namespace:n",
+            "ns"
+        )
+        .err()
+        .unwrap()
+        .code(),
+        "InvalidInputException"
+    );
+    for bad in ["Upper", "_lead", "trail_", "has-dash"] {
+        assert_eq!(
+            create("bad", bucket, bad).err().unwrap().code(),
+            "InvalidInputException"
+        );
+    }
+}
+
+#[test]
+fn auto_upgrade_analysis_lifecycle() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "j", "Role": "r", "Command": {"Name": "glueetl"}, "GlueVersion": "4.0"}),
+    ))
+    .unwrap();
+    let job = |svc: &GlueService| {
+        body_of(
+            svc.get_job(&req("GetJob", json!({"JobName": "j"})))
+                .unwrap(),
+        )["Job"]
+            .clone()
+    };
+    assert!(job(&svc).get("AutoUpgradeMetadata").is_none());
+
+    svc.update_job(&req(
+        "UpdateJob",
+        json!({"JobName": "j", "JobUpdate": {"GlueVersion": "auto"}}),
+    ))
+    .unwrap();
+    let meta = job(&svc)["AutoUpgradeMetadata"].clone();
+    assert_eq!(meta["Status"], "OBSERVING");
+    assert_eq!(meta["SourceVersion"], "4.0");
+    assert_eq!(meta["TargetVersion"], "6.0");
+    let id = meta["AnalysisId"].as_str().unwrap().to_string();
+    assert!(id.starts_with("ja-") && id.len() == 39);
+
+    let analysis = |svc: &GlueService| {
+        body_of(
+            svc.get_job_upgrade_analysis(&req(
+                "GetJobUpgradeAnalysis",
+                json!({"jobName": "j", "analysisId": id}),
+            ))
+            .unwrap(),
+        )
+    };
+    assert_eq!(analysis(&svc)["status"], "OBSERVING");
+    assert_eq!(analysis(&svc)["analysisType"], "AUTO_UPGRADE");
+    // Not resumable before it waits for consent.
+    let e = svc
+        .start_job_upgrade_analysis(&req(
+            "StartJobUpgradeAnalysis",
+            json!({"jobName": "j", "analysisId": id}),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "InvalidInputException");
+
+    // A run on the source version is observed; the analysis then waits.
+    let run_version = |svc: &GlueService| {
+        let run = body_of(
+            svc.start_job_run(&req("StartJobRun", json!({"JobName": "j"})))
+                .unwrap(),
+        );
+        body_of(
+            svc.get_job_run(&req(
+                "GetJobRun",
+                json!({"JobName": "j", "RunId": run["JobRunId"]}),
+            ))
+            .unwrap(),
+        )["JobRun"]["GlueVersion"]
+            .clone()
+    };
+    assert_eq!(run_version(&svc), "4.0");
+    assert_eq!(analysis(&svc)["status"], "WAITING_FOR_CONSENT");
+    assert_eq!(
+        job(&svc)["AutoUpgradeMetadata"]["Status"],
+        "WAITING_FOR_CONSENT"
+    );
+
+    // Approval (analysisId defaults to the job's current analysis) upgrades.
+    let started = body_of(
+        svc.start_job_upgrade_analysis(&req(
+            "StartJobUpgradeAnalysis",
+            json!({"jobName": "j", "upgradeConsent": "APPROVE"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(started["analysisId"], id.as_str());
+    assert_eq!(analysis(&svc)["status"], "SUCCEEDED");
+    assert_eq!(
+        job(&svc)["AutoUpgradeMetadata"]["Status"],
+        "UPGRADE_SUCCEEDED"
+    );
+    assert_eq!(run_version(&svc), "6.0");
+    let e = svc
+        .stop_job_upgrade_analysis(&req(
+            "StopJobUpgradeAnalysis",
+            json!({"jobName": "j", "analysisId": id}),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "InvalidInputException");
+
+    // Unknown analysis / wrong job.
+    let missing = format!("ja-{}", uuid::Uuid::new_v4());
+    let e = svc
+        .get_job_upgrade_analysis(&req(
+            "GetJobUpgradeAnalysis",
+            json!({"jobName": "j", "analysisId": missing}),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "EntityNotFoundException");
+    let e = svc
+        .get_job_upgrade_analysis(&req(
+            "GetJobUpgradeAnalysis",
+            json!({"jobName": "j", "analysisId": "ja-not-a-uuid-at-all-xxxxxxxxxxxxxxxxx"}),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "InvalidInputException");
+}
+
+#[test]
+fn auto_upgrade_analysis_stop_decline_and_leaving_auto() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "j", "Role": "r", "Command": {"Name": "glueetl"}, "GlueVersion": "auto"}),
+    ))
+    .unwrap();
+    let meta = |svc: &GlueService| {
+        body_of(
+            svc.get_job(&req("GetJob", json!({"JobName": "j"})))
+                .unwrap(),
+        )["Job"]["AutoUpgradeMetadata"]
+            .clone()
+    };
+    let first = meta(&svc)["AnalysisId"].as_str().unwrap().to_string();
+    assert!(meta(&svc).get("SourceVersion").is_none());
+    svc.stop_job_upgrade_analysis(&req(
+        "StopJobUpgradeAnalysis",
+        json!({"jobName": "j", "analysisId": first}),
+    ))
+    .unwrap();
+    assert_eq!(meta(&svc)["Status"], "STOPPED");
+
+    // Leaving auto clears the metadata; re-entering starts a new analysis.
+    svc.update_job(&req(
+        "UpdateJob",
+        json!({"JobName": "j", "JobUpdate": {"GlueVersion": "5.0"}}),
+    ))
+    .unwrap();
+    assert!(meta(&svc).is_null());
+    svc.update_job(&req(
+        "UpdateJob",
+        json!({"JobName": "j", "JobUpdate": {"GlueVersion": "auto"}}),
+    ))
+    .unwrap();
+    let second = meta(&svc)["AnalysisId"].as_str().unwrap().to_string();
+    assert_ne!(first, second);
+    svc.start_job_run(&req("StartJobRun", json!({"JobName": "j"})))
+        .unwrap();
+    svc.start_job_upgrade_analysis(&req(
+        "StartJobUpgradeAnalysis",
+        json!({"jobName": "j", "analysisId": second, "upgradeConsent": "DECLINE"}),
+    ))
+    .unwrap();
+    assert_eq!(meta(&svc)["Status"], "STOPPED");
+
+    // Deleting the job removes its analyses.
+    svc.delete_job(&req("DeleteJob", json!({"JobName": "j"})))
+        .unwrap();
+    let e = svc
+        .get_job_upgrade_analysis(&req(
+            "GetJobUpgradeAnalysis",
+            json!({"jobName": "j", "analysisId": second}),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(e.code(), "EntityNotFoundException");
+}
+
+#[test]
+fn data_quality_results_v2_publish_and_read() {
+    let svc = GlueService::default();
+    let publish =
+        |body: Value| svc.publish_data_quality_result_v2(&req("PublishDataQualityResultV2", body));
+    let base = json!({
+        "Dimensions": {"cluster": "c-1"},
+        "Score": 0.5,
+        "RuleResults": [{"Name": "r1", "Result": "PASS"}, {"Name": "r2", "Result": "FAIL"}],
+        "EvaluationContext": "ctx",
+        "Descriptors": {"databaseName": "sales", "tableName": "orders"},
+        "RulesetName": "rs",
+        "Statistics": [{"ProfileId": "prof-1", "StatisticName": "Completeness", "DoubleValue": 1.0}],
+        "ClientToken": "tok-1",
+    });
+    let first = body_of(publish(base.clone()).unwrap())["ResultId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Same token, same request: the same result.
+    assert_eq!(
+        body_of(publish(base.clone()).unwrap())["ResultId"],
+        first.as_str()
+    );
+    let mut changed = base.clone();
+    changed["Score"] = json!(0.9);
+    assert_eq!(
+        publish(changed).err().unwrap().code(),
+        "IdempotentParameterMismatchException"
+    );
+    for bad in [
+        json!({"Dimensions": {"a": "b"}, "Score": 1.5, "RuleResults": [], "EvaluationContext": "c"}),
+        json!({"Dimensions": {}, "Score": 0.5, "RuleResults": [], "EvaluationContext": "c"}),
+        json!({"Score": 0.5, "RuleResults": [], "EvaluationContext": "c"}),
+        json!({"Dimensions": {"a": "b"}, "Score": 0.5, "EvaluationContext": "c"}),
+    ] {
+        assert_eq!(publish(bad).err().unwrap().code(), "InvalidInputException");
+    }
+    let second = body_of(
+        publish(json!({
+            "Dimensions": {"cluster": "c-2"}, "Score": 1.0, "RuleResults": [],
+            "EvaluationContext": "other",
+        }))
+        .unwrap(),
+    )["ResultId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let got = body_of(
+        svc.get_data_quality_result_v2(&req("GetDataQualityResultV2", json!({"ResultId": first})))
+            .unwrap(),
+    );
+    assert_eq!(got["Score"], 0.5);
+    assert_eq!(got["ProfileId"], "prof-1");
+    assert_eq!(
+        got["DataSource"],
+        json!({"GlueTable": {"DatabaseName": "sales", "TableName": "orders"}})
+    );
+    assert!(got["ResultPublishedOn"].is_number());
+    assert!(got.get("Statistics").is_none());
+    assert_eq!(
+        svc.get_data_quality_result_v2(&req(
+            "GetDataQualityResultV2",
+            json!({"ResultId": "dqresult-missing"}),
+        ))
+        .err()
+        .unwrap()
+        .code(),
+        "EntityNotFoundException"
+    );
+
+    let batch = body_of(
+        svc.batch_get_data_quality_result_v2(&req(
+            "BatchGetDataQualityResultV2",
+            json!({"ResultIds": [first, "dqresult-missing"]}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(batch["Results"][0]["ResultId"], first.as_str());
+    assert!(batch["Results"][0].get("ProfileId").is_none());
+    assert_eq!(batch["ResultsNotFound"], json!(["dqresult-missing"]));
+
+    let list = |filter: Value| {
+        body_of(
+            svc.list_data_quality_results_v2(&req(
+                "ListDataQualityResultsV2",
+                json!({"Filter": filter}),
+            ))
+            .unwrap(),
+        )["Results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["ResultId"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(list(Value::Null).len(), 2);
+    assert_eq!(
+        list(json!({"EvaluationContext": "other"})),
+        vec![second.clone()]
+    );
+    assert_eq!(
+        list(json!({"Dimensions": {"cluster": "c-1"}})),
+        vec![first.clone()]
+    );
+    assert_eq!(
+        list(
+            json!({"DataSource": {"GlueTable": {"DatabaseName": "sales", "TableName": "orders"}}})
+        ),
+        vec![first.clone()]
+    );
+    assert!(list(json!({"PublishedAfter": 4_000_000_000.0})).is_empty());
+}

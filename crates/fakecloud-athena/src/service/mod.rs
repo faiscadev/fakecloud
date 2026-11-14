@@ -36,12 +36,14 @@ const MUTATING_ACTIONS: &[&str] = &[
     "CreateNamedQuery",
     "CreateNotebook",
     "CreatePreparedStatement",
+    "CreateSystemTableConfiguration",
     "CreateWorkGroup",
     "DeleteCapacityReservation",
     "DeleteDataCatalog",
     "DeleteNamedQuery",
     "DeleteNotebook",
     "DeletePreparedStatement",
+    "DeleteSystemTableConfiguration",
     "DeleteWorkGroup",
     "ImportNotebook",
     "PutCapacityAssignmentConfiguration",
@@ -59,6 +61,7 @@ const MUTATING_ACTIONS: &[&str] = &[
     "UpdateNotebook",
     "UpdateNotebookMetadata",
     "UpdatePreparedStatement",
+    "UpdateSystemTableConfiguration",
     "UpdateWorkGroup",
 ];
 
@@ -73,12 +76,14 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateNotebook",
     "CreatePreparedStatement",
     "CreatePresignedNotebookUrl",
+    "CreateSystemTableConfiguration",
     "CreateWorkGroup",
     "DeleteCapacityReservation",
     "DeleteDataCatalog",
     "DeleteNamedQuery",
     "DeleteNotebook",
     "DeletePreparedStatement",
+    "DeleteSystemTableConfiguration",
     "DeleteWorkGroup",
     "ExportNotebook",
     "GetCalculationExecution",
@@ -98,6 +103,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetSession",
     "GetSessionEndpoint",
     "GetSessionStatus",
+    "GetSystemTableConfiguration",
     "GetTableMetadata",
     "GetWorkGroup",
     "ImportNotebook",
@@ -114,6 +120,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListPreparedStatements",
     "ListQueryExecutions",
     "ListSessions",
+    "ListSystemTableStatuses",
     "ListTableMetadata",
     "ListTagsForResource",
     "ListWorkGroups",
@@ -132,6 +139,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UpdateNotebook",
     "UpdateNotebookMetadata",
     "UpdatePreparedStatement",
+    "UpdateSystemTableConfiguration",
     "UpdateWorkGroup",
 ];
 
@@ -152,6 +160,7 @@ mod named_queries;
 mod notebooks;
 mod prepared_statements;
 mod queries;
+mod system_tables;
 mod tags;
 mod work_groups;
 
@@ -356,6 +365,13 @@ impl AwsService for AthenaService {
             "GetCapacityAssignmentConfiguration" => {
                 self.get_capacity_assignment_configuration(&req)
             }
+
+            // System tables
+            "CreateSystemTableConfiguration" => self.create_system_table_configuration(&req),
+            "GetSystemTableConfiguration" => self.get_system_table_configuration(&req),
+            "UpdateSystemTableConfiguration" => self.update_system_table_configuration(&req),
+            "DeleteSystemTableConfiguration" => self.delete_system_table_configuration(&req),
+            "ListSystemTableStatuses" => self.list_system_table_statuses(&req),
 
             // Tags
             "TagResource" => self.tag_resource(&req),
@@ -734,7 +750,10 @@ fn classify_statement(query: &str) -> String {
 
 // ─── JSON shaping ──────────────────────────────────────────────────
 
-fn work_group_json(wg: &WorkGroup) -> Value {
+/// `system_table_statuses` is the account's `SystemTableStatus` list; it is
+/// account-level state, rendered into every workgroup's Configuration rather
+/// than echoed from the stored input.
+fn work_group_json(wg: &WorkGroup, system_table_statuses: Vec<Value>) -> Value {
     let mut obj = json!({
         "Name": wg.name,
         "State": wg.state,
@@ -745,11 +764,19 @@ fn work_group_json(wg: &WorkGroup) -> Value {
             .unwrap()
             .insert("Description".to_string(), Value::String(d.clone()));
     }
-    if let Some(c) = &wg.configuration {
-        obj.as_object_mut()
-            .unwrap()
-            .insert("Configuration".to_string(), c.clone());
-    }
+    let mut config = wg
+        .configuration
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    config.insert(
+        "SystemTableStatuses".to_string(),
+        Value::Array(system_table_statuses),
+    );
+    obj.as_object_mut()
+        .unwrap()
+        .insert("Configuration".to_string(), Value::Object(config));
     obj
 }
 

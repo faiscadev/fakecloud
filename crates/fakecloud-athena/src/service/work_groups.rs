@@ -55,7 +55,7 @@ impl AthenaService {
             .get(&name)
             .ok_or_else(|| invalid_request(format!("Workgroup {name} not found")))?;
         Ok(AwsResponse::ok_json(json!({
-            "WorkGroup": work_group_json(wg),
+            "WorkGroup": work_group_json(wg, account.system_table_statuses()),
         })))
     }
 

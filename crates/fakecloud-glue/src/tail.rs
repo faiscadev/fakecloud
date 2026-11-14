@@ -13,6 +13,44 @@ use crate::common::{
 };
 use crate::service::GlueService;
 
+/// `IntegrationConfig.TargetNamespace` (Smithy `TargetNamespace`: 1-255
+/// chars of `^[a-z0-9]([a-z0-9_]*[a-z0-9])?$`) is only accepted when the
+/// integration's target is an Amazon S3 Tables table bucket.
+fn validate_target_namespace(body: &Value, target_arn: &str) -> Result<(), AwsServiceError> {
+    let Some(ns) = body
+        .get("IntegrationConfig")
+        .and_then(|c| c.get("TargetNamespace"))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(());
+    };
+    let ns = ns
+        .as_str()
+        .ok_or_else(|| invalid_input("IntegrationConfig.TargetNamespace must be a string."))?;
+    let bytes = ns.as_bytes();
+    let edge_ok = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let valid = !ns.is_empty()
+        && ns.chars().count() <= 255
+        && bytes.iter().all(|b| edge_ok(*b) || *b == b'_')
+        && edge_ok(bytes[0])
+        && edge_ok(bytes[bytes.len() - 1]);
+    if !valid {
+        return Err(invalid_input(format!(
+            "IntegrationConfig.TargetNamespace {ns:?} must be 1-255 lowercase letters, digits or underscores, starting and ending with a letter or digit."
+        )));
+    }
+    let is_table_bucket = target_arn
+        .parse::<fakecloud_aws::arn::Arn>()
+        .ok()
+        .is_some_and(|a| a.service == "s3tables" && a.resource.starts_with("bucket/"));
+    if !is_table_bucket {
+        return Err(invalid_input(
+            "IntegrationConfig.TargetNamespace is only supported when the target is an Amazon S3 Tables table bucket.",
+        ));
+    }
+    Ok(())
+}
+
 impl GlueService {
     // ===================== integrations =====================
 
@@ -55,6 +93,7 @@ impl GlueService {
         let name = req_str(&body, "IntegrationName")?.to_string();
         let src = req_str(&body, "SourceArn")?.to_string();
         let tgt = req_str(&body, "TargetArn")?.to_string();
+        validate_target_namespace(&body, &tgt)?;
         let v = self.integration_json(&req.account_id, &req.region, &name, &src, &tgt, &body);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
@@ -79,6 +118,8 @@ impl GlueService {
             .integrations
             .get_mut(&id)
             .ok_or_else(|| entity_not_found(format!("Integration {id} not found")))?;
+        let target = v["TargetArn"].as_str().unwrap_or_default().to_string();
+        validate_target_namespace(&body, &target)?;
         if let Some(obj) = v.as_object_mut() {
             for f in [
                 "Description",
@@ -945,8 +986,8 @@ impl GlueService {
         let mut not_found = Vec::new();
         for n in &names {
             let Some(name) = n.as_str() else { continue };
-            match store.and_then(|s| s.jobs.get(name)) {
-                Some(j) => found.push(crate::jobs::job_to_json(j)),
+            match store.and_then(|s| s.jobs.get(name).map(|j| (s, j))) {
+                Some((s, j)) => found.push(crate::jobs::job_to_json(s, j)),
                 None => not_found.push(json!(name)),
             }
         }
@@ -1527,8 +1568,10 @@ impl GlueService {
             .and_then(|dbs| dbs.get(db))
             .and_then(|d| d.tables.get(name))
             .ok_or_else(|| entity_not_found(format!("Table {name} not found")))?;
+        let mut tj = crate::service::table_json(tbl);
+        self.decorate_table(&req.account_id, &mut tj);
         Ok(AwsResponse::ok_json(json!({
-            "Table": crate::service::table_json(tbl),
+            "Table": tj,
             "IsRegisteredWithLakeFormation": false,
         })))
     }
