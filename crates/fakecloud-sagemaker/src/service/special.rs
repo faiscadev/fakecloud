@@ -128,6 +128,13 @@ pub(super) fn dispatch(
         "StartEdgeDeploymentStage" | "StopEdgeDeploymentStage" => Ok(Some(
             super::actions::edge_deployment_stage_transition(svc, ctx, meta, body)?,
         )),
+        "CreateTrainingSession" => Ok(Some(super::training_sessions::create(
+            svc, ctx, meta, body,
+        )?)),
+        "DescribeTrainingSession" => Ok(Some(super::training_sessions::describe(svc, ctx, body)?)),
+        "StopTrainingSession" => Ok(Some(super::training_sessions::stop(svc, ctx, body)?)),
+        "DeleteTrainingSession" => Ok(Some(super::training_sessions::delete(svc, ctx, body)?)),
+        "CreateEndpoint" | "UpdateEndpoint" => Ok(Some(deploy_endpoint(svc, ctx, meta, body)?)),
         op if is_lifecycle_transition(op) => Ok(Some(lifecycle_transition(svc, ctx, meta, body)?)),
         _ => Ok(None),
     }
@@ -1361,6 +1368,117 @@ fn update_via_parent(
     }
     let out = engine::build_output(ctx, meta, &key, &record);
     Ok((ok_json(out), true))
+}
+
+/// `ProductionVariant` members (of the endpoint configuration) reported
+/// unchanged on the deployed endpoint's `ProductionVariantSummary`, under the
+/// same name and shape.
+const DEPLOYED_VARIANT_MEMBERS: &[&str] = &[
+    "VariantName",
+    "ManagedInstanceScaling",
+    "RoutingConfig",
+    "AcceleratorPartitionLayouts",
+];
+
+/// The `ProductionVariantSummary` a deployed configuration variant reports:
+/// its initial weight / instance count as both current and desired (a
+/// deployment converges at once), its serverless configuration as current and
+/// desired, and the members carried over verbatim. With `retained` (an
+/// `UpdateEndpoint` with `RetainAllVariantProperties`), the weight and count
+/// the variant already runs with are kept.
+fn deployed_variant(variant: &Map<String, Value>, retained: Option<&Map<String, Value>>) -> Value {
+    let mut out = Map::new();
+    for key in DEPLOYED_VARIANT_MEMBERS {
+        if let Some(v) = variant.get(*key) {
+            out.insert((*key).to_string(), v.clone());
+        }
+    }
+    let weight = variant
+        .get("InitialVariantWeight")
+        .cloned()
+        .unwrap_or_else(|| Value::from(1.0));
+    let count = variant.get("InitialInstanceCount").cloned();
+    let pick = |member: &str, fallback: Option<Value>| {
+        retained.and_then(|r| r.get(member).cloned()).or(fallback)
+    };
+    for (member, value) in [
+        ("CurrentWeight", pick("CurrentWeight", Some(weight.clone()))),
+        ("DesiredWeight", pick("DesiredWeight", Some(weight))),
+        (
+            "CurrentInstanceCount",
+            pick("CurrentInstanceCount", count.clone()),
+        ),
+        ("DesiredInstanceCount", pick("DesiredInstanceCount", count)),
+    ] {
+        if let Some(v) = value {
+            out.insert(member.to_string(), v);
+        }
+    }
+    if let Some(serverless) = variant.get("ServerlessConfig") {
+        out.insert("CurrentServerlessConfig".to_string(), serverless.clone());
+        out.insert("DesiredServerlessConfig".to_string(), serverless.clone());
+    }
+    Value::Object(out)
+}
+
+/// `CreateEndpoint` / `UpdateEndpoint`: the generic create / update, after
+/// which the endpoint reports the variants of the endpoint configuration it
+/// now runs (`DescribeEndpoint.ProductionVariants`), derived from that
+/// configuration's `ProductionVariants`.
+fn deploy_endpoint(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let previous = data
+        .resolve_key("Endpoint", &str_member(body, "EndpointName"))
+        .and_then(|k| data.get_resource("Endpoint", &k))
+        .and_then(|r| r.get("ProductionVariants"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let resp = if meta.op == "CreateEndpoint" {
+        engine::create(data, ctx, meta, body)?
+    } else {
+        engine::update(data, ctx, meta, body)?
+    };
+    let config_name = str_member(body, "EndpointConfigName");
+    let variants = data
+        .resolve_key("EndpointConfig", &config_name)
+        .and_then(|k| data.get_resource("EndpointConfig", &k))
+        .and_then(|c| c.get("ProductionVariants"))
+        .and_then(Value::as_array)
+        .cloned();
+    let retain = meta.op == "UpdateEndpoint"
+        && body
+            .get("RetainAllVariantProperties")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if let Some(variants) = variants {
+        let summaries: Vec<Value> = variants
+            .iter()
+            .filter_map(Value::as_object)
+            .map(|v| {
+                let name = v.get("VariantName");
+                let kept = previous
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .find(|p| retain && p.get("VariantName") == name);
+                deployed_variant(v, kept)
+            })
+            .collect();
+        let key = data.resolve_key("Endpoint", &str_member(body, "EndpointName"));
+        if let Some(obj) = key
+            .and_then(|k| data.get_resource_mut("Endpoint", &k))
+            .and_then(Value::as_object_mut)
+        {
+            obj.insert("ProductionVariants".to_string(), Value::Array(summaries));
+        }
+    }
+    Ok((resp, true))
 }
 
 /// `UpdateEndpointWeightsAndCapacities` — merge each requested

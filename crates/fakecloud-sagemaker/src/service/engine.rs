@@ -285,6 +285,9 @@ pub(crate) const WRAPPED_OUTPUTS: &[(&str, &str)] = &[
     ("DescribeClusterEvent", "ListClusterEvents"),
     ("DescribeClusterNode", "ListClusterNodes"),
     ("DescribeSubscribedWorkteam", "ListSubscribedWorkteams"),
+    // Served by `training_sessions::describe`, which reports the whole stored
+    // session under `TrainingSessionDetail` (a superset of the summary).
+    ("DescribeTrainingSession", "ListTrainingSessions"),
     ("DescribeWorkforce", "ListWorkforces"),
     ("DescribeWorkteam", "ListWorkteams"),
     ("UpdateWorkforce", "ListWorkforces"),
