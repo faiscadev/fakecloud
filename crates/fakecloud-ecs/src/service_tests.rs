@@ -84,6 +84,7 @@ fn resolve_service_key_handles_short_and_long() {
             volume_configurations: vec![],
             service_connect_configuration: None,
             vpc_lattice_configurations: vec![],
+            gateway_connectors: vec![],
         },
     );
     // Long-form: cluster/service.
@@ -333,6 +334,7 @@ mod scheduler_reconcile {
             volume_configurations: vec![],
             service_connect_configuration: None,
             vpc_lattice_configurations: vec![],
+            gateway_connectors: vec![],
         }
     }
 
@@ -1285,4 +1287,179 @@ fn another_accounts_role_is_checked_against_its_own_trust_policy() {
         panic!("caller's own untrusted role accepted");
     };
     assert_eq!(err.code(), "ClientException");
+}
+
+mod refreshed_members {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+
+    fn svc() -> EcsService {
+        let accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let state = Arc::new(parking_lot::RwLock::new(accounts));
+        let svc = EcsService::new(state);
+        svc.create_cluster(&req("CreateCluster", json!({"clusterName": "default"})))
+            .unwrap();
+        svc
+    }
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecs".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "req".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn gpu_td(reqs: Value) -> Value {
+        json!({"family": "gpu", "containerDefinitions": [
+            {"name": "app", "image": "cuda", "resourceRequirements": reqs}
+        ]})
+    }
+
+    #[test]
+    fn gpu_sharing_strategy_is_validated_and_reported_on_task_containers() {
+        let svc = svc();
+        let mps = json!({"nvidiaMps": {"memory": 2048, "maxComputePercent": 50}});
+        for bad in [
+            json!([{"type": "GPU", "value": "1", "sharingStrategy": mps}]),
+            json!([{"type": "InferenceAccelerator", "sharingStrategy": mps}]),
+            json!([{"type": "GPU", "sharingStrategy": {"nvidiaMps": {"memory": 0}}}]),
+            json!([{"type": "GPU", "sharingStrategy": {"nvidiaMps": {"memory": 1, "maxComputePercent": 101}}}]),
+            json!([{"type": "GPU"}]),
+            json!([{"type": "TPU", "value": "1"}]),
+        ] {
+            let err = svc
+                .register_task_definition(&req("RegisterTaskDefinition", gpu_td(bad.clone())))
+                .err()
+                .unwrap_or_else(|| panic!("accepted {bad}"));
+            assert_eq!(err.code(), "ClientException", "{bad}");
+        }
+        // Mixing shared and exclusive GPU containers in one task is refused.
+        let mixed = json!({"family": "gpu", "containerDefinitions": [
+            {"name": "a", "image": "cuda", "resourceRequirements": [{"type": "GPU", "sharingStrategy": mps}]},
+            {"name": "b", "image": "cuda", "resourceRequirements": [{"type": "GPU", "value": "1"}]},
+        ]});
+        assert!(svc
+            .register_task_definition(&req("RegisterTaskDefinition", mixed))
+            .is_err());
+        // EXTERNAL task definitions can't share GPUs.
+        let mut external = gpu_td(json!([{"type": "GPU", "sharingStrategy": mps}]));
+        external["requiresCompatibilities"] = json!(["EXTERNAL"]);
+        assert!(svc
+            .register_task_definition(&req("RegisterTaskDefinition", external))
+            .is_err());
+
+        let td = body(
+            svc.register_task_definition(&req(
+                "RegisterTaskDefinition",
+                gpu_td(json!([{"type": "GPU", "sharingStrategy": mps}])),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            td["taskDefinition"]["containerDefinitions"][0]["resourceRequirements"][0]
+                ["sharingStrategy"],
+            mps
+        );
+        let ran = body(
+            svc.run_task(&req("RunTask", json!({"taskDefinition": "gpu"})))
+                .unwrap(),
+        );
+        assert_eq!(ran["tasks"][0]["containers"][0]["gpuSharingStrategy"], mps);
+
+        // A container override replaces the task definition's GPU option.
+        let other = json!({"nvidiaMps": {"memory": 512}});
+        let ran = body(
+            svc.run_task(&req(
+                "RunTask",
+                json!({"taskDefinition": "gpu", "overrides": {"containerOverrides": [
+                    {"name": "app", "resourceRequirements": [{"type": "GPU", "sharingStrategy": other}]}
+                ]}}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            ran["tasks"][0]["containers"][0]["gpuSharingStrategy"],
+            other
+        );
+    }
+
+    #[test]
+    fn daemon_log_driver_volumes_are_validated_and_round_trip() {
+        let svc = svc();
+        let td = |volumes: Value| {
+            json!({"family": "logs", "containerDefinitions": [{"name": "a", "image": "fluent"}],
+                   "volumes": volumes})
+        };
+        for bad in [
+            json!([{"name": "v", "logDriverVolumeConfiguration": {}}]),
+            json!([{"name": "v", "logDriverVolumeConfiguration": {"driver": "awslogs"}}]),
+            json!([{"name": "v", "logDriverVolumeConfiguration": {"driver": "nope"}}]),
+            json!([{"name": "v", "host": {"sourcePath": "/x"},
+                    "logDriverVolumeConfiguration": {"driver": "json-file"}}]),
+        ] {
+            assert!(
+                svc.register_daemon_task_definition(&req(
+                    "RegisterDaemonTaskDefinition",
+                    td(bad.clone())
+                ))
+                .is_err(),
+                "accepted {bad}"
+            );
+        }
+        let vols = json!([{"name": "v", "logDriverVolumeConfiguration": {"driver": "json-file"}}]);
+        let out = body(
+            svc.register_daemon_task_definition(&req(
+                "RegisterDaemonTaskDefinition",
+                td(vols.clone()),
+            ))
+            .unwrap(),
+        );
+        let arn = out["daemonTaskDefinitionArn"].as_str().unwrap();
+        let described = body(
+            svc.describe_daemon_task_definition(&req(
+                "DescribeDaemonTaskDefinition",
+                json!({"daemonTaskDefinition": arn}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(described["daemonTaskDefinition"]["volumes"], vols);
+    }
+
+    #[test]
+    fn service_connect_container_configurations_are_validated() {
+        assert!(validate_service_connect_container_configurations(Some(
+            &json!({"containerConfigurations": [{"logLevel": "debug"}]})
+        ))
+        .is_ok());
+        for bad in [
+            json!({"containerConfigurations": [{"logLevel": "trace"}]}),
+            json!({"containerConfigurations": [{"logLevel": "info"}, {"logLevel": "debug"}]}),
+            json!({"containerConfigurations": [{}]}),
+            json!({"containerConfigurations": [{"other": 1}]}),
+        ] {
+            assert!(
+                validate_service_connect_container_configurations(Some(&bad)).is_err(),
+                "accepted {bad}"
+            );
+        }
+    }
 }

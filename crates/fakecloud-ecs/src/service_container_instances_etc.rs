@@ -1377,11 +1377,31 @@ impl EcsService {
         let account = request.account_id.clone();
         let accounts = self.state.read();
         let state = accounts.get(&account);
+        let routes = state.map(gateway_routes).unwrap_or_default();
         let mut found = Vec::new();
         let mut failures = Vec::new();
         for r in &refs {
             match state.and_then(|s| s.service_revisions.get(r)) {
-                Some(rev) => found.push(service_revision_to_json(rev)),
+                Some(rev) => {
+                    let mut out = service_revision_to_json(rev);
+                    // The gateway routes serving the revision's connector
+                    // ports are the gateway-managed connections ECS reports.
+                    let connections: Vec<Value> = routes
+                        .iter()
+                        .filter(|route| {
+                            route.service_arn == rev.service_arn
+                                && rev.gateway_connectors.iter().any(|c| {
+                                    c.get("portName").and_then(|v| v.as_str())
+                                        == Some(route.port_name.as_str())
+                                })
+                        })
+                        .map(|route| route.connection_json())
+                        .collect();
+                    if !connections.is_empty() {
+                        out["ecsManagedResources"] = json!({ "gatewayConnections": connections });
+                    }
+                    found.push(out);
+                }
                 None => failures.push(json!({"arn": r, "reason": "MISSING"})),
             }
         }

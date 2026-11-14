@@ -165,6 +165,12 @@ impl EcsService {
             if let Some(role_arn) = opt_str(overrides, "executionRoleArn") {
                 self.check_pass_role(&request.account_id, role_arn)?;
             }
+            if let Some(container_overrides) = overrides
+                .get("containerOverrides")
+                .and_then(|v| v.as_array())
+            {
+                validate_resource_requirements(container_overrides, &[])?;
+            }
         }
 
         let account = request.account_id.clone();
@@ -288,6 +294,10 @@ impl EcsService {
                     health_status: Some("UNKNOWN".to_string()),
                     managed_agents: None,
                     image_digest: None,
+                    gpu_sharing_strategy: container_gpu_sharing_strategy(
+                        def,
+                        body.get("overrides"),
+                    ),
                 })
                 .collect();
             let awslogs = td_containers.iter().find_map(|def| {
@@ -1387,6 +1397,7 @@ pub(super) mod multi_container_tests {
                 health_status: None,
                 managed_agents: None,
                 image_digest: None,
+                gpu_sharing_strategy: None,
             });
         }
 
@@ -1660,6 +1671,7 @@ mod port_mapping_tests {
                 health_status: None,
                 managed_agents: None,
                 image_digest: None,
+                gpu_sharing_strategy: None,
             }],
             overrides: serde_json::json!({}),
             started_by: None,

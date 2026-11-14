@@ -94,6 +94,17 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeExpressGatewayService",
     "UpdateExpressGatewayService",
     "DeleteExpressGatewayService",
+    "CreateGateway",
+    "DescribeGateway",
+    "UpdateGateway",
+    "DeleteGateway",
+    "ListGateways",
+    "AssociateGatewayWithCluster",
+    "DisassociateGatewayFromCluster",
+    "ListGatewayClusterAssociations",
+    "ListGatewayRoutes",
+    "DescribeGatewayRoute",
+    "DescribeGatewayResources",
 ];
 
 pub struct EcsService {
@@ -593,6 +604,17 @@ impl EcsService {
             "DescribeExpressGatewayService" => self.describe_express_gateway_service(request),
             "UpdateExpressGatewayService" => self.update_express_gateway_service(request),
             "DeleteExpressGatewayService" => self.delete_express_gateway_service(request),
+            "CreateGateway" => self.create_gateway(request),
+            "DescribeGateway" => self.describe_gateway(request),
+            "UpdateGateway" => self.update_gateway(request),
+            "DeleteGateway" => self.delete_gateway(request),
+            "ListGateways" => self.list_gateways(request),
+            "AssociateGatewayWithCluster" => self.associate_gateway_with_cluster(request),
+            "DisassociateGatewayFromCluster" => self.disassociate_gateway_from_cluster(request),
+            "ListGatewayClusterAssociations" => self.list_gateway_cluster_associations(request),
+            "ListGatewayRoutes" => self.list_gateway_routes(request),
+            "DescribeGatewayRoute" => self.describe_gateway_route(request),
+            "DescribeGatewayResources" => self.describe_gateway_resources(request),
             _ => Err(AwsServiceError::action_not_implemented(
                 "ecs",
                 &request.action,
@@ -644,6 +666,10 @@ mod service_daemons;
 
 #[path = "service_express_gateway.rs"]
 mod service_express_gateway;
+
+#[path = "service_gateways.rs"]
+mod service_gateways;
+pub(crate) use service_gateways::{gateway_routes, validate_gateway_connectors};
 
 #[path = "helpers.rs"]
 mod helpers;

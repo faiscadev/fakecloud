@@ -48,6 +48,11 @@ pub(crate) fn is_mutating(action: &str) -> bool {
             | "CreateExpressGatewayService"
             | "UpdateExpressGatewayService"
             | "DeleteExpressGatewayService"
+            | "CreateGateway"
+            | "UpdateGateway"
+            | "DeleteGateway"
+            | "AssociateGatewayWithCluster"
+            | "DisassociateGatewayFromCluster"
     )
 }
 
@@ -738,7 +743,202 @@ pub(crate) fn container_to_json(container: &Container) -> Value {
     if let Some(ref v) = container.health_status {
         map.insert("healthStatus".into(), json!(v));
     }
+    if let Some(ref v) = container.gpu_sharing_strategy {
+        map.insert("gpuSharingStrategy".into(), v.clone());
+    }
     Value::Object(map)
+}
+
+/// The `sharingStrategy` of a container definition's (or container
+/// override's) GPU resource requirement, if it names one.
+pub(crate) fn gpu_sharing_strategy_of(def: &Value) -> Option<Value> {
+    def.get("resourceRequirements")?
+        .as_array()?
+        .iter()
+        .find(|r| r.get("type").and_then(|v| v.as_str()) == Some("GPU"))?
+        .get("sharingStrategy")
+        .filter(|v| !v.is_null())
+        .cloned()
+}
+
+/// Validate `serviceConnectConfiguration.containerConfigurations`: at most
+/// 10 entries, each setting exactly one member (`logLevel`: `debug` |
+/// `info`), and no setting repeated.
+pub(crate) fn validate_service_connect_container_configurations(
+    service_connect: Option<&Value>,
+) -> Result<(), AwsServiceError> {
+    let Some(list) = service_connect
+        .and_then(|sc| sc.get("containerConfigurations"))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(());
+    };
+    let entries = list
+        .as_array()
+        .ok_or_else(|| invalid_parameter("containerConfigurations must be a list."))?;
+    if entries.len() > 10 {
+        return Err(invalid_parameter(
+            "containerConfigurations can contain at most 10 settings.",
+        ));
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in entries {
+        let obj = entry.as_object().filter(|o| o.len() == 1).ok_or_else(|| {
+            invalid_parameter("Each containerConfigurations entry must set exactly one setting.")
+        })?;
+        let (key, value) = obj.iter().next().unwrap();
+        match key.as_str() {
+            "logLevel" => {
+                if !matches!(value.as_str(), Some("debug" | "info")) {
+                    return Err(invalid_parameter(
+                        "Invalid value for containerConfigurations logLevel. Valid values: debug, info",
+                    ));
+                }
+            }
+            other => {
+                return Err(invalid_parameter(format!(
+                    "Unknown containerConfigurations setting '{other}'. Valid settings: logLevel"
+                )))
+            }
+        }
+        if seen.contains(&key.as_str()) {
+            return Err(invalid_parameter(format!(
+                "The containerConfigurations setting {key} can appear only once."
+            )));
+        }
+        seen.push(key.as_str());
+    }
+    Ok(())
+}
+
+/// A task container's GPU sharing strategy: a RunTask container override that
+/// carries a GPU resource requirement replaces the task definition's.
+pub(crate) fn container_gpu_sharing_strategy(
+    def: &Value,
+    overrides: Option<&Value>,
+) -> Option<Value> {
+    let name = def.get("name").and_then(|v| v.as_str());
+    let override_gpu = overrides
+        .and_then(|o| o.get("containerOverrides"))
+        .and_then(|v| v.as_array())
+        .and_then(|list| {
+            list.iter()
+                .find(|o| o.get("name").and_then(|v| v.as_str()) == name)
+        })
+        .filter(|o| {
+            o.get("resourceRequirements")
+                .and_then(|v| v.as_array())
+                .is_some_and(|reqs| {
+                    reqs.iter()
+                        .any(|r| r.get("type").and_then(|v| v.as_str()) == Some("GPU"))
+                })
+        });
+    match override_gpu {
+        Some(o) => gpu_sharing_strategy_of(o),
+        None => gpu_sharing_strategy_of(def),
+    }
+}
+
+/// Validate the `resourceRequirements` of every container definition the way
+/// RegisterTaskDefinition does: a known `type`; `sharingStrategy` only on a
+/// GPU requirement and never together with `value`; `value` otherwise
+/// required; NVIDIA MPS `memory` at least 1 MiB and `maxComputePercent`
+/// within 1..=100; every GPU container in the task using the same option; and
+/// no GPU sharing for task definitions that require `EXTERNAL`.
+pub(crate) fn validate_resource_requirements(
+    container_definitions: &[Value],
+    requires_compatibilities: &[String],
+) -> Result<(), AwsServiceError> {
+    // `Some(true)` once a GPU container shares, `Some(false)` once one is
+    // exclusive; mixing the two is refused.
+    let mut gpu_sharing: Option<bool> = None;
+    for cd in container_definitions {
+        let Some(reqs) = cd.get("resourceRequirements").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for req in reqs {
+            let kind = req.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
+                client_exception("Resource requirement is missing required field: type")
+            })?;
+            if !matches!(kind, "GPU" | "InferenceAccelerator" | "NeuronDevice") {
+                return Err(client_exception(format!(
+                    "Resource requirement type '{kind}' is invalid. Valid values are: GPU, InferenceAccelerator, NeuronDevice"
+                )));
+            }
+            let value = req
+                .get("value")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty());
+            let strategy = req.get("sharingStrategy").filter(|v| !v.is_null());
+            match strategy {
+                Some(strategy) => {
+                    if kind != "GPU" {
+                        return Err(client_exception(
+                            "A sharing strategy can only be specified for a GPU resource requirement.",
+                        ));
+                    }
+                    if value.is_some() {
+                        return Err(client_exception(
+                            "A GPU resource requirement can specify either value or sharingStrategy, but not both.",
+                        ));
+                    }
+                    validate_sharing_strategy(strategy)?;
+                    if requires_compatibilities.iter().any(|c| c == "EXTERNAL") {
+                        return Err(client_exception(
+                            "GPU sharing is not supported for task definitions that require EXTERNAL compatibility.",
+                        ));
+                    }
+                }
+                None if value.is_none() => {
+                    return Err(client_exception(format!(
+                        "Resource requirement of type {kind} is missing required field: value"
+                    )));
+                }
+                None => {}
+            }
+            if kind == "GPU" {
+                let shares = strategy.is_some();
+                if gpu_sharing.is_some_and(|prev| prev != shares) {
+                    return Err(client_exception(
+                        "The containers in a task that request GPUs must all use the same option: either all specify a sharing strategy or none do.",
+                    ));
+                }
+                gpu_sharing = Some(shares);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_sharing_strategy(strategy: &Value) -> Result<(), AwsServiceError> {
+    let mps = strategy
+        .get("nvidiaMps")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| client_exception("sharingStrategy must specify nvidiaMps."))?;
+    match mps.get("memory").and_then(|v| v.as_i64()) {
+        Some(m) if m >= 1 => {}
+        Some(_) => {
+            return Err(client_exception(
+                "nvidiaMps memory must be greater than or equal to 1.",
+            ))
+        }
+        None => {
+            return Err(client_exception(
+                "nvidiaMps is missing required field: memory",
+            ))
+        }
+    }
+    if let Some(pct) = mps.get("maxComputePercent").filter(|v| !v.is_null()) {
+        match pct.as_i64() {
+            Some(p) if (1..=100).contains(&p) => {}
+            _ => {
+                return Err(client_exception(
+                    "nvidiaMps maxComputePercent must be between 1 and 100.",
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_service_name(name: &str) -> Result<(), AwsServiceError> {
@@ -915,6 +1115,7 @@ pub(crate) fn spawn_service_tasks(
                 health_status: Some("UNKNOWN".into()),
                 managed_agents: None,
                 image_digest: None,
+                gpu_sharing_strategy: gpu_sharing_strategy_of(def),
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {
@@ -1109,6 +1310,7 @@ pub(crate) fn spawn_daemon_tasks(
                 health_status: Some("UNKNOWN".into()),
                 managed_agents: None,
                 image_digest: None,
+                gpu_sharing_strategy: gpu_sharing_strategy_of(def),
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {
@@ -1486,6 +1688,12 @@ pub(crate) fn service_revision_to_json(rev: &crate::state::ServiceRevision) -> V
         map.insert(
             "vpcLatticeConfigurations".into(),
             Value::Array(rev.vpc_lattice_configurations.clone()),
+        );
+    }
+    if !rev.gateway_connectors.is_empty() {
+        map.insert(
+            "gatewayConnectors".into(),
+            Value::Array(rev.gateway_connectors.clone()),
         );
     }
     let resolved_lbs = resolved(&rev.load_balancers);

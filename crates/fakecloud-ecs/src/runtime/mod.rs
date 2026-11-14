@@ -2473,6 +2473,7 @@ mod tests {
             health_status: None,
             managed_agents: None,
             image_digest: None,
+            gpu_sharing_strategy: None,
         }
     }
 
@@ -3512,6 +3513,7 @@ mod tests {
             volume_configurations: vec![],
             service_connect_configuration: None,
             vpc_lattice_configurations: vec![],
+            gateway_connectors: vec![],
             tags: Vec::new(),
             created_at: Utc::now(),
             created_by: None,
@@ -3554,6 +3556,7 @@ mod tests {
             health_status: None,
             managed_agents: None,
             image_digest: None,
+            gpu_sharing_strategy: None,
         }];
         acct.tasks.insert("t1".into(), task);
 
@@ -3641,6 +3644,7 @@ mod tests {
             volume_configurations: vec![],
             service_connect_configuration: None,
             vpc_lattice_configurations: vec![],
+            gateway_connectors: vec![],
             tags: Vec::new(),
             created_at: Utc::now(),
             created_by: None,

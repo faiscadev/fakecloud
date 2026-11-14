@@ -105,6 +105,7 @@ impl EcsService {
                     .collect()
             })
             .unwrap_or_default();
+        validate_resource_requirements(&container_definitions, &requires_compatibilities)?;
         // Compatibilities reflect what the task definition is compatible with.
         // We always claim EC2 and FARGATE since we execute via Docker either
         // way — callers with stricter requirements set `requiresCompatibilities`.
