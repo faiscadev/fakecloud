@@ -209,6 +209,104 @@ impl SsmService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
+    /// RegisterDefaultHostManagementConfiguration: DHMC is the
+    /// `/ssm/managed-instance/default-ec2-instance-management-role` service
+    /// setting, whose value is the registered role's name (with its path).
+    /// `SELF_MANAGED` registers the caller's `RoleArn`; `SERVICE_MANAGED`
+    /// registers the role Systems Manager manages in IAM's reserved path.
+    /// An already-registered different role is only replaced with
+    /// `Overwrite`; registering the same role again is a no-op success.
+    pub(super) fn register_default_host_management_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("PermissionModel", &body["PermissionModel"])?;
+        validate_optional_enum(
+            "PermissionModel",
+            body["PermissionModel"].as_str(),
+            &["SERVICE_MANAGED", "SELF_MANAGED"],
+        )?;
+        validate_optional_string_length("RoleArn", body["RoleArn"].as_str(), 20, 2048)?;
+        let permission_model = body["PermissionModel"]
+            .as_str()
+            .ok_or_else(|| missing("PermissionModel"))?;
+        let overwrite = body["Overwrite"].as_bool().unwrap_or(false);
+        let role_arn = body["RoleArn"].as_str();
+
+        let account_id = req.account_id.clone();
+        let (role_name, response_arn) = match (permission_model, role_arn) {
+            ("SELF_MANAGED", None) => {
+                return Err(aws_400(
+                    "ValidationException",
+                    "RoleArn is required when PermissionModel is SELF_MANAGED.",
+                ))
+            }
+            ("SERVICE_MANAGED", Some(_)) => {
+                return Err(aws_400(
+                    "ValidationException",
+                    "RoleArn must not be set when PermissionModel is SERVICE_MANAGED.",
+                ))
+            }
+            ("SELF_MANAGED", Some(arn)) => {
+                let name = dhmc_role_name_from_arn(arn).ok_or_else(|| {
+                    aws_400(
+                        "ValidationException",
+                        format!(
+                            "1 validation error detected: Value '{arn}' at 'roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: ^arn:aws[a-z0-9-]*:iam::\\d{{12}}:role/[\\w+=,.@/-]+$"
+                        ),
+                    )
+                })?;
+                (name, arn.to_string())
+            }
+            _ => {
+                let name = DHMC_SERVICE_MANAGED_ROLE.to_string();
+                let arn = Arn::global_in(&req.region, "iam", &account_id, &format!("role/{name}"))
+                    .to_string();
+                (name, arn)
+            }
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.regional_mut(&req.account_id, &req.region);
+        if let Some(current) = state.service_settings.get(DHMC_SETTING_ID) {
+            if !current.setting_value.is_empty() && current.setting_value != role_name && !overwrite
+            {
+                return Err(aws_400(
+                    "ValidationException",
+                    format!(
+                        "Default Host Management Configuration is already registered with role {}. Set Overwrite to true to replace it.",
+                        current.setting_value
+                    ),
+                ));
+            }
+        }
+        let user = Arn::global_in(&req.region, "iam", &state.account_id, "root").to_string();
+        state.service_settings.insert(
+            DHMC_SETTING_ID.to_string(),
+            SsmServiceSetting {
+                setting_id: DHMC_SETTING_ID.to_string(),
+                setting_value: role_name,
+                last_modified_date: Utc::now(),
+                last_modified_user: user,
+                status: "Customized".to_string(),
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({ "RoleArn": response_arn })))
+    }
+
+    /// DeregisterDefaultHostManagementConfiguration: reset the DHMC service
+    /// setting to its default (no role). Idempotent.
+    pub(super) fn deregister_default_host_management_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.regional_mut(&req.account_id, &req.region);
+        state.service_settings.remove(DHMC_SETTING_ID);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
     // ── Inventory ─────────────────────────────────────────────────
 }
 
@@ -326,6 +424,36 @@ fn parse_ical_datetime(value: &str) -> Option<DateTime<Utc>> {
     }
     let d = NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
     Some(Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0).unwrap()))
+}
+
+/// The service setting that holds the Default Host Management Configuration.
+pub(super) const DHMC_SETTING_ID: &str =
+    "/ssm/managed-instance/default-ec2-instance-management-role";
+
+/// The role (path and name) a `SERVICE_MANAGED` DHMC registers, in IAM's
+/// reserved path for Systems Manager.
+pub(super) const DHMC_SERVICE_MANAGED_ROLE: &str =
+    "aws-reserved/ssm.amazonaws.com/AWSSystemsManagerDefaultEC2InstanceManagementRole";
+
+/// The role path and name a DHMC `RoleArn` names (`service-role/MyRole` for
+/// `arn:aws:iam::123456789012:role/service-role/MyRole`), when it matches the
+/// model's `^arn:aws[a-z0-9-]*:iam::\d{12}:role/[\w+=,.@/-]+$` pattern.
+pub(super) fn dhmc_role_name_from_arn(arn: &str) -> Option<String> {
+    let rest = arn.strip_prefix("arn:aws")?;
+    let (partition_tail, rest) = rest.split_once(":iam::")?;
+    if !partition_tail
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return None;
+    }
+    let (account, name) = rest.split_once(":role/")?;
+    let valid_name = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || "+=,.@/-".contains(c));
+    (account.len() == 12 && account.chars().all(|c| c.is_ascii_digit()) && valid_name)
+        .then(|| name.to_string())
 }
 
 pub(super) fn get_default_service_setting(setting_id: &str) -> String {

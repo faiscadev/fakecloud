@@ -26,7 +26,8 @@ pub enum Rule {
 }
 
 // Enum value sets, from the model.
-const RESOURCE_OWNER: &[&str] = &["SELF", "OTHER_ACCOUNTS"];
+// The model's `OTHER_ACCOUNTS` member has the wire value `OTHER-ACCOUNTS`.
+const RESOURCE_OWNER: &[&str] = &["SELF", "OTHER-ACCOUNTS"];
 const ASSOCIATION_TYPE: &[&str] = &["PRINCIPAL", "RESOURCE", "SOURCE"];
 const ASSOCIATION_STATUS: &[&str] = &[
     "ASSOCIATING",
@@ -44,6 +45,14 @@ const PERMISSION_TYPE_FILTER: &[&str] = &["ALL", "AWS_MANAGED", "CUSTOMER_MANAGE
 const PERMISSION_FEATURE_SET: &[&str] =
     &["CREATED_FROM_POLICY", "PROMOTING_TO_STANDARD", "STANDARD"];
 const WORK_STATUS: &[&str] = &["IN_PROGRESS", "COMPLETED", "FAILED"];
+const PERMISSION_STATUS: &[&str] = &[
+    "ATTACHABLE",
+    "UNATTACHABLE",
+    "DELETING",
+    "DELETED",
+    "DEPRECATED",
+];
+const UPDATE_PERMISSION_STATUS: &[&str] = &["ATTACHABLE", "DEPRECATED"];
 
 fn bad(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterException", msg)
@@ -157,10 +166,17 @@ fn input_rules(action: &str) -> Vec<Rule> {
             Rule::LenMax("name", 36),
             Rule::Required("resourceType"),
             Rule::Required("policyTemplate"),
+            Rule::LenMax("permissionTemplateParameters", 100),
         ],
         "CreatePermissionVersion" => vec![
             Rule::Required("permissionArn"),
             Rule::Required("policyTemplate"),
+            Rule::LenMax("permissionTemplateParameters", 100),
+        ],
+        "UpdatePermission" => vec![
+            Rule::Required("permissionArn"),
+            Rule::Required("status"),
+            Rule::Enum("status", UPDATE_PERMISSION_STATUS),
         ],
         "CreateResourceShare" => vec![Rule::Required("name")],
         "GetPermission" | "ListPermissionVersions" => {
@@ -219,12 +235,17 @@ fn input_rules(action: &str) -> Vec<Rule> {
             let mut v = vec![
                 Rule::Enum("associationStatus", ASSOCIATION_STATUS),
                 Rule::Enum("featureSet", PERMISSION_FEATURE_SET),
+                Rule::Enum("resourceOwner", RESOURCE_OWNER),
             ];
             v.extend(max_results_rules());
             v
         }
         "ListPermissions" => {
-            let mut v = vec![Rule::Enum("permissionType", PERMISSION_TYPE_FILTER)];
+            let mut v = vec![
+                Rule::Enum("permissionType", PERMISSION_TYPE_FILTER),
+                Rule::Enum("resourceOwner", RESOURCE_OWNER),
+                Rule::Enum("permissionStatus", PERMISSION_STATUS),
+            ];
             v.extend(max_results_rules());
             v
         }

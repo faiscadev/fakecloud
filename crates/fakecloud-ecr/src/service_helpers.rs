@@ -42,6 +42,8 @@ pub(crate) fn is_mutating(action: &str) -> bool {
             | "RegisterPullTimeUpdateExclusion"
             | "DeregisterPullTimeUpdateExclusion"
             | "UpdateImageStorageClass"
+            | "StartReplicationBackfill"
+            | "StopReplicationBackfill"
     )
 }
 
@@ -817,9 +819,15 @@ pub(crate) fn repository_filters_match(
     if filters.is_empty() {
         return true;
     }
-    filters
-        .iter()
-        .any(|f| registry_filter_matches(f, repo_name))
+    // Replication filters are `PREFIX_MATCH` (the model's only
+    // `RepositoryFilterType`): the repository name starts with the filter.
+    filters.iter().any(|f| {
+        if f.filter_type.eq_ignore_ascii_case("PREFIX_MATCH") {
+            repo_name.starts_with(&f.filter)
+        } else {
+            registry_filter_matches(f, repo_name)
+        }
+    })
 }
 
 /// Enforce the cross-account repo-policy gate at a handler. Returns

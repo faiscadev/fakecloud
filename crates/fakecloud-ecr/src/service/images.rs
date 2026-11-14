@@ -147,9 +147,9 @@ impl EcrService {
     /// same-account targets share the source state (fakecloud collapses
     /// regions per process) but still get their own status entry.
     pub(crate) fn replicate_image(&self, source_account: &str, repo_name: &str, digest: &str) {
-        use crate::state::{ImageReplicationStatus, Repository};
+        use crate::state::ImageReplicationStatus;
 
-        let (rules, image, layer_blobs, source_registry_id, source_region, source_uri) = {
+        let (rules, source_registry_id, source_region) = {
             let accounts = self.state.read();
             let Some(state) = accounts.get(source_account) else {
                 return;
@@ -160,27 +160,15 @@ impl EcrService {
             let Some(repo) = state.repositories.get(repo_name) else {
                 return;
             };
-            let Some(image) = repo.images.get(digest).cloned() else {
+            if !repo.images.contains_key(digest) {
                 return;
-            };
-            let layers: Vec<crate::state::Layer> = layers_for_image(repo, digest);
+            }
             (
                 cfg.rules.clone(),
-                image,
-                layers,
                 repo.registry_id.clone(),
                 state.region.clone(),
-                repo.repository_uri.clone(),
             )
         };
-
-        // Source URI is `<host>/<repo_name>` — strip the trailing repo
-        // name to recover the host so the destination repo's URI keeps
-        // pointing at the same fakecloud endpoint.
-        let endpoint = source_uri
-            .strip_suffix(&format!("/{repo_name}"))
-            .unwrap_or(&source_uri)
-            .to_string();
 
         let matching: Vec<_> = rules
             .into_iter()
@@ -242,32 +230,18 @@ impl EcrService {
             // fakecloud process serves the "destination" region too, so a
             // separate copy would duplicate without benefit. The status
             // entry still records the rule fired.
-            if dest.registry_id != source_registry_id {
-                let target_state = accounts.get_or_create(&dest.registry_id);
-                // Provision the mirror repo on demand. Real ECR only
-                // replicates into existing repos; create-on-write keeps
-                // the fakecloud flow honest by mirroring the source repo
-                // metadata when the target hasn't been pre-provisioned.
-                if !target_state.repositories.contains_key(repo_name) {
-                    let arn =
-                        crate::state::repository_arn(&dest.region, &dest.registry_id, repo_name);
-                    let repo = Repository::new(repo_name, arn, &dest.registry_id, &endpoint);
-                    target_state
-                        .repositories
-                        .insert(repo_name.to_string(), repo);
-                }
-                let target_repo = target_state.repositories.get_mut(repo_name).unwrap();
-                target_repo
-                    .images
-                    .entry(digest.to_string())
-                    .or_insert_with(|| image.clone());
-                for layer in &layer_blobs {
-                    target_repo
-                        .layers
-                        .entry(layer.digest.clone())
-                        .or_insert_with(|| layer.clone());
-                }
-            }
+            // Provision the mirror repo on demand and copy the image, its
+            // layers and tags (the same path replication backfills use).
+            // Real ECR only replicates into existing repos; create-on-write
+            // keeps the fakecloud flow honest by mirroring the source repo
+            // metadata when the target hasn't been pre-provisioned.
+            super::backfill::copy_image_to_destination(
+                &mut accounts,
+                source_account,
+                repo_name,
+                digest,
+                dest,
+            );
             statuses[status_idx].status = "COMPLETE".to_string();
         }
 

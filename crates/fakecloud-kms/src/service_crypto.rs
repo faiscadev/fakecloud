@@ -773,6 +773,9 @@ impl KmsService {
         if let Some(ref enc_algs) = key.encryption_algorithms {
             response["EncryptionAlgorithms"] = json!(enc_algs);
         }
+        if let Some(algs) = encapsulation_algorithms_for_key(key) {
+            response["EncapsulationAlgorithms"] = json!(algs);
+        }
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1231,6 +1234,170 @@ impl KmsService {
             .unwrap(),
         ))
     }
+
+    /// Encapsulate: a fresh 32-byte shared secret and its ML-KEM ciphertext
+    /// under the key's public (encapsulation) key.
+    pub(super) fn encapsulate(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        // Encapsulate declares no ValidationException: a missing KeyId is a
+        // NotFoundException, a bad algorithm an InvalidKeyUsageException.
+        let key_id =
+            Self::require_key_id(&body).map_err(|e| recode_validation(e, "NotFoundException"))?;
+        let accounts = self.state.read();
+        let empty = KmsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let key = encapsulation_key(req, state, &key_id)?;
+        Self::authorize_direct_key_use(req, key, "kms:Encapsulate", &Value::Null, &[])?;
+        require_usable_key_state(key)?;
+        require_key_usage_encapsulate(key)?;
+        let algorithm = require_encapsulation_algorithm(&body)?;
+        require_no_dry_run(&body)?;
+
+        let public_der = key.asymmetric_public_key_der.as_deref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                format!("Key '{}' has no ML-KEM key material", key.arn),
+            )
+        })?;
+        let (ciphertext, shared_secret) = super::asym_mlkem::encapsulate(&key.key_spec, public_der)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("ML-KEM encapsulation failed: {e}"),
+                )
+            })?;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.arn,
+                "SharedSecret": b64.encode(shared_secret),
+                "SharedSecretCiphertextBlob": b64.encode(ciphertext),
+                "EncapsulationAlgorithm": algorithm,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    /// Decapsulate: recover the shared secret from an ML-KEM ciphertext with
+    /// the key's private (decapsulation) key. A ciphertext of the wrong
+    /// length for the key spec is an InvalidCiphertextException; any other
+    /// ciphertext yields a 32-byte value (FIPS 203 implicit rejection), as
+    /// in AWS.
+    pub(super) fn decapsulate(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let key_id =
+            Self::require_key_id(&body).map_err(|e| recode_validation(e, "NotFoundException"))?;
+        let ciphertext = body["SharedSecretCiphertextBlob"]
+            .as_str()
+            .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCiphertextException",
+                    "SharedSecretCiphertextBlob is required and must be a non-empty base64 blob",
+                )
+            })?;
+        let accounts = self.state.read();
+        let empty = KmsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let key = encapsulation_key(req, state, &key_id)?;
+        Self::authorize_direct_key_use(req, key, "kms:Decapsulate", &Value::Null, &[])?;
+        require_usable_key_state(key)?;
+        require_key_usage_encapsulate(key)?;
+        let algorithm = require_encapsulation_algorithm(&body)?;
+        if super::asym_mlkem::ciphertext_len(&key.key_spec) != Some(ciphertext.len()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidCiphertextException",
+                format!(
+                    "The SharedSecretCiphertextBlob length {} is not valid for the KMS key spec {}.",
+                    ciphertext.len(),
+                    key.key_spec
+                ),
+            ));
+        }
+        require_no_dry_run(&body)?;
+
+        let private_der = key.asymmetric_private_key_der.as_deref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                format!("Key '{}' has no ML-KEM key material", key.arn),
+            )
+        })?;
+        let shared_secret = super::asym_mlkem::decapsulate(&key.key_spec, private_der, &ciphertext)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("ML-KEM decapsulation failed: {e}"),
+                )
+            })?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.arn,
+                "SharedSecret": base64::engine::general_purpose::STANDARD.encode(shared_secret),
+                "EncapsulationAlgorithm": algorithm,
+            }))
+            .unwrap(),
+        ))
+    }
+}
+
+/// The key an Encapsulate / Decapsulate request names in `state`.
+fn encapsulation_key<'a>(
+    req: &AwsRequest,
+    state: &'a KmsState,
+    key_id: &str,
+) -> Result<&'a KmsKey, AwsServiceError> {
+    KmsService::resolve_key_id_with_state(state, &req.region, key_id)
+        .and_then(|resolved| state.keys.get(&resolved))
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                crate::hook::not_found_message(&req.account_id, &req.region, key_id),
+            )
+        })
+}
+
+/// `EncapsulationAlgorithm` is required and `ML_KEM` is its only value.
+/// Neither operation declares ValidationException, so a missing or unknown
+/// algorithm is an InvalidKeyUsageException, as for Sign's SigningAlgorithm.
+fn require_encapsulation_algorithm(body: &Value) -> Result<&'static str, AwsServiceError> {
+    match body["EncapsulationAlgorithm"].as_str() {
+        Some(super::asym_mlkem::ML_KEM) => Ok(super::asym_mlkem::ML_KEM),
+        Some(other) => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!(
+                "1 validation error detected: Value '{other}' at 'EncapsulationAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: ['ML_KEM']"
+            ),
+        )),
+        None => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            "1 validation error detected: Value null at 'EncapsulationAlgorithm' failed to satisfy constraint: Member must not be null",
+        )),
+    }
+}
+
+/// `DryRun: true` on a request that would otherwise succeed is answered with
+/// AWS's DryRunOperationException instead of performing the operation.
+fn require_no_dry_run(body: &Value) -> Result<(), AwsServiceError> {
+    if body["DryRun"].as_bool() == Some(true) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::PRECONDITION_FAILED,
+            "DryRunOperationException",
+            "The request would have succeeded, but the DryRun option is set.",
+        ));
+    }
+    Ok(())
 }
 
 /// For a ciphertext an asymmetric (RSA) key produced, AWS requires the
@@ -1481,6 +1648,23 @@ fn generate_data_keypair_bytes(key_pair_spec: &str) -> Result<(Vec<u8>, Vec<u8>)
                     StatusCode::BAD_REQUEST,
                     "ValidationException",
                     format!("RSA keypair generation failed: {e}"),
+                )
+            })?
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Unsupported KeyPairSpec: {key_pair_spec}"),
+                )
+            });
+    }
+    if super::asym_mlkem::is_ml_kem_spec(key_pair_spec) {
+        return super::asym_mlkem::generate_keypair(key_pair_spec)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("ML-KEM keypair generation failed: {e}"),
                 )
             })?
             .ok_or_else(|| {

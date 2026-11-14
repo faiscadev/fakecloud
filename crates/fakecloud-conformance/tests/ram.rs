@@ -42,3 +42,82 @@ use helpers::TestServer;
 async fn ram_probe() {
     let _server = TestServer::start().await;
 }
+
+/// Drive a RAM operation over raw restJson1 (`POST /<op lowercased>`): the
+/// pinned SDK predates UpdatePermission.
+async fn ram_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{}", server.endpoint(), op.to_ascii_lowercase()))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/ram/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[test_action("ram", "UpdatePermission", checksum = "fc69a92f")]
+#[tokio::test]
+async fn ram_update_permission() {
+    let server = TestServer::start().await;
+    let (s, created) = ram_raw(
+        &server,
+        "CreatePermission",
+        serde_json::json!({
+            "name": "conf-perm",
+            "resourceType": "ec2:Subnet",
+            "policyTemplate": "{\"Effect\":\"Allow\",\"Action\":[\"ec2:DescribeSubnets\"]}",
+        }),
+    )
+    .await;
+    assert_eq!(s, 200, "{created}");
+    let arn = created["permission"]["arn"].as_str().unwrap().to_string();
+
+    let (s, b) = ram_raw(
+        &server,
+        "UpdatePermission",
+        serde_json::json!({"permissionArn": arn, "status": "DEPRECATED"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["permissionStatus"], "DEPRECATED");
+
+    // A deprecated permission is listed by its status and takes no new
+    // resource share associations.
+    let (_, listed) = ram_raw(
+        &server,
+        "ListPermissions",
+        serde_json::json!({"permissionStatus": "DEPRECATED", "resourceOwner": "SELF"}),
+    )
+    .await;
+    assert_eq!(listed["permissions"][0]["arn"], arn.as_str());
+    let (s, _) = ram_raw(
+        &server,
+        "CreateResourceShare",
+        serde_json::json!({"name": "s", "permissionArns": [arn]}),
+    )
+    .await;
+    assert_eq!(s, 400);
+
+    let (s, b) = ram_raw(
+        &server,
+        "UpdatePermission",
+        serde_json::json!({"permissionArn": arn, "status": "ATTACHABLE"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["permissionStatus"], "ATTACHABLE");
+}

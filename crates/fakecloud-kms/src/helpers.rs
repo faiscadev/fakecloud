@@ -676,6 +676,8 @@ fn allowed_usages_for_key_spec(key_spec: &str) -> &'static [&'static str] {
         "SM2" => &["SIGN_VERIFY", "ENCRYPT_DECRYPT", "KEY_AGREEMENT"],
         // ML-DSA post-quantum specs are signing-only.
         s if s.starts_with("ML_DSA_") => &["SIGN_VERIFY"],
+        // ML-KEM post-quantum specs only encapsulate / decapsulate.
+        s if s.starts_with("ML_KEM_") => &["ENCAPSULATE_DECAPSULATE"],
         _ => &[],
     }
 }
@@ -796,6 +798,28 @@ pub(crate) fn encryption_algorithms_for_key(
     }
 }
 
+/// `EncapsulationAlgorithms` (KeyMetadata, GetPublicKey): present only for an
+/// `ENCAPSULATE_DECAPSULATE` key, whose one algorithm is `ML_KEM`.
+pub(crate) fn encapsulation_algorithms_for_key(key: &KmsKey) -> Option<[&'static str; 1]> {
+    (key.key_usage == "ENCAPSULATE_DECAPSULATE").then_some([asym_mlkem::ML_KEM])
+}
+
+/// Encapsulate / Decapsulate require an `ENCAPSULATE_DECAPSULATE` (ML-KEM)
+/// key; any other key is an `InvalidKeyUsageException`.
+pub(crate) fn require_key_usage_encapsulate(key: &KmsKey) -> Result<(), AwsServiceError> {
+    if key.key_usage != "ENCAPSULATE_DECAPSULATE" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!(
+                "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCAPSULATE_DECAPSULATE but is {}.",
+                key.arn, key.key_usage
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn mac_algorithms_for_key_spec(key_spec: &str) -> Option<Vec<String>> {
     match key_spec {
         "HMAC_224" => Some(vec!["HMAC_SHA_224".into()]),
@@ -870,6 +894,9 @@ pub(crate) fn key_metadata_json(key: &KmsKey, account_id: &str) -> Value {
     }
     if let Some(ref mac_algs) = key.mac_algorithms {
         meta["MacAlgorithms"] = json!(mac_algs);
+    }
+    if let Some(algs) = encapsulation_algorithms_for_key(key) {
+        meta["EncapsulationAlgorithms"] = json!(algs);
     }
     if let Some(dd) = key.deletion_date {
         meta["DeletionDate"] = json!(dd);

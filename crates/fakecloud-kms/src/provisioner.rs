@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use super::asym;
 use super::asym_ecdsa;
+use super::asym_mlkem;
 use super::helpers::{
     default_key_policy, encryption_algorithms_for_key, mac_algorithms_for_key_spec, rand_bytes,
     signing_algorithms_for_key_spec,
@@ -78,6 +79,9 @@ pub const VALID_KEY_SPECS: &[&str] = &[
     "ML_DSA_44",
     "ML_DSA_65",
     "ML_DSA_87",
+    "ML_KEM_512",
+    "ML_KEM_768",
+    "ML_KEM_1024",
 ];
 
 /// AWS KMS key usages accepted across `CreateKey` / CFN.
@@ -86,6 +90,7 @@ pub const VALID_KEY_USAGES: &[&str] = &[
     "SIGN_VERIFY",
     "GENERATE_VERIFY_MAC",
     "KEY_AGREEMENT",
+    "ENCAPSULATE_DECAPSULATE",
 ];
 
 /// Validate that a `(key_usage, key_spec)` pair is supported by
@@ -106,6 +111,7 @@ pub fn validate_key_usage_for_spec(key_usage: &str, key_spec: &str) -> Result<()
     let is_sm2 = key_spec == "SM2";
     // ML-DSA post-quantum specs are signing-only, like ECC secp256k1.
     let is_ml_dsa = key_spec.starts_with("ML_DSA_");
+    let is_ml_kem = asym_mlkem::is_ml_kem_spec(key_spec);
     match key_usage {
         "ENCRYPT_DECRYPT" => {
             if !(is_symmetric || is_rsa || is_sm2) {
@@ -132,6 +138,13 @@ pub fn validate_key_usage_for_spec(key_usage: &str, key_spec: &str) -> Result<()
             if !is_ecc {
                 return Err(format!(
                     "KeySpec {key_spec} does not support KeyUsage KEY_AGREEMENT"
+                ));
+            }
+        }
+        "ENCAPSULATE_DECAPSULATE" => {
+            if !is_ml_kem {
+                return Err(format!(
+                    "KeySpec {key_spec} does not support KeyUsage ENCAPSULATE_DECAPSULATE"
                 ));
             }
         }
@@ -185,6 +198,11 @@ pub fn build_kms_key(
         asym_pub = Some(k);
     } else if let Some((p, k)) = asym_ecdsa::generate_keypair(&input.key_spec)
         .map_err(|e| format!("ecdsa keygen failed: {e}"))?
+    {
+        asym_priv = Some(p);
+        asym_pub = Some(k);
+    } else if let Some((p, k)) = asym_mlkem::generate_keypair(&input.key_spec)
+        .map_err(|e| format!("ml-kem keygen failed: {e}"))?
     {
         asym_priv = Some(p);
         asym_pub = Some(k);
@@ -557,5 +575,30 @@ mod tests {
     fn validate_key_usage_rejects_ml_dsa_encrypt_decrypt() {
         assert!(validate_key_usage_for_spec("SIGN_VERIFY", "ML_DSA_87").is_ok());
         assert!(validate_key_usage_for_spec("ENCRYPT_DECRYPT", "ML_DSA_87").is_err());
+    }
+
+    #[test]
+    fn build_kms_key_generates_ml_kem_material() {
+        let input = KeyCreationInput {
+            key_usage: "ENCAPSULATE_DECAPSULATE".to_string(),
+            key_spec: "ML_KEM_768".to_string(),
+            ..Default::default()
+        };
+        let key = build_kms_key("us-east-1", "123456789012", &input).unwrap();
+        let (ct, ss) = asym_mlkem::encapsulate(
+            "ML_KEM_768",
+            key.asymmetric_public_key_der.as_ref().unwrap(),
+        )
+        .unwrap();
+        let recovered = asym_mlkem::decapsulate(
+            "ML_KEM_768",
+            key.asymmetric_private_key_der.as_ref().unwrap(),
+            &ct,
+        )
+        .unwrap();
+        assert_eq!(recovered, ss);
+        assert!(validate_key_usage_for_spec("ENCAPSULATE_DECAPSULATE", "ML_KEM_512").is_ok());
+        assert!(validate_key_usage_for_spec("ENCAPSULATE_DECAPSULATE", "RSA_2048").is_err());
+        assert!(validate_key_usage_for_spec("SIGN_VERIFY", "ML_KEM_512").is_err());
     }
 }

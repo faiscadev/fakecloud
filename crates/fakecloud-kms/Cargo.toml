@@ -34,6 +34,7 @@ p256 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8"] }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8"] }
 k256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 p521 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+ml-kem = { workspace = true }
 
 [features]
 # Test support (`fakecloud_kms::test_support`) for crates that assert on the
