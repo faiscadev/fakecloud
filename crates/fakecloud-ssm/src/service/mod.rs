@@ -520,6 +520,12 @@ impl AwsService for SsmService {
             "GetServiceSetting" => self.get_service_setting(&req),
             "ResetServiceSetting" => self.reset_service_setting(&req),
             "UpdateServiceSetting" => self.update_service_setting(&req),
+            "RegisterDefaultHostManagementConfiguration" => {
+                self.register_default_host_management_configuration(&req)
+            }
+            "DeregisterDefaultHostManagementConfiguration" => {
+                self.deregister_default_host_management_configuration(&req)
+            }
             _ => Err(AwsServiceError::action_not_implemented("ssm", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -700,6 +706,8 @@ impl AwsService for SsmService {
             "GetServiceSetting",
             "ResetServiceSetting",
             "UpdateServiceSetting",
+            "RegisterDefaultHostManagementConfiguration",
+            "DeregisterDefaultHostManagementConfiguration",
         ]
     }
 }

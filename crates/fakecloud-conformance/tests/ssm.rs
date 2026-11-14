@@ -2375,3 +2375,66 @@ async fn ssm_cloud_connector_lifecycle() {
     .await;
     assert_eq!(status, 400);
 }
+
+const DHMC_SETTING: &str = "/ssm/managed-instance/default-ec2-instance-management-role";
+
+#[test_action(
+    "ssm",
+    "RegisterDefaultHostManagementConfiguration",
+    checksum = "9d13abea"
+)]
+#[tokio::test]
+async fn ssm_register_default_host_management_configuration() {
+    let server = TestServer::start().await;
+    let arn = "arn:aws:iam::123456789012:role/service-role/DhmcRole";
+    let (status, body) = ssm_raw(
+        &server,
+        "RegisterDefaultHostManagementConfiguration",
+        serde_json::json!({ "PermissionModel": "SELF_MANAGED", "RoleArn": arn }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["RoleArn"], arn);
+    let (_, setting) = ssm_raw(
+        &server,
+        "GetServiceSetting",
+        serde_json::json!({ "SettingId": DHMC_SETTING }),
+    )
+    .await;
+    assert_eq!(
+        setting["ServiceSetting"]["SettingValue"],
+        "service-role/DhmcRole"
+    );
+}
+
+#[test_action(
+    "ssm",
+    "DeregisterDefaultHostManagementConfiguration",
+    checksum = "2c05e05d"
+)]
+#[tokio::test]
+async fn ssm_deregister_default_host_management_configuration() {
+    let server = TestServer::start().await;
+    let (status, _) = ssm_raw(
+        &server,
+        "RegisterDefaultHostManagementConfiguration",
+        serde_json::json!({ "PermissionModel": "SERVICE_MANAGED" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, body) = ssm_raw(
+        &server,
+        "DeregisterDefaultHostManagementConfiguration",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, setting) = ssm_raw(
+        &server,
+        "GetServiceSetting",
+        serde_json::json!({ "SettingId": DHMC_SETTING }),
+    )
+    .await;
+    assert_eq!(setting["ServiceSetting"]["SettingValue"], "");
+    assert_eq!(setting["ServiceSetting"]["Status"], "Default");
+}
