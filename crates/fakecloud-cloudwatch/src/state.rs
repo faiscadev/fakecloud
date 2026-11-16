@@ -364,6 +364,55 @@ pub struct MetricAlarm {
     /// `EvaluationInterval` in seconds (alarms using `EvaluationCriteria`).
     #[serde(default)]
     pub evaluation_interval: Option<i64>,
+    /// `StateReasonData`: the JSON reason the evaluator computed for the last
+    /// transition, or the value given to `SetAlarmState`.
+    #[serde(default)]
+    pub state_reason_data: Option<String>,
+    /// `StateTransitionedTimestamp`: when `StateValue` last changed. `None` on
+    /// snapshots written before it was tracked (rendered as
+    /// `state_updated_timestamp` then).
+    #[serde(default)]
+    pub state_transitioned_timestamp: Option<DateTime<Utc>>,
+    /// `EvaluationState`: set when the last evaluation could not compute the
+    /// alarm normally, absent otherwise.
+    #[serde(default)]
+    pub evaluation_state: Option<EvaluationState>,
+}
+
+/// The `EvaluationState` enum of a metric or log alarm.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EvaluationState {
+    PartialData,
+    EvaluationFailure,
+    EvaluationError,
+}
+
+impl EvaluationState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EvaluationState::PartialData => "PARTIAL_DATA",
+            EvaluationState::EvaluationFailure => "EVALUATION_FAILURE",
+            EvaluationState::EvaluationError => "EVALUATION_ERROR",
+        }
+    }
+}
+
+/// The `ActionsSuppressedBy` enum of a composite alarm.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActionsSuppressedBy {
+    WaitPeriod,
+    ExtensionPeriod,
+    Alarm,
+}
+
+impl ActionsSuppressedBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActionsSuppressedBy::WaitPeriod => "WaitPeriod",
+            ActionsSuppressedBy::ExtensionPeriod => "ExtensionPeriod",
+            ActionsSuppressedBy::Alarm => "Alarm",
+        }
+    }
 }
 
 /// A single `MetricDataQuery` entry in a `PutMetricAlarm` `Metrics` list.
@@ -471,6 +520,19 @@ pub struct CompositeAlarm {
     /// `ActionConfiguration`, kept in flat-key form.
     #[serde(default)]
     pub action_configuration: Option<FlatMembers>,
+    /// `StateReasonData`: the triggering alarms of the last rule transition,
+    /// or the value given to `SetAlarmState`.
+    #[serde(default)]
+    pub state_reason_data: Option<String>,
+    /// `StateTransitionedTimestamp`: when `StateValue` last changed.
+    #[serde(default)]
+    pub state_transitioned_timestamp: Option<DateTime<Utc>>,
+    /// Why the alarm's actions are currently suppressed by its
+    /// `ActionsSuppressor`, recomputed on every evaluation.
+    #[serde(default)]
+    pub actions_suppressed_by: Option<ActionsSuppressedBy>,
+    #[serde(default)]
+    pub actions_suppressed_reason: Option<String>,
 }
 
 /// A log alarm: evaluates a scheduled CloudWatch Logs query's results against
@@ -511,6 +573,12 @@ pub struct LogAlarm {
     /// `ActionConfiguration`, kept in flat-key form.
     #[serde(default)]
     pub action_configuration: Option<FlatMembers>,
+    /// `StateReasonData` given to `SetAlarmState`.
+    #[serde(default)]
+    pub state_reason_data: Option<String>,
+    /// `StateTransitionedTimestamp`: when `StateValue` last changed.
+    #[serde(default)]
+    pub state_transitioned_timestamp: Option<DateTime<Utc>>,
 }
 
 /// An anomaly detection model on a metric (single-metric or metric-math).

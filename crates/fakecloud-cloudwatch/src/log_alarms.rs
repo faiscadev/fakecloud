@@ -14,8 +14,9 @@ use fakecloud_core::query::{optional_query_param, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{
-    collect_member_values, empty_metadata_response, missing_param, validate_len, validation_error,
-    xml_escape, CloudWatchService,
+    collect_member_values, configuration_update_item, empty_metadata_response, missing_param,
+    push_alarm_history, push_state_reason_data, push_state_transitioned_timestamp, validate_len,
+    validation_error, xml_escape, CloudWatchService,
 };
 use crate::state::{AlarmState, LogAlarm};
 
@@ -170,8 +171,24 @@ impl CloudWatchService {
             alarm_configuration_updated_timestamp: now,
             warm_up_configuration,
             action_configuration,
+            state_reason_data: existing.as_ref().and_then(|a| a.state_reason_data.clone()),
+            state_transitioned_timestamp: Some(
+                existing
+                    .as_ref()
+                    .map(|a| {
+                        a.state_transitioned_timestamp
+                            .unwrap_or(a.state_updated_timestamp)
+                    })
+                    .unwrap_or(now),
+            ),
         };
-        alarms.insert(alarm_name, alarm);
+        let created = existing.is_none();
+        alarms.insert(alarm_name.clone(), alarm);
+        push_alarm_history(
+            acct,
+            &req.region,
+            configuration_update_item(&alarm_name, "LogAlarm", created, now),
+        );
 
         Ok(empty_metadata_response("PutLogAlarm", &req.request_id))
     }
@@ -222,6 +239,7 @@ pub(crate) fn render_log_alarm(alarm: &LogAlarm) -> String {
         "<StateReason>{}</StateReason>",
         xml_escape(&alarm.state_reason)
     ));
+    push_state_reason_data(&mut s, alarm.state_reason_data.as_deref());
     s.push_str(&format!(
         "<StateUpdatedTimestamp>{}</StateUpdatedTimestamp>",
         alarm
@@ -287,6 +305,11 @@ pub(crate) fn render_log_alarm(alarm: &LogAlarm) -> String {
             xml_escape(t)
         ));
     }
+    push_state_transitioned_timestamp(
+        &mut s,
+        alarm.state_transitioned_timestamp,
+        alarm.state_updated_timestamp,
+    );
     if let Some(c) = alarm.action_log_line_count {
         s.push_str(&format!("<ActionLogLineCount>{c}</ActionLogLineCount>"));
     }

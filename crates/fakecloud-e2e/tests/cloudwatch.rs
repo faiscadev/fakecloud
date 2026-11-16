@@ -1079,3 +1079,260 @@ async fn large_put_metric_data_is_gzip_compressed_and_accepted() {
     }
     assert_eq!(total, 400);
 }
+
+// Alarm evaluation renders the computed outputs: StateReasonData with the
+// evaluated datapoints, StateTransitionedTimestamp that only moves on a value
+// change, and a StateUpdate history entry carrying both states' reason data.
+#[tokio::test]
+async fn alarm_evaluation_renders_computed_state_outputs() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    cw.put_metric_alarm()
+        .alarm_name("Computed")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(1.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .send()
+        .await
+        .expect("put alarm");
+    let created = cw
+        .describe_alarms()
+        .alarm_names("Computed")
+        .send()
+        .await
+        .expect("describe");
+    let created = &created.metric_alarms()[0];
+    assert!(created.state_transitioned_timestamp().is_some());
+    assert!(created.evaluation_state().is_none());
+
+    cw.put_metric_data()
+        .namespace("App")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Errors")
+                .value(5.0)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put data");
+    let fired = cw
+        .describe_alarms()
+        .alarm_names("Computed")
+        .send()
+        .await
+        .expect("describe");
+    let fired = &fired.metric_alarms()[0];
+    assert_eq!(fired.state_value(), Some(&StateValue::Alarm));
+    assert_eq!(
+        fired.state_transitioned_timestamp(),
+        fired.state_updated_timestamp()
+    );
+    assert!(fired.evaluation_state().is_none());
+    let data: serde_json::Value =
+        serde_json::from_str(fired.state_reason_data().expect("reason data")).unwrap();
+    assert_eq!(data["version"], "1.0");
+    assert_eq!(data["statistic"], "Sum");
+    assert_eq!(data["period"], 60);
+    assert_eq!(data["threshold"], 1.0);
+    assert_eq!(data["recentDatapoints"], serde_json::json!([5.0]));
+    assert_eq!(data["evaluatedDatapoints"][0]["value"], 5.0);
+    assert_eq!(data["evaluatedDatapoints"][0]["sampleCount"], 1.0);
+
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("Computed")
+        .history_item_type(aws_sdk_cloudwatch::types::HistoryItemType::StateUpdate)
+        .send()
+        .await
+        .expect("history");
+    let items = history.alarm_history_items();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(
+        items[0].history_summary(),
+        Some("Alarm updated from INSUFFICIENT_DATA to ALARM")
+    );
+    assert_eq!(items[0].timestamp(), fired.state_transitioned_timestamp());
+    let h: serde_json::Value = serde_json::from_str(items[0].history_data().unwrap()).unwrap();
+    assert_eq!(h["oldState"]["stateValue"], "INSUFFICIENT_DATA");
+    assert_eq!(h["newState"]["stateValue"], "ALARM");
+    assert_eq!(h["newState"]["stateReasonData"], data);
+
+    // SetAlarmState to the same value: reason data stored as given, updated
+    // timestamp moves, transitioned timestamp does not.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    cw.set_alarm_state()
+        .alarm_name("Computed")
+        .state_value(StateValue::Alarm)
+        .state_reason("manual")
+        .state_reason_data("{\"source\":\"test\"}")
+        .send()
+        .await
+        .expect("set state");
+    let manual = cw
+        .describe_alarms()
+        .alarm_names("Computed")
+        .send()
+        .await
+        .expect("describe");
+    let manual = &manual.metric_alarms()[0];
+    assert_eq!(manual.state_reason_data(), Some("{\"source\":\"test\"}"));
+    assert_eq!(
+        manual.state_transitioned_timestamp(),
+        fired.state_transitioned_timestamp()
+    );
+    assert_ne!(
+        manual.state_updated_timestamp(),
+        fired.state_updated_timestamp()
+    );
+}
+
+// A metric alarm with no Threshold can't be evaluated: EVALUATION_ERROR.
+#[tokio::test]
+async fn unevaluable_alarm_reports_evaluation_error() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    cw.put_metric_alarm()
+        .alarm_name("NoThreshold")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .send()
+        .await
+        .expect("put alarm");
+    let out = cw
+        .describe_alarms()
+        .alarm_names("NoThreshold")
+        .send()
+        .await
+        .expect("describe");
+    let alarm = &out.metric_alarms()[0];
+    assert_eq!(
+        alarm.evaluation_state(),
+        Some(&aws_sdk_cloudwatch::types::EvaluationState::EvaluationError)
+    );
+    assert_eq!(alarm.state_value(), Some(&StateValue::InsufficientData));
+    assert!(alarm.state_reason().unwrap().contains("Threshold"));
+}
+
+// Composite alarm ActionsSuppressor: WaitPeriod while waiting for the
+// suppressor, Alarm while it is in ALARM, ExtensionPeriod after it leaves.
+#[tokio::test]
+async fn composite_alarm_reports_action_suppression() {
+    use aws_sdk_cloudwatch::types::{ActionsSuppressedBy, AlarmType};
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    for name in ["child", "maintenance"] {
+        cw.put_metric_alarm()
+            .alarm_name(name)
+            .namespace("App")
+            .metric_name(name)
+            .statistic(Statistic::Sum)
+            .period(60)
+            .evaluation_periods(1)
+            .threshold(1.0)
+            .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+            .send()
+            .await
+            .expect("put alarm");
+    }
+    cw.put_composite_alarm()
+        .alarm_name("service")
+        .alarm_rule("ALARM(child)")
+        .actions_suppressor("maintenance")
+        .actions_suppressor_wait_period(600)
+        .actions_suppressor_extension_period(600)
+        .send()
+        .await
+        .expect("put composite");
+    let set = |name: &'static str, value: StateValue| {
+        let cw = cw.clone();
+        async move {
+            cw.set_alarm_state()
+                .alarm_name(name)
+                .state_value(value)
+                .state_reason("test")
+                .send()
+                .await
+                .expect("set state");
+        }
+    };
+    let composite = || {
+        let cw = cw.clone();
+        async move {
+            let out = cw
+                .describe_alarms()
+                .alarm_names("service")
+                .alarm_types(AlarmType::CompositeAlarm)
+                .send()
+                .await
+                .expect("describe");
+            out.composite_alarms()[0].clone()
+        }
+    };
+
+    set("child", StateValue::Alarm).await;
+    let c = composite().await;
+    assert_eq!(c.state_value(), Some(&StateValue::Alarm));
+    assert_eq!(
+        c.actions_suppressed_by(),
+        Some(&ActionsSuppressedBy::WaitPeriod)
+    );
+    assert_eq!(
+        c.actions_suppressed_reason(),
+        Some("Actions suppressed by WaitPeriod")
+    );
+    assert!(c.state_transitioned_timestamp().is_some());
+    let data: serde_json::Value =
+        serde_json::from_str(c.state_reason_data().expect("reason data")).unwrap();
+    assert!(data["triggeringAlarms"][0]["arn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":alarm:child"));
+    assert_eq!(data["triggeringAlarms"][0]["state"]["value"], "ALARM");
+
+    set("maintenance", StateValue::Alarm).await;
+    let c = composite().await;
+    assert_eq!(c.actions_suppressed_by(), Some(&ActionsSuppressedBy::Alarm));
+
+    set("maintenance", StateValue::Ok).await;
+    let c = composite().await;
+    assert_eq!(
+        c.actions_suppressed_by(),
+        Some(&ActionsSuppressedBy::ExtensionPeriod)
+    );
+
+    set("child", StateValue::Ok).await;
+    let c = composite().await;
+    assert_eq!(c.state_value(), Some(&StateValue::Ok));
+    assert!(c.actions_suppressed_by().is_none());
+
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("service")
+        .alarm_types(AlarmType::CompositeAlarm)
+        .history_item_type(aws_sdk_cloudwatch::types::HistoryItemType::StateUpdate)
+        .send()
+        .await
+        .expect("history");
+    let summaries: Vec<_> = history
+        .alarm_history_items()
+        .iter()
+        .filter_map(|i| i.history_summary())
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            "Alarm updated from ALARM to OK",
+            "Alarm updated from INSUFFICIENT_DATA to ALARM"
+        ]
+    );
+}

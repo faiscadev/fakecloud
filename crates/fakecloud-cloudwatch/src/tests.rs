@@ -2152,3 +2152,273 @@ async fn anomaly_detector_round_trips_adaptation_and_outlier_settings() {
     .await;
     assert_eq!(err.code(), "InvalidParameterValue");
 }
+
+fn metric_alarm(svc: &CloudWatchService, name: &str) -> crate::state::MetricAlarm {
+    svc.state
+        .read()
+        .get(ACCT)
+        .and_then(|a| a.alarms_in(REGION))
+        .and_then(|a| a.get(name))
+        .cloned()
+        .unwrap()
+}
+
+// SetAlarmState stores StateReasonData as given; StateUpdatedTimestamp moves on
+// every call, StateTransitionedTimestamp only when the value changes, and the
+// history records old and new state with their reason data.
+#[tokio::test]
+async fn set_alarm_state_tracks_transitions_and_reason_data() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "t1"),
+            ("Namespace", "Test/T"),
+            ("MetricName", "M"),
+            ("Threshold", "1"),
+            ("Statistic", "Sum"),
+        ],
+    )
+    .await;
+    let created = metric_alarm(&svc, "t1");
+    assert_eq!(
+        created.state_transitioned_timestamp,
+        Some(created.state_updated_timestamp)
+    );
+    let set = |value: &'static str, data: &'static str| {
+        let svc = &svc;
+        async move {
+            call(
+                svc,
+                "SetAlarmState",
+                &[
+                    ("AlarmName", "t1"),
+                    ("StateValue", value),
+                    ("StateReason", "manual"),
+                    ("StateReasonData", data),
+                ],
+            )
+            .await;
+        }
+    };
+    set("ALARM", "{\"k\":1}").await;
+    let first = metric_alarm(&svc, "t1");
+    assert_eq!(first.state_reason_data.as_deref(), Some("{\"k\":1}"));
+    let transitioned = first.state_transitioned_timestamp.unwrap();
+    assert_eq!(transitioned, first.state_updated_timestamp);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    set("ALARM", "{\"k\":2}").await;
+    let second = metric_alarm(&svc, "t1");
+    assert!(second.state_updated_timestamp > first.state_updated_timestamp);
+    assert_eq!(second.state_transitioned_timestamp, Some(transitioned));
+    assert_eq!(second.state_reason_data.as_deref(), Some("{\"k\":2}"));
+
+    // A re-put leaves the state and its computed outputs unchanged.
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "t1"),
+            ("Namespace", "Test/T"),
+            ("MetricName", "M"),
+            ("Threshold", "2"),
+            ("Statistic", "Sum"),
+        ],
+    )
+    .await;
+    let reput = metric_alarm(&svc, "t1");
+    assert_eq!(reput.state_transitioned_timestamp, Some(transitioned));
+    assert_eq!(reput.state_reason_data.as_deref(), Some("{\"k\":2}"));
+
+    let body = body_of(&call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "t1")]).await);
+    assert!(
+        body.contains("<StateReasonData>{&quot;k&quot;:2}</StateReasonData>"),
+        "{body}"
+    );
+    assert!(body.contains("<StateTransitionedTimestamp>"), "{body}");
+
+    let hist = body_of(
+        &call(
+            &svc,
+            "DescribeAlarmHistory",
+            &[
+                ("AlarmName", "t1"),
+                ("HistoryItemType", "StateUpdate"),
+                ("ScanBy", "TimestampAscending"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        hist.contains("Alarm updated from INSUFFICIENT_DATA to ALARM"),
+        "{hist}"
+    );
+    assert!(
+        hist.contains("&quot;stateReasonData&quot;:{&quot;k&quot;:2}"),
+        "{hist}"
+    );
+}
+
+// A metric alarm PutMetricAlarm accepts but can't evaluate reports
+// EVALUATION_ERROR; fixing it clears the evaluation state.
+#[tokio::test]
+async fn unevaluable_metric_alarm_reports_evaluation_error() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "bad"),
+            ("Namespace", "Test/T"),
+            ("MetricName", "M"),
+            ("Statistic", "Sum"),
+        ],
+    )
+    .await;
+    let body = body_of(&call(&svc, "DescribeAlarms", &[]).await);
+    assert!(
+        body.contains("<EvaluationState>EVALUATION_ERROR</EvaluationState>"),
+        "{body}"
+    );
+    assert!(body.contains("no Threshold"), "{body}");
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "bad"),
+            ("Namespace", "Test/T"),
+            ("MetricName", "M"),
+            ("Statistic", "Sum"),
+            ("Threshold", "1"),
+        ],
+    )
+    .await;
+    let body = body_of(&call(&svc, "DescribeAlarms", &[]).await);
+    assert!(!body.contains("<EvaluationState>"), "{body}");
+    assert!(body.contains("<StateReasonData>"), "{body}");
+}
+
+// A composite alarm reports what suppresses its actions, and its rule
+// transition carries the triggering children as reason data. Composite history
+// is only returned when AlarmTypes asks for it.
+#[tokio::test]
+async fn composite_alarm_action_suppression_and_reason_data() {
+    let svc = service();
+    for name in ["child", "maint"] {
+        call(
+            &svc,
+            "PutMetricAlarm",
+            &[
+                ("AlarmName", name),
+                ("Namespace", "Test/C"),
+                ("MetricName", name),
+                ("Threshold", "1"),
+                ("Statistic", "Sum"),
+            ],
+        )
+        .await;
+    }
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "comp"),
+            ("AlarmRule", "ALARM(child)"),
+            ("ActionsSuppressor", "maint"),
+            ("ActionsSuppressorWaitPeriod", "600"),
+            ("ActionsSuppressorExtensionPeriod", "600"),
+        ],
+    )
+    .await;
+    let set = |name: &'static str, value: &'static str| {
+        let svc = &svc;
+        async move {
+            call(
+                svc,
+                "SetAlarmState",
+                &[
+                    ("AlarmName", name),
+                    ("StateValue", value),
+                    ("StateReason", "x"),
+                ],
+            )
+            .await;
+        }
+    };
+    let describe = || async {
+        body_of(
+            &call(
+                &svc,
+                "DescribeAlarms",
+                &[
+                    ("AlarmNames.member.1", "comp"),
+                    ("AlarmTypes.member.1", "CompositeAlarm"),
+                ],
+            )
+            .await,
+        )
+    };
+
+    set("child", "ALARM").await;
+    let b = describe().await;
+    assert!(b.contains("<StateValue>ALARM</StateValue>"), "{b}");
+    assert!(
+        b.contains("<ActionsSuppressedBy>WaitPeriod</ActionsSuppressedBy>"),
+        "{b}"
+    );
+    assert!(
+        b.contains(
+            "<ActionsSuppressedReason>Actions suppressed by WaitPeriod</ActionsSuppressedReason>"
+        ),
+        "{b}"
+    );
+    assert!(b.contains("triggeringAlarms"), "{b}");
+    assert!(b.contains("alarm:child"), "{b}");
+
+    set("maint", "ALARM").await;
+    let b = describe().await;
+    assert!(
+        b.contains("<ActionsSuppressedBy>Alarm</ActionsSuppressedBy>"),
+        "{b}"
+    );
+
+    set("maint", "OK").await;
+    let b = describe().await;
+    assert!(
+        b.contains("<ActionsSuppressedBy>ExtensionPeriod</ActionsSuppressedBy>"),
+        "{b}"
+    );
+
+    set("child", "OK").await;
+    let b = describe().await;
+    assert!(b.contains("<StateValue>OK</StateValue>"), "{b}");
+    assert!(!b.contains("<ActionsSuppressedBy>"), "{b}");
+
+    // Metric-alarm history only by default; composite history on request.
+    let default_hist = body_of(&call(&svc, "DescribeAlarmHistory", &[("AlarmName", "comp")]).await);
+    assert!(!default_hist.contains("<member>"), "{default_hist}");
+    let comp_hist = body_of(
+        &call(
+            &svc,
+            "DescribeAlarmHistory",
+            &[
+                ("AlarmName", "comp"),
+                ("AlarmTypes.member.1", "CompositeAlarm"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        comp_hist.contains("Alarm updated from INSUFFICIENT_DATA to ALARM"),
+        "{comp_hist}"
+    );
+    assert!(
+        comp_hist.contains("Alarm updated from ALARM to OK"),
+        "{comp_hist}"
+    );
+    assert!(
+        comp_hist.contains("Alarm &quot;comp&quot; created"),
+        "{comp_hist}"
+    );
+}

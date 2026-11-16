@@ -1003,6 +1003,13 @@ pub(crate) struct MetricBucket {
     unit: Option<String>,
 }
 
+impl MetricBucket {
+    /// The number of samples aggregated into this bucket.
+    pub(crate) fn sample_count(&self) -> f64 {
+        self.agg.count
+    }
+}
+
 /// Resolve a single statistic (simple, e.g. `Sum`, or percentile, e.g. `p99`)
 /// for one bucket. `samples` must be sorted ascending.
 pub(crate) fn resolve_stat(
@@ -1684,6 +1691,19 @@ impl CloudWatchService {
             evaluation_criteria,
             evaluation_window,
             evaluation_interval,
+            // An update leaves the alarm's state (and everything computed with
+            // it) unchanged; a new alarm enters INSUFFICIENT_DATA now.
+            state_reason_data: existing.as_ref().and_then(|a| a.state_reason_data.clone()),
+            state_transitioned_timestamp: Some(
+                existing
+                    .as_ref()
+                    .map(|a| {
+                        a.state_transitioned_timestamp
+                            .unwrap_or(a.state_updated_timestamp)
+                    })
+                    .unwrap_or(now),
+            ),
+            evaluation_state: existing.as_ref().and_then(|a| a.evaluation_state),
         };
         let alarm_arn = alarm.alarm_arn.clone();
         let history_name = alarm_name.clone();
@@ -1701,20 +1721,10 @@ impl CloudWatchService {
             }
         }
 
-        let summary = if created {
-            format!("Alarm \"{history_name}\" created")
-        } else {
-            format!("Alarm \"{history_name}\" updated")
-        };
-        let history_data = "{\"type\":\"Update\",\"version\":\"1.0\"}".to_string();
         push_alarm_history(
             acct,
             &req.region,
-            &history_name,
-            "MetricAlarm",
-            "ConfigurationUpdate",
-            summary,
-            history_data,
+            configuration_update_item(&history_name, "MetricAlarm", created, now),
         );
 
         Ok(empty_metadata_response("PutMetricAlarm", &req.request_id))
@@ -2011,37 +2021,83 @@ impl CloudWatchService {
         let new_state = AlarmState::parse(&state_value)
             .ok_or_else(|| invalid_param("StateValue must be OK | ALARM | INSUFFICIENT_DATA"))?;
 
+        // StateReasonData is stored as given (AWS hands it to Auto Scaling
+        // policies verbatim).
+        let state_reason_data = optional_query_param(req, "StateReasonData");
+
         let now = Utc::now();
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
         // SetAlarmState can target a metric, composite or log alarm; look up
-        // the metric store first, then fall back to the other two.
-        let (old_state, alarm_type) = if let Some(alarm) =
-            acct.alarms_in_mut(&req.region).get_mut(&alarm_name)
-        {
-            let old = alarm.state_value.as_str().to_string();
-            alarm.state_value = new_state;
-            alarm.state_reason = state_reason.clone();
-            alarm.state_updated_timestamp = now;
+        // the metric store first, then fall back to the other two. Each arm
+        // updates the alarm in place and yields the history item for it.
+        // StateUpdatedTimestamp always moves; StateTransitionedTimestamp only
+        // when the value actually changes.
+        let set = |alarm_type: &str,
+                   value: &mut AlarmState,
+                   reason: &mut String,
+                   reason_data: &mut Option<String>,
+                   updated: &mut DateTime<Utc>,
+                   transitioned: &mut Option<DateTime<Utc>>| {
+            let item = crate::alarm_eval::state_update_item(
+                &alarm_name,
+                alarm_type,
+                now,
+                crate::alarm_eval::StateSnapshot {
+                    value: *value,
+                    reason,
+                    reason_data: reason_data.as_deref(),
+                },
+                crate::alarm_eval::StateSnapshot {
+                    value: new_state,
+                    reason: &state_reason,
+                    reason_data: state_reason_data.as_deref(),
+                },
+            );
+            if *value != new_state {
+                *transitioned = Some(now);
+            } else if transitioned.is_none() {
+                *transitioned = Some(*updated);
+            }
+            *value = new_state;
+            *reason = state_reason.clone();
+            *reason_data = state_reason_data.clone();
+            *updated = now;
+            item
+        };
+        let item = if let Some(alarm) = acct.alarms_in_mut(&req.region).get_mut(&alarm_name) {
             // Mark this as a manual override so a later evaluation with no
             // datapoints keeps it rather than resetting to INSUFFICIENT_DATA.
             alarm.state_manually_set = true;
-            (old, "MetricAlarm")
+            set(
+                "MetricAlarm",
+                &mut alarm.state_value,
+                &mut alarm.state_reason,
+                &mut alarm.state_reason_data,
+                &mut alarm.state_updated_timestamp,
+                &mut alarm.state_transitioned_timestamp,
+            )
         } else if let Some(composite) = acct
             .composite_alarms_in_mut(&req.region)
             .get_mut(&alarm_name)
         {
-            let old = composite.state_value.as_str().to_string();
-            composite.state_value = new_state;
-            composite.state_reason = state_reason.clone();
-            composite.state_updated_timestamp = now;
-            (old, "CompositeAlarm")
+            set(
+                "CompositeAlarm",
+                &mut composite.state_value,
+                &mut composite.state_reason,
+                &mut composite.state_reason_data,
+                &mut composite.state_updated_timestamp,
+                &mut composite.state_transitioned_timestamp,
+            )
         } else if let Some(log_alarm) = acct.log_alarms_in_mut(&req.region).get_mut(&alarm_name) {
-            let old = log_alarm.state_value.as_str().to_string();
-            log_alarm.state_value = new_state;
-            log_alarm.state_reason = state_reason.clone();
-            log_alarm.state_updated_timestamp = now;
-            (old, "LogAlarm")
+            set(
+                "LogAlarm",
+                &mut log_alarm.state_value,
+                &mut log_alarm.state_reason,
+                &mut log_alarm.state_reason_data,
+                &mut log_alarm.state_updated_timestamp,
+                &mut log_alarm.state_transitioned_timestamp,
+            )
         } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -2049,22 +2105,7 @@ impl CloudWatchService {
                 format!("Alarm {alarm_name} not found"),
             ));
         };
-
-        let new_state_str = new_state.as_str().to_string();
-        let summary = format!("Alarm updated from {old_state} to {new_state_str}");
-        let history_data = format!(
-            "{{\"oldState\":{{\"stateValue\":\"{old_state}\"}},\"newState\":{{\"stateValue\":\"{new_state_str}\",\"stateReason\":\"{}\"}}}}",
-            state_reason.replace('"', "\\\"")
-        );
-        push_alarm_history(
-            acct,
-            &req.region,
-            &alarm_name,
-            alarm_type,
-            "StateUpdate",
-            summary,
-            history_data,
-        );
+        push_alarm_history(acct, &req.region, item);
 
         Ok(empty_metadata_response("SetAlarmState", &req.request_id))
     }
@@ -2091,6 +2132,19 @@ impl CloudWatchService {
         )?;
         let alarm_filter = optional_query_param(req, "AlarmName");
         let type_filter = optional_query_param(req, "HistoryItemType");
+        // Like DescribeAlarms, only metric-alarm history is returned unless
+        // AlarmTypes asks for composite and/or log alarms.
+        let mut alarm_types = collect_member_values(req, "AlarmTypes");
+        for t in &alarm_types {
+            if !matches!(t.as_str(), "MetricAlarm" | "CompositeAlarm" | "LogAlarm") {
+                return Err(invalid_param(format!(
+                    "AlarmTypes has an invalid value '{t}'"
+                )));
+            }
+        }
+        if alarm_types.is_empty() {
+            alarm_types.push("MetricAlarm".to_string());
+        }
         let start_date =
             optional_query_param(req, "StartDate").and_then(|s| parse_input_timestamp(&s));
         let end_date = optional_query_param(req, "EndDate").and_then(|s| parse_input_timestamp(&s));
@@ -2117,6 +2171,9 @@ impl CloudWatchService {
                         }
                     }
                     for item in list.iter() {
+                        if !alarm_types.contains(&item.alarm_type) {
+                            continue;
+                        }
                         if let Some(t) = type_filter.as_ref() {
                             if &item.history_item_type != t {
                                 continue;
@@ -2324,23 +2381,35 @@ impl CloudWatchService {
 pub(crate) fn push_alarm_history(
     acct: &mut crate::state::CloudWatchState,
     region: &str,
-    alarm_name: &str,
-    alarm_type: &str,
-    history_item_type: &str,
-    history_summary: String,
-    history_data: String,
+    item: AlarmHistoryItem,
 ) {
     acct.alarm_history_in_mut(region)
-        .entry(alarm_name.to_string())
+        .entry(item.alarm_name.clone())
         .or_default()
-        .push(AlarmHistoryItem {
-            alarm_name: alarm_name.to_string(),
-            alarm_type: alarm_type.to_string(),
-            timestamp: Utc::now(),
-            history_item_type: history_item_type.to_string(),
-            history_summary,
-            history_data,
-        });
+        .push(item);
+}
+
+/// The `ConfigurationUpdate` history item a Put*Alarm call records.
+pub(crate) fn configuration_update_item(
+    alarm_name: &str,
+    alarm_type: &str,
+    created: bool,
+    at: DateTime<Utc>,
+) -> AlarmHistoryItem {
+    let summary = if created {
+        format!("Alarm \"{alarm_name}\" created")
+    } else {
+        format!("Alarm \"{alarm_name}\" updated")
+    };
+    let kind = if created { "Create" } else { "Update" };
+    AlarmHistoryItem {
+        alarm_name: alarm_name.to_string(),
+        alarm_type: alarm_type.to_string(),
+        timestamp: at,
+        history_item_type: "ConfigurationUpdate".to_string(),
+        history_summary: summary,
+        history_data: format!("{{\"type\":\"{kind}\",\"version\":\"1.0\"}}"),
+    }
 }
 
 fn render_alarm(alarm: &MetricAlarm) -> String {
@@ -2378,6 +2447,7 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
         "<StateReason>{}</StateReason>",
         xml_escape(&alarm.state_reason)
     ));
+    push_state_reason_data(&mut s, alarm.state_reason_data.as_deref());
     s.push_str(&format!(
         "<StateUpdatedTimestamp>{}</StateUpdatedTimestamp>",
         alarm
@@ -2445,6 +2515,17 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     ));
     render_alarm_metrics(&mut s, &alarm.metrics);
+    if let Some(e) = alarm.evaluation_state {
+        s.push_str(&format!(
+            "<EvaluationState>{}</EvaluationState>",
+            e.as_str()
+        ));
+    }
+    push_state_transitioned_timestamp(
+        &mut s,
+        alarm.state_transitioned_timestamp,
+        alarm.state_updated_timestamp,
+    );
     if let Some(w) = &alarm.evaluation_window {
         s.push_str(&w.render("EvaluationWindow"));
     }
@@ -2462,6 +2543,30 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
     }
     s.push_str("</member>");
     s
+}
+
+pub(crate) fn push_state_reason_data(s: &mut String, data: Option<&str>) {
+    if let Some(d) = data {
+        s.push_str(&format!(
+            "<StateReasonData>{}</StateReasonData>",
+            xml_escape(d)
+        ));
+    }
+}
+
+/// Render `StateTransitionedTimestamp`, falling back to the state update time
+/// for an alarm persisted before transitions were tracked.
+pub(crate) fn push_state_transitioned_timestamp(
+    s: &mut String,
+    transitioned: Option<DateTime<Utc>>,
+    updated: DateTime<Utc>,
+) {
+    s.push_str(&format!(
+        "<StateTransitionedTimestamp>{}</StateTransitionedTimestamp>",
+        transitioned
+            .unwrap_or(updated)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    ));
 }
 
 /// Render the `Metrics` (metric-math / cross-account) list of a MetricAlarm.

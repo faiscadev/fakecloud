@@ -22,19 +22,99 @@
 //! INSUFFICIENT_DATA. A state forced via `SetAlarmState` is kept sticky (so it
 //! can drive composite alarms) until real datapoints arrive, at which point
 //! data governs the state.
+//!
+//! Every evaluation transition also produces the computed outputs AWS returns:
+//! `StateReasonData` (the evaluated datapoints for a metric alarm, the
+//! triggering children for a composite), `StateTransitionedTimestamp` (only
+//! moves when `StateValue` changes), `EvaluationState` (`EVALUATION_ERROR` for
+//! a single-metric alarm whose configuration can't be evaluated) and, for a
+//! composite alarm with an `ActionsSuppressor`, `ActionsSuppressedBy` /
+//! `ActionsSuppressedReason` from the suppressor's state and the wait /
+//! extension periods.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use serde_json::{json, Map, Value};
 
 use crate::service::{collect_metric_buckets, resolve_stat};
-use crate::state::{AlarmState, CloudWatchState, MetricAlarm, MetricDatum};
+use crate::state::{
+    ActionsSuppressedBy, AlarmHistoryItem, AlarmState, CloudWatchState, EvaluationState,
+    MetricAlarm, MetricDatum,
+};
+
+/// Timestamp format AWS uses inside `StateReasonData` and history JSON
+/// (`2024-01-01T00:00:00.000+0000`).
+pub(crate) fn reason_timestamp(ts: DateTime<Utc>) -> String {
+    ts.format("%Y-%m-%dT%H:%M:%S%.3f+0000").to_string()
+}
+
+/// The result of evaluating one single-metric alarm.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MetricEvaluation {
+    pub state: AlarmState,
+    pub reason: String,
+    pub reason_data: Option<String>,
+    /// Whether the evaluation window held any real datapoints.
+    pub had_data: bool,
+    pub evaluation_state: Option<EvaluationState>,
+}
+
+/// One side (old or new) of a state change, as written to the alarm history.
+pub(crate) struct StateSnapshot<'a> {
+    pub value: AlarmState,
+    pub reason: &'a str,
+    pub reason_data: Option<&'a str>,
+}
+
+impl StateSnapshot<'_> {
+    fn to_json(&self) -> Value {
+        let mut m = Map::new();
+        m.insert("stateValue".into(), json!(self.value.as_str()));
+        m.insert("stateReason".into(), json!(self.reason));
+        if let Some(d) = self.reason_data {
+            // Embedded as an object like AWS does; reason data given to
+            // SetAlarmState that isn't JSON is kept as a string.
+            let v = serde_json::from_str(d).unwrap_or_else(|_| json!(d));
+            m.insert("stateReasonData".into(), v);
+        }
+        Value::Object(m)
+    }
+}
+
+/// A `StateUpdate` history item for a change from `old` to `new` at `at`.
+pub(crate) fn state_update_item(
+    name: &str,
+    alarm_type: &str,
+    at: DateTime<Utc>,
+    old: StateSnapshot<'_>,
+    new: StateSnapshot<'_>,
+) -> AlarmHistoryItem {
+    let summary = format!(
+        "Alarm updated from {} to {}",
+        old.value.as_str(),
+        new.value.as_str()
+    );
+    let data = json!({
+        "version": "1.0",
+        "oldState": old.to_json(),
+        "newState": new.to_json(),
+    });
+    AlarmHistoryItem {
+        alarm_name: name.to_string(),
+        alarm_type: alarm_type.to_string(),
+        timestamp: at,
+        history_item_type: "StateUpdate".to_string(),
+        history_summary: summary,
+        history_data: data.to_string(),
+    }
+}
 
 /// Evaluate every alarm in `region` against the stored metric data at `now`,
 /// updating states and recording transitions in the alarm history.
 pub(crate) fn evaluate_alarms(state: &mut CloudWatchState, region: &str, now: DateTime<Utc>) {
     // ---- Metric alarms ----
-    let mut transitions: Vec<(String, String, AlarmState, String)> = Vec::new();
+    let mut history: Vec<AlarmHistoryItem> = Vec::new();
     {
         // Disjoint field borrows: `metrics` shared, `alarms` mutable.
         let data_map = state.metrics.get(region);
@@ -46,31 +126,70 @@ pub(crate) fn evaluate_alarms(state: &mut CloudWatchState, region: &str, now: Da
                     .and_then(|ns| data_map.and_then(|m| m.get(ns)))
                     .map(|v| v.as_slice());
                 let manually_set = alarm.state_manually_set;
-                if let Some((new_state, reason, had_data)) =
-                    evaluate_metric_alarm(alarm, data, now, manually_set)
-                {
-                    // Once real datapoints govern the alarm, a prior manual
-                    // override no longer applies.
-                    if had_data {
-                        alarm.state_manually_set = false;
-                    }
-                    if new_state != alarm.state_value {
-                        let old = alarm.state_value.as_str().to_string();
-                        alarm.state_value = new_state;
-                        alarm.state_reason = reason.clone();
-                        alarm.state_updated_timestamp = now;
-                        transitions.push((alarm.alarm_name.clone(), old, new_state, reason));
-                    }
+                let Some(ev) = evaluate_metric_alarm(alarm, data, now, manually_set) else {
+                    continue;
+                };
+                // Once real datapoints govern the alarm, a prior manual
+                // override no longer applies.
+                if ev.had_data {
+                    alarm.state_manually_set = false;
                 }
+                apply_metric_evaluation(alarm, ev, now, &mut history);
             }
         }
     }
-    for (name, old, new, reason) in &transitions {
-        record_transition(state, region, name, "MetricAlarm", old, *new, reason, now);
+    for item in history {
+        crate::service::push_alarm_history(state, region, item);
     }
 
     // ---- Composite alarms ----
     evaluate_composite_alarms(state, region, now);
+}
+
+/// Apply an evaluation result to `alarm`. `StateUpdatedTimestamp` moves when
+/// either `StateValue` or `EvaluationState` changes (with the reason and reason
+/// data), `StateTransitionedTimestamp` and the history only when `StateValue`
+/// changes.
+fn apply_metric_evaluation(
+    alarm: &mut MetricAlarm,
+    ev: MetricEvaluation,
+    now: DateTime<Utc>,
+    history: &mut Vec<AlarmHistoryItem>,
+) {
+    let value_changed = ev.state != alarm.state_value;
+    if !value_changed && ev.evaluation_state == alarm.evaluation_state {
+        return;
+    }
+    if value_changed {
+        history.push(state_update_item(
+            &alarm.alarm_name,
+            "MetricAlarm",
+            now,
+            StateSnapshot {
+                value: alarm.state_value,
+                reason: &alarm.state_reason,
+                reason_data: alarm.state_reason_data.as_deref(),
+            },
+            StateSnapshot {
+                value: ev.state,
+                reason: &ev.reason,
+                reason_data: ev.reason_data.as_deref(),
+            },
+        ));
+        alarm.state_transitioned_timestamp = Some(now);
+    }
+    alarm.state_value = ev.state;
+    alarm.state_reason = ev.reason;
+    alarm.state_reason_data = ev.reason_data;
+    alarm.evaluation_state = ev.evaluation_state;
+    alarm.state_updated_timestamp = now;
+}
+
+/// What a composite rule needs to know about an alarm it can reference.
+struct RuleMember {
+    arn: String,
+    state: AlarmState,
+    transitioned: DateTime<Utc>,
 }
 
 /// Evaluate the composite alarms in `region`, propagating child states through
@@ -82,18 +201,52 @@ fn evaluate_composite_alarms(state: &mut CloudWatchState, region: &str, now: Dat
         _ => return,
     };
 
-    // Seed the state map from all metric + composite alarms.
-    let mut states: HashMap<String, AlarmState> = HashMap::new();
+    // Seed the member map from every alarm a rule can reference.
+    let mut members: HashMap<String, RuleMember> = HashMap::new();
     if let Some(a) = state.alarms.get(region) {
         for (n, al) in a.iter() {
-            states.insert(n.clone(), al.state_value);
+            members.insert(
+                n.clone(),
+                RuleMember {
+                    arn: al.alarm_arn.clone(),
+                    state: al.state_value,
+                    transitioned: al
+                        .state_transitioned_timestamp
+                        .unwrap_or(al.state_updated_timestamp),
+                },
+            );
+        }
+    }
+    if let Some(a) = state.log_alarms.get(region) {
+        for (n, al) in a.iter() {
+            members.insert(
+                n.clone(),
+                RuleMember {
+                    arn: al.alarm_arn.clone(),
+                    state: al.state_value,
+                    transitioned: al
+                        .state_transitioned_timestamp
+                        .unwrap_or(al.state_updated_timestamp),
+                },
+            );
         }
     }
     if let Some(c) = state.composite_alarms.get(region) {
         for (n, al) in c.iter() {
-            states.insert(n.clone(), al.state_value);
+            members.insert(
+                n.clone(),
+                RuleMember {
+                    arn: al.alarm_arn.clone(),
+                    state: al.state_value,
+                    transitioned: al
+                        .state_transitioned_timestamp
+                        .unwrap_or(al.state_updated_timestamp),
+                },
+            );
         }
     }
+    let mut states: HashMap<String, AlarmState> =
+        members.iter().map(|(n, m)| (n.clone(), m.state)).collect();
 
     // Recompute composite states until stable (bounded by the composite count
     // so a reference cycle can't loop forever).
@@ -120,60 +273,274 @@ fn evaluate_composite_alarms(state: &mut CloudWatchState, region: &str, now: Dat
         }
     }
 
+    // Composites that change in this pass transition at `now`; a parent's
+    // reason data reports that time for them.
+    for name in &composite_names {
+        if let (Some(new_state), Some(m)) = (states.get(name), members.get_mut(name)) {
+            if *new_state != m.state {
+                m.state = *new_state;
+                m.transitioned = now;
+            }
+        }
+    }
+
     // Apply the computed states and collect transitions.
-    let mut transitions: Vec<(String, String, AlarmState)> = Vec::new();
+    let mut history: Vec<AlarmHistoryItem> = Vec::new();
     if let Some(c) = state.composite_alarms.get_mut(region) {
         for (name, al) in c.iter_mut() {
             let Some(&new_state) = states.get(name) else {
                 continue;
             };
-            if new_state != al.state_value {
-                let old = al.state_value.as_str().to_string();
-                al.state_value = new_state;
-                al.state_reason = format!(
-                    "The composite alarm rule evaluated to {}.",
-                    new_state.as_str()
-                );
-                al.state_updated_timestamp = now;
-                transitions.push((name.clone(), old, new_state));
+            if new_state == al.state_value {
+                continue;
             }
+            let reason = format!(
+                "The composite alarm rule evaluated to {}.",
+                new_state.as_str()
+            );
+            let reason_data = parse_alarm_rule(&al.alarm_rule)
+                .ok()
+                .map(|node| triggering_alarms_data(&node, &members));
+            history.push(state_update_item(
+                name,
+                "CompositeAlarm",
+                now,
+                StateSnapshot {
+                    value: al.state_value,
+                    reason: &al.state_reason,
+                    reason_data: al.state_reason_data.as_deref(),
+                },
+                StateSnapshot {
+                    value: new_state,
+                    reason: &reason,
+                    reason_data: reason_data.as_deref(),
+                },
+            ));
+            al.state_value = new_state;
+            al.state_reason = reason;
+            al.state_reason_data = reason_data;
+            al.state_updated_timestamp = now;
+            al.state_transitioned_timestamp = Some(now);
         }
     }
-    for (name, old, new) in &transitions {
-        let reason = format!("The composite alarm rule evaluated to {}.", new.as_str());
-        record_transition(
-            state,
-            region,
-            name,
-            "CompositeAlarm",
-            old,
-            *new,
-            &reason,
-            now,
-        );
+    for item in history {
+        crate::service::push_alarm_history(state, region, item);
+    }
+
+    update_action_suppression(state, region, &composite_names, &states, now);
+}
+
+/// The `StateReasonData` of a composite rule transition: every referenced
+/// alarm whose state predicate currently holds, with its state and the time it
+/// entered that state.
+fn triggering_alarms_data(node: &RuleNode, members: &HashMap<String, RuleMember>) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    collect_satisfied(node, members, &mut names);
+    let mut seen = HashSet::new();
+    let triggering: Vec<Value> = names
+        .into_iter()
+        .filter(|n| seen.insert(*n))
+        .filter_map(|n| members.get(n))
+        .map(|m| {
+            json!({
+                "arn": m.arn,
+                "state": {
+                    "value": m.state.as_str(),
+                    "timestamp": reason_timestamp(m.transitioned),
+                },
+            })
+        })
+        .collect();
+    json!({ "triggeringAlarms": triggering }).to_string()
+}
+
+fn collect_satisfied<'a>(
+    node: &'a RuleNode,
+    members: &HashMap<String, RuleMember>,
+    out: &mut Vec<&'a str>,
+) {
+    match node {
+        RuleNode::And(a, b) | RuleNode::Or(a, b) => {
+            collect_satisfied(a, members, out);
+            collect_satisfied(b, members, out);
+        }
+        RuleNode::Not(a) => collect_satisfied(a, members, out),
+        RuleNode::State(want, name) => {
+            if members.get(name).map(|m| m.state) == Some(*want) {
+                out.push(name);
+            }
+        }
+        RuleNode::True | RuleNode::False => {}
     }
 }
 
+/// Recompute `ActionsSuppressedBy` / `ActionsSuppressedReason` for every
+/// composite alarm with an `ActionsSuppressor`.
+fn update_action_suppression(
+    state: &mut CloudWatchState,
+    region: &str,
+    composite_names: &[String],
+    states: &HashMap<String, AlarmState>,
+    now: DateTime<Utc>,
+) {
+    let mut results: Vec<(String, Option<ActionsSuppressedBy>)> = Vec::new();
+    if let Some(c) = state.composite_alarms.get(region) {
+        for name in composite_names {
+            let Some(al) = c.get(name) else {
+                continue;
+            };
+            let by = al.actions_suppressor.as_deref().and_then(|s| {
+                let suppressor = normalize_ref(s);
+                suppression_status(&SuppressionInput {
+                    composite_state: al.state_value,
+                    entered_state_at: al
+                        .state_transitioned_timestamp
+                        .unwrap_or(al.state_updated_timestamp),
+                    suppressor_state: states.get(&suppressor).copied(),
+                    suppressor_left_alarm_at: last_alarm_exit(state, region, &suppressor),
+                    wait_period: al.actions_suppressor_wait_period.unwrap_or(0),
+                    extension_period: al.actions_suppressor_extension_period.unwrap_or(0),
+                    now,
+                })
+            });
+            results.push((name.clone(), by));
+        }
+    }
+    if let Some(c) = state.composite_alarms.get_mut(region) {
+        for (name, by) in results {
+            if let Some(al) = c.get_mut(&name) {
+                al.actions_suppressed_by = by;
+                al.actions_suppressed_reason =
+                    by.map(|b| format!("Actions suppressed by {}", b.as_str()));
+            }
+        }
+    }
+}
+
+/// The most recent time alarm `name` left the ALARM state, from its history.
+fn last_alarm_exit(state: &CloudWatchState, region: &str, name: &str) -> Option<DateTime<Utc>> {
+    state
+        .alarm_history_in(region)?
+        .get(name)?
+        .iter()
+        .filter(|i| i.history_item_type == "StateUpdate")
+        .filter(|i| {
+            let Ok(v) = serde_json::from_str::<Value>(&i.history_data) else {
+                return false;
+            };
+            v["oldState"]["stateValue"] == "ALARM" && v["newState"]["stateValue"] != "ALARM"
+        })
+        .map(|i| i.timestamp)
+        .max()
+}
+
+/// Inputs to [`suppression_status`].
+pub(crate) struct SuppressionInput {
+    pub composite_state: AlarmState,
+    /// When the composite entered its current state.
+    pub entered_state_at: DateTime<Utc>,
+    /// The suppressor's current state (`None` when it doesn't exist).
+    pub suppressor_state: Option<AlarmState>,
+    pub suppressor_left_alarm_at: Option<DateTime<Utc>>,
+    pub wait_period: i64,
+    pub extension_period: i64,
+    pub now: DateTime<Utc>,
+}
+
+/// Whether a composite alarm's ALARM actions are suppressed right now, and by
+/// what:
+///   * `Alarm` while the suppressor is in ALARM;
+///   * `ExtensionPeriod` for `ActionsSuppressorExtensionPeriod` seconds after
+///     the suppressor leaves ALARM;
+///   * `WaitPeriod` for `ActionsSuppressorWaitPeriod` seconds after the
+///     composite enters ALARM, while the suppressor hasn't gone into ALARM.
+///
+/// After those periods the composite performs its actions (`None`).
+pub(crate) fn suppression_status(i: &SuppressionInput) -> Option<ActionsSuppressedBy> {
+    if i.composite_state != AlarmState::Alarm {
+        return None;
+    }
+    if i.suppressor_state == Some(AlarmState::Alarm) {
+        return Some(ActionsSuppressedBy::Alarm);
+    }
+    if let Some(left) = i.suppressor_left_alarm_at {
+        if i.now < left + Duration::seconds(i.extension_period) {
+            return Some(ActionsSuppressedBy::ExtensionPeriod);
+        }
+        // The suppressor went into ALARM during the wait, so the wait is over.
+        if left >= i.entered_state_at {
+            return None;
+        }
+    }
+    if i.now < i.entered_state_at + Duration::seconds(i.wait_period) {
+        return Some(ActionsSuppressedBy::WaitPeriod);
+    }
+    None
+}
+
+/// Why a single-metric alarm's configuration can't be evaluated, if it can't.
+/// PutMetricAlarm accepts these shapes, so they surface at evaluation time as
+/// `EVALUATION_ERROR` with the problem in `StateReason`.
+fn configuration_error(alarm: &MetricAlarm) -> Option<String> {
+    if alarm.namespace.is_none() {
+        return Some("the alarm has no Namespace".to_string());
+    }
+    if alarm.metric_name.is_none() {
+        return Some("the alarm has no MetricName".to_string());
+    }
+    if alarm.statistic.is_none() && alarm.extended_statistic.is_none() {
+        return Some("the alarm has neither a Statistic nor an ExtendedStatistic".to_string());
+    }
+    if !matches!(
+        alarm.comparison_operator.as_str(),
+        "GreaterThanThreshold"
+            | "GreaterThanOrEqualToThreshold"
+            | "LessThanThreshold"
+            | "LessThanOrEqualToThreshold"
+    ) {
+        return Some(format!(
+            "the ComparisonOperator {} requires a ThresholdMetricId",
+            alarm.comparison_operator
+        ));
+    }
+    if alarm.threshold.is_none() {
+        return Some("the alarm has no Threshold".to_string());
+    }
+    None
+}
+
 /// Compute the state a single-metric alarm should hold, or `None` to leave the
-/// current state unchanged (metric-math / anomaly alarms, or a metric with no
-/// datapoints under the default missing-data treatment).
-/// Returns `Some((state, reason, had_data))` where `had_data` is whether the
-/// evaluation window held any real datapoints, or `None` to leave the current
-/// state unchanged. `manually_set` is whether the current state came from
-/// `SetAlarmState`; when true, a metric with no data under the default
-/// missing-data treatment keeps its manual state instead of resetting to
-/// INSUFFICIENT_DATA.
+/// current state unchanged (metric-math / anomaly / PromQL alarms, or a metric
+/// with no datapoints under `ignore`). `manually_set` is whether the current
+/// state came from `SetAlarmState`; when true, a metric with no data under the
+/// default missing-data treatment (or a configuration that can't be evaluated)
+/// keeps its manual state instead of resetting to INSUFFICIENT_DATA.
 pub(crate) fn evaluate_metric_alarm(
     alarm: &MetricAlarm,
     data: Option<&[MetricDatum]>,
     now: DateTime<Utc>,
     manually_set: bool,
-) -> Option<(AlarmState, String, bool)> {
+) -> Option<MetricEvaluation> {
     // Only plain single-metric alarms with a static threshold are evaluated.
-    // Metric-math (`Metrics`) and anomaly-detection (`ThresholdMetricId`)
-    // alarms are left untouched.
-    if !alarm.metrics.is_empty() || alarm.threshold_metric_id.is_some() {
+    // Metric-math (`Metrics`), anomaly-detection (`ThresholdMetricId`) and
+    // PromQL (`EvaluationCriteria`) alarms are left untouched.
+    if !alarm.metrics.is_empty()
+        || alarm.threshold_metric_id.is_some()
+        || alarm.evaluation_criteria.is_some()
+    {
         return None;
+    }
+    if let Some(problem) = configuration_error(alarm) {
+        if manually_set {
+            return None;
+        }
+        return Some(MetricEvaluation {
+            state: AlarmState::InsufficientData,
+            reason: format!("Unable to evaluate the alarm: {problem}."),
+            reason_data: None,
+            had_data: false,
+            evaluation_state: Some(EvaluationState::EvaluationError),
+        });
     }
     let threshold = alarm.threshold?;
     // A namespace is required for a single-metric alarm; the datapoints handed
@@ -215,19 +582,25 @@ pub(crate) fn evaluate_metric_alarm(
         None => Default::default(),
     };
 
-    // Gather one value per slot (most recent first) plus the breaching flags.
+    // Gather one value per slot (most recent first) plus the breaching flags,
+    // and the `evaluatedDatapoints` / `recentDatapoints` of the reason data.
     let mut present = 0i64;
     let mut breaching = 0i64;
     let mut latest_value: Option<f64> = None;
+    let mut evaluated: Vec<Value> = Vec::new();
+    let mut recent: Vec<f64> = Vec::new();
     for i in 0..eval_periods {
         let slot_secs = latest - i * period;
         let Some(slot_ts) = DateTime::<Utc>::from_timestamp(slot_secs, 0) else {
             continue;
         };
-        if let Some(bucket) = buckets.get(&slot_ts) {
+        let value = buckets.get(&slot_ts).and_then(|bucket| {
             let mut sorted = bucket.samples.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some(v) = resolve_stat(&stat, bucket, &sorted) {
+            resolve_stat(&stat, bucket, &sorted).map(|v| (v, bucket.sample_count()))
+        });
+        match value {
+            Some((v, sample_count)) => {
                 present += 1;
                 if latest_value.is_none() {
                     latest_value = Some(v);
@@ -235,10 +608,39 @@ pub(crate) fn evaluate_metric_alarm(
                 if breaches(&alarm.comparison_operator, v, threshold) {
                     breaching += 1;
                 }
+                recent.push(v);
+                evaluated.push(json!({
+                    "timestamp": reason_timestamp(slot_ts),
+                    "sampleCount": sample_count,
+                    "value": v,
+                }));
             }
+            None => evaluated.push(json!({ "timestamp": reason_timestamp(slot_ts) })),
         }
     }
+    recent.reverse();
     let missing = eval_periods - present;
+
+    let mut data = Map::new();
+    data.insert("version".into(), json!("1.0"));
+    data.insert("queryDate".into(), json!(reason_timestamp(now)));
+    data.insert("startDate".into(), json!(reason_timestamp(start_ts)));
+    if let Some(u) = &alarm.unit {
+        data.insert("unit".into(), json!(u));
+    }
+    data.insert("statistic".into(), json!(stat));
+    data.insert("period".into(), json!(period));
+    data.insert("recentDatapoints".into(), json!(recent));
+    data.insert("threshold".into(), json!(threshold));
+    data.insert("evaluatedDatapoints".into(), Value::Array(evaluated));
+    let reason_data = Some(Value::Object(data).to_string());
+    let outcome = |state: AlarmState, reason: String, had_data: bool| MetricEvaluation {
+        state,
+        reason,
+        reason_data: reason_data.clone(),
+        had_data,
+        evaluation_state: None,
+    };
 
     // No real datapoints in the evaluation window. How the alarm reacts depends
     // on treat_missing_data:
@@ -248,12 +650,12 @@ pub(crate) fn evaluate_metric_alarm(
     //   * missing (default) -> INSUFFICIENT_DATA
     if present == 0 {
         return match treat.as_str() {
-            "breaching" => Some((
+            "breaching" => Some(outcome(
                 AlarmState::Alarm,
                 "Insufficient data treated as breaching.".to_string(),
                 false,
             )),
-            "notbreaching" => Some((
+            "notbreaching" => Some(outcome(
                 AlarmState::Ok,
                 "Insufficient data treated as not breaching.".to_string(),
                 false,
@@ -264,7 +666,7 @@ pub(crate) fn evaluate_metric_alarm(
             // not stay pinned to a value it can no longer justify). A state
             // forced via SetAlarmState is kept until real data arrives.
             _ if manually_set => None,
-            _ => Some((
+            _ => Some(outcome(
                 AlarmState::InsufficientData,
                 format!("Insufficient Data: {eval_periods} datapoints were unknown."),
                 false,
@@ -284,14 +686,14 @@ pub(crate) fn evaluate_metric_alarm(
             latest_value.map(|v| v.to_string()).unwrap_or_default(),
             operator_phrase(&alarm.comparison_operator),
         );
-        Some((AlarmState::Alarm, reason, true))
+        Some(outcome(AlarmState::Alarm, reason, true))
     } else {
         let reason = format!(
             "Threshold not crossed: {breaching} out of the last {eval_periods} datapoints was {} \
              the threshold ({threshold}).",
             operator_phrase(&alarm.comparison_operator),
         );
-        Some((AlarmState::Ok, reason, true))
+        Some(outcome(AlarmState::Ok, reason, true))
     }
 }
 
@@ -315,34 +717,6 @@ fn operator_phrase(op: &str) -> &'static str {
         "LessThanOrEqualToThreshold" => "less than or equal to",
         _ => "compared against",
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_transition(
-    state: &mut CloudWatchState,
-    region: &str,
-    name: &str,
-    alarm_type: &str,
-    old: &str,
-    new: AlarmState,
-    reason: &str,
-    _now: DateTime<Utc>,
-) {
-    let new_str = new.as_str();
-    let summary = format!("Alarm updated from {old} to {new_str}");
-    let history_data = format!(
-        "{{\"oldState\":{{\"stateValue\":\"{old}\"}},\"newState\":{{\"stateValue\":\"{new_str}\",\"stateReason\":\"{}\"}}}}",
-        reason.replace('"', "\\\"")
-    );
-    crate::service::push_alarm_history(
-        state,
-        region,
-        name,
-        alarm_type,
-        "StateUpdate",
-        summary,
-        history_data,
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +1087,9 @@ mod tests {
             evaluation_criteria: None,
             evaluation_window: None,
             evaluation_interval: None,
+            state_reason_data: None,
+            state_transitioned_timestamp: None,
+            evaluation_state: None,
         }
     }
 
@@ -734,11 +1111,16 @@ mod tests {
     fn missing_data_default_transitions_to_insufficient_data() {
         let now = Utc::now();
         let alarm = sum_alarm(AlarmState::Alarm, None);
-        let out = evaluate_metric_alarm(&alarm, None, now, false);
-        assert!(matches!(
-            out,
-            Some((AlarmState::InsufficientData, _, false))
-        ));
+        let out = evaluate_metric_alarm(&alarm, None, now, false).unwrap();
+        assert_eq!(out.state, AlarmState::InsufficientData);
+        assert!(!out.had_data);
+        assert_eq!(out.evaluation_state, None);
+        // The reason data lists the unknown slot without a value.
+        let data: Value = serde_json::from_str(out.reason_data.as_deref().unwrap()).unwrap();
+        assert_eq!(data["recentDatapoints"], json!([]));
+        let evaluated = data["evaluatedDatapoints"].as_array().unwrap();
+        assert_eq!(evaluated.len(), 1);
+        assert!(evaluated[0].get("value").is_none());
     }
 
     // `ignore` keeps the current state when data is missing.
@@ -764,7 +1146,167 @@ mod tests {
         let now = Utc::now();
         let alarm = sum_alarm(AlarmState::InsufficientData, None);
         let data = [datum(5.0, now)];
-        let out = evaluate_metric_alarm(&alarm, Some(&data), now, true);
-        assert!(matches!(out, Some((AlarmState::Alarm, _, true))), "{out:?}");
+        let out = evaluate_metric_alarm(&alarm, Some(&data), now, true).unwrap();
+        assert_eq!(out.state, AlarmState::Alarm);
+        assert!(out.had_data);
+    }
+
+    #[test]
+    fn reason_data_reports_evaluated_datapoints() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_030, 0).unwrap();
+        let mut alarm = sum_alarm(AlarmState::InsufficientData, None);
+        alarm.evaluation_periods = 2;
+        alarm.datapoints_to_alarm = Some(1);
+        alarm.unit = Some("Count".into());
+        let mut d1 = datum(2.0, now);
+        d1.unit = Some("Count".into());
+        let mut d2 = datum(3.0, now);
+        d2.unit = Some("Count".into());
+        let data = [d1, d2];
+        let out = evaluate_metric_alarm(&alarm, Some(&data), now, false).unwrap();
+        assert_eq!(out.state, AlarmState::Alarm);
+        let v: Value = serde_json::from_str(out.reason_data.as_deref().unwrap()).unwrap();
+        // Window: two 60s slots ending at the period boundary before `now`.
+        assert_eq!(v["version"], "1.0");
+        assert_eq!(v["queryDate"], "2023-11-14T22:13:50.000+0000");
+        assert_eq!(v["startDate"], "2023-11-14T22:12:00.000+0000");
+        assert_eq!(v["statistic"], "Sum");
+        assert_eq!(v["unit"], "Count");
+        assert_eq!(v["period"], 60);
+        assert_eq!(v["threshold"], 1.0);
+        assert_eq!(v["recentDatapoints"], json!([5.0]));
+        assert_eq!(
+            v["evaluatedDatapoints"],
+            json!([
+                {"timestamp": "2023-11-14T22:13:00.000+0000", "sampleCount": 2.0, "value": 5.0},
+                {"timestamp": "2023-11-14T22:12:00.000+0000"},
+            ])
+        );
+    }
+
+    #[test]
+    fn misconfigured_alarm_reports_evaluation_error() {
+        let now = Utc::now();
+        let mut alarm = sum_alarm(AlarmState::Ok, None);
+        alarm.threshold = None;
+        let out = evaluate_metric_alarm(&alarm, None, now, false).unwrap();
+        assert_eq!(out.state, AlarmState::InsufficientData);
+        assert_eq!(out.evaluation_state, Some(EvaluationState::EvaluationError));
+        assert!(out.reason.contains("no Threshold"), "{}", out.reason);
+        // A manual state is kept, as for missing data.
+        assert_eq!(evaluate_metric_alarm(&alarm, None, now, true), None);
+        // Metric-math / PromQL alarms are not evaluated here at all.
+        alarm.evaluation_criteria = Some(Default::default());
+        assert_eq!(evaluate_metric_alarm(&alarm, None, now, false), None);
+    }
+
+    #[test]
+    fn apply_evaluation_separates_updated_and_transitioned() {
+        let t0 = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let t1 = t0 + Duration::seconds(60);
+        let t2 = t0 + Duration::seconds(120);
+        let mut alarm = sum_alarm(AlarmState::Ok, None);
+        alarm.state_updated_timestamp = t0;
+        alarm.state_transitioned_timestamp = Some(t0);
+        let mut history = Vec::new();
+        let ev = |state, es| MetricEvaluation {
+            state,
+            reason: "r".into(),
+            reason_data: Some("{\"version\":\"1.0\"}".into()),
+            had_data: false,
+            evaluation_state: es,
+        };
+        // Same value, same evaluation state: nothing moves.
+        apply_metric_evaluation(&mut alarm, ev(AlarmState::Ok, None), t1, &mut history);
+        assert_eq!(alarm.state_updated_timestamp, t0);
+        assert!(history.is_empty());
+        // Evaluation state changes without a value change: updated only.
+        apply_metric_evaluation(
+            &mut alarm,
+            ev(AlarmState::Ok, Some(EvaluationState::EvaluationError)),
+            t1,
+            &mut history,
+        );
+        assert_eq!(alarm.state_updated_timestamp, t1);
+        assert_eq!(alarm.state_transitioned_timestamp, Some(t0));
+        assert!(history.is_empty());
+        // Value changes: both move and a StateUpdate is recorded at that time.
+        apply_metric_evaluation(&mut alarm, ev(AlarmState::Alarm, None), t2, &mut history);
+        assert_eq!(alarm.state_updated_timestamp, t2);
+        assert_eq!(alarm.state_transitioned_timestamp, Some(t2));
+        assert_eq!(alarm.evaluation_state, None);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].timestamp, t2);
+        let h: Value = serde_json::from_str(&history[0].history_data).unwrap();
+        assert_eq!(h["oldState"]["stateValue"], "OK");
+        assert_eq!(h["newState"]["stateValue"], "ALARM");
+        assert_eq!(h["newState"]["stateReasonData"]["version"], "1.0");
+    }
+
+    fn suppression(
+        composite: AlarmState,
+        entered_ago: i64,
+        suppressor: Option<AlarmState>,
+        left_ago: Option<i64>,
+    ) -> Option<ActionsSuppressedBy> {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        suppression_status(&SuppressionInput {
+            composite_state: composite,
+            entered_state_at: now - Duration::seconds(entered_ago),
+            suppressor_state: suppressor,
+            suppressor_left_alarm_at: left_ago.map(|s| now - Duration::seconds(s)),
+            wait_period: 120,
+            extension_period: 60,
+            now,
+        })
+    }
+
+    #[test]
+    fn suppression_follows_suppressor_and_periods() {
+        use ActionsSuppressedBy::*;
+        use AlarmState::{Alarm as A, Ok as O};
+        // Composite not in ALARM: nothing to suppress.
+        assert_eq!(suppression(O, 10, Some(A), None), None);
+        // Suppressor in ALARM.
+        assert_eq!(suppression(A, 10, Some(A), None), Some(Alarm));
+        // Waiting for the suppressor, inside and past the wait period.
+        assert_eq!(suppression(A, 10, Some(O), None), Some(WaitPeriod));
+        assert_eq!(suppression(A, 500, Some(O), None), None);
+        assert_eq!(suppression(A, 10, None, None), Some(WaitPeriod));
+        // Suppressor left ALARM: extension period, then done (the wait ended
+        // when the suppressor went into ALARM).
+        assert_eq!(
+            suppression(A, 100, Some(O), Some(30)),
+            Some(ExtensionPeriod)
+        );
+        assert_eq!(suppression(A, 100, Some(O), Some(90)), None);
+        // A suppressor exit long before the composite entered ALARM doesn't
+        // end the wait.
+        assert_eq!(suppression(A, 10, Some(O), Some(1000)), Some(WaitPeriod));
+    }
+
+    #[test]
+    fn triggering_alarms_lists_satisfied_predicates() {
+        let ts = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut members = HashMap::new();
+        for (n, s) in [("a", AlarmState::Alarm), ("b", AlarmState::Ok)] {
+            members.insert(
+                n.to_string(),
+                RuleMember {
+                    arn: format!("arn:aws:cloudwatch:us-east-1:123456789012:alarm:{n}"),
+                    state: s,
+                    transitioned: ts,
+                },
+            );
+        }
+        let node = parse_alarm_rule("ALARM(a) OR ALARM(b) OR ALARM(a)").unwrap();
+        let v: Value = serde_json::from_str(&triggering_alarms_data(&node, &members)).unwrap();
+        assert_eq!(
+            v,
+            json!({"triggeringAlarms": [{
+                "arn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:a",
+                "state": {"value": "ALARM", "timestamp": "2023-11-14T22:13:20.000+0000"},
+            }]})
+        );
     }
 }

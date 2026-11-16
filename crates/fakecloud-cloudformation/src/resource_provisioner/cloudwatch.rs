@@ -197,6 +197,9 @@ impl ResourceProvisioner {
             evaluation_criteria: None,
             evaluation_window: None,
             evaluation_interval: None,
+            state_reason_data: None,
+            state_transitioned_timestamp: Some(now),
+            evaluation_state: None,
         };
         let region_alarms = state.alarms_in_mut(&self.region);
         if region_alarms.contains_key(&alarm_name) {

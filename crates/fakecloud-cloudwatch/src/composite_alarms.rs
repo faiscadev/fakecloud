@@ -14,7 +14,9 @@ use fakecloud_core::query::{optional_query_param, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{
-    collect_member_values, empty_metadata_response, validate_len, xml_escape, CloudWatchService,
+    collect_member_values, configuration_update_item, empty_metadata_response, push_alarm_history,
+    push_state_reason_data, push_state_transitioned_timestamp, validate_len, xml_escape,
+    CloudWatchService,
 };
 use crate::state::{AlarmState, CompositeAlarm};
 
@@ -85,8 +87,30 @@ impl CloudWatchService {
                 .unwrap_or(now),
             alarm_configuration_updated_timestamp: now,
             action_configuration,
+            state_reason_data: existing.as_ref().and_then(|a| a.state_reason_data.clone()),
+            state_transitioned_timestamp: Some(
+                existing
+                    .as_ref()
+                    .map(|a| {
+                        a.state_transitioned_timestamp
+                            .unwrap_or(a.state_updated_timestamp)
+                    })
+                    .unwrap_or(now),
+            ),
+            // Recomputed from the (possibly new) suppressor on the next
+            // evaluation.
+            actions_suppressed_by: existing.as_ref().and_then(|a| a.actions_suppressed_by),
+            actions_suppressed_reason: existing
+                .as_ref()
+                .and_then(|a| a.actions_suppressed_reason.clone()),
         };
-        composites.insert(alarm_name, alarm);
+        let created = existing.is_none();
+        composites.insert(alarm_name.clone(), alarm);
+        push_alarm_history(
+            acct,
+            &req.region,
+            configuration_update_item(&alarm_name, "CompositeAlarm", created, now),
+        );
 
         Ok(empty_metadata_response(
             "PutCompositeAlarm",
@@ -134,12 +158,30 @@ pub(crate) fn render_composite_alarm(alarm: &CompositeAlarm) -> String {
         "<StateReason>{}</StateReason>",
         xml_escape(&alarm.state_reason)
     ));
+    push_state_reason_data(&mut s, alarm.state_reason_data.as_deref());
     s.push_str(&format!(
         "<StateUpdatedTimestamp>{}</StateUpdatedTimestamp>",
         alarm
             .state_updated_timestamp
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     ));
+    push_state_transitioned_timestamp(
+        &mut s,
+        alarm.state_transitioned_timestamp,
+        alarm.state_updated_timestamp,
+    );
+    if let Some(by) = alarm.actions_suppressed_by {
+        s.push_str(&format!(
+            "<ActionsSuppressedBy>{}</ActionsSuppressedBy>",
+            by.as_str()
+        ));
+    }
+    if let Some(r) = &alarm.actions_suppressed_reason {
+        s.push_str(&format!(
+            "<ActionsSuppressedReason>{}</ActionsSuppressedReason>",
+            xml_escape(r)
+        ));
+    }
     if let Some(a) = &alarm.actions_suppressor {
         s.push_str(&format!(
             "<ActionsSuppressor>{}</ActionsSuppressor>",
