@@ -13,6 +13,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use crate::state::SharedLogsState;
 
 mod anomaly;
+mod cross_service;
 mod deliveries;
 mod destinations;
 mod exports;

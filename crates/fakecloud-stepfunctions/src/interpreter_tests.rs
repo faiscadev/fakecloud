@@ -2770,6 +2770,10 @@ impl fakecloud_core::delivery::CloudwatchLogsDelivery for RecordedLogs {
             .lock()
             .push((log_group_name.to_string(), log_stream_name.to_string()));
     }
+
+    fn log_group_exists(&self, _account_id: &str, _region: &str, _log_group_name: &str) -> bool {
+        true
+    }
 }
 
 /// An execution logs under its state machine's logging configuration, and a
@@ -2803,8 +2807,14 @@ fn execution_logs_go_to_the_named_log_group() {
         .build()
         .unwrap()
         .block_on(fut);
+    let delivered = logs.0.lock().clone();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(delivered[0].0, "sfn-logged");
+    // `states/<machine>/<hour>/00000000` for a STANDARD execution.
+    let stream: Vec<&str> = delivered[0].1.split('/').collect();
     assert_eq!(
-        logs.0.lock().clone(),
-        [("sfn-logged".to_string(), "exec-1".to_string())]
+        (stream[0], stream[1], stream[3]),
+        ("states", "test", "00000000")
     );
+    assert_eq!(stream[2].split('-').count(), 4, "{delivered:?}");
 }

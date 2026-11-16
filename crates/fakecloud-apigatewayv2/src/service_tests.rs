@@ -2532,6 +2532,10 @@ impl fakecloud_core::delivery::CloudwatchLogsDelivery for MockCloudwatchLogsDeli
             events.to_vec(),
         ));
     }
+
+    fn log_group_exists(&self, _account_id: &str, _region: &str, _log_group_name: &str) -> bool {
+        true
+    }
 }
 
 fn make_svc_with_access_logs(mock: Arc<MockCloudwatchLogsDelivery>) -> ApiGatewayV2Service {

@@ -1368,6 +1368,9 @@ async fn main() {
     );
     let eb_delivery_for_sfn_deferred =
         fakecloud_eventbridge::delivery::DeferredEventBridgeDelivery::new();
+    // CloudWatch Logs delivery for Step Functions execution logging and API
+    // Gateway access logs, bound to the Logs service once it is built below.
+    let logs_delivery = fakecloud_core::delivery::DeferredCloudwatchLogsDelivery::new();
     // Step Functions delivery (EventBridge/Scheduler can start executions)
     let sfn_delivery_for_eb: Arc<dyn fakecloud_core::delivery::StepFunctionsDelivery> = {
         // Build a full delivery bus for the SFN interpreter so task states
@@ -1386,7 +1389,8 @@ async fn main() {
         let mut sfn_interpreter_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_for_sfn_delivery)
-            .with_eventbridge(Arc::new(eb_delivery_for_sfn_deferred.clone()));
+            .with_eventbridge(Arc::new(eb_delivery_for_sfn_deferred.clone()))
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
         if let Some(ref ld) = lambda_delivery {
             sfn_interpreter_bus = sfn_interpreter_bus.with_lambda(ld.clone());
         }
@@ -2497,6 +2501,7 @@ async fn main() {
         cfn_snapshot_hooks.insert("logs", h);
     }
     let logs_service = Arc::new(logs_service);
+    logs_delivery.set(logs_service.clone());
     registry.register(logs_service.clone());
     let kms_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -5274,7 +5279,8 @@ async fn main() {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery_for_sfn)
-            .with_eventbridge(eb_delivery.clone());
+            .with_eventbridge(eb_delivery.clone())
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
@@ -5421,16 +5427,18 @@ async fn main() {
         };
     let mut apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone())
         .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone());
-    if let Some(ref ld) = lambda_delivery {
+    {
         let cognito_jwt_verifier: Arc<dyn fakecloud_core::delivery::CognitoJwtVerifier> = Arc::new(
             fakecloud_cognito::StateBackedJwtVerifier::new(cognito_state.clone()),
         );
-        let delivery_for_apigw = Arc::new(
-            DeliveryBus::new()
-                .with_lambda(ld.clone())
-                .with_cognito_jwt_verifier(cognito_jwt_verifier),
-        );
-        apigw_service = apigw_service.with_delivery(delivery_for_apigw);
+        // Access logs reach CloudWatch Logs whether or not Lambda runs here.
+        let mut delivery_for_apigw = DeliveryBus::new()
+            .with_cognito_jwt_verifier(cognito_jwt_verifier)
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
+        if let Some(ref ld) = lambda_delivery {
+            delivery_for_apigw = delivery_for_apigw.with_lambda(ld.clone());
+        }
+        apigw_service = apigw_service.with_delivery(Arc::new(delivery_for_apigw));
     }
     if let Some(store) = apigw_snapshot_store {
         apigw_service = apigw_service.with_snapshot_store(store);
@@ -7628,7 +7636,8 @@ async fn main() {
         let mut sfn_interpreter_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_for_sfn)
-            .with_eventbridge(eb_delivery.clone());
+            .with_eventbridge(eb_delivery.clone())
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
         if let Some(ref ld) = lambda_delivery {
             sfn_interpreter_bus = sfn_interpreter_bus.with_lambda(ld.clone());
         }

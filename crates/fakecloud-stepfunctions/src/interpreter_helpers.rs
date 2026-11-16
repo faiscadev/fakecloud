@@ -2023,103 +2023,177 @@ pub(crate) fn fail_execution(
     }
 }
 
-/// Deliver execution history events to CloudWatch Logs when the state
-/// machine has a logging configuration.
+/// Deliver an execution's history to CloudWatch Logs under its state
+/// machine's logging configuration, as recorded against AWS: one JSON object
+/// per event (`details`, `redrive_count`, `id`, `type`, `previous_event_id`,
+/// `event_timestamp`, `execution_arn`, numbers as strings), the details' input
+/// and output only with `includeExecutionData`, the events `level` takes, in
+/// `states/<machine>/<hour>/00000000` for a STANDARD execution and
+/// `states/<machine>/<minute>/00000000` for an EXPRESS one. A map run's child
+/// logs under its parent's machine, its first and last events naming the map
+/// run and the parent.
 pub(crate) fn deliver_execution_logs(
     state: &SharedStepFunctionsState,
     execution_arn: &str,
     delivery: Option<&Arc<DeliveryBus>>,
     logging_configuration: Option<&Value>,
 ) {
-    let config = match logging_configuration {
-        Some(c) => c,
-        None => return,
+    let (Some(config), Some(delivery)) = (logging_configuration, delivery) else {
+        return;
     };
-
     let level = config["level"].as_str().unwrap_or("OFF");
     if level == "OFF" {
         return;
     }
-
-    let destinations = config["destinations"].as_array();
-    let log_group_arn = destinations.and_then(|d| {
-        d.iter()
-            .find_map(|dest| dest["cloudWatchLogsLogGroup"]["logGroupArn"].as_str())
-    });
-
-    let log_group_arn = match log_group_arn {
-        Some(a) => a,
-        None => return,
-    };
-
-    // Parse log group ARN: arn:aws:logs:region:account-id:log-group:group-name
-    let parts: Vec<&str> = log_group_arn.split(':').collect();
-    if parts.len() < 6 {
+    let Some((log_region, log_account_id, log_group_name)) = config["destinations"]
+        .as_array()
+        .and_then(|d| {
+            d.iter()
+                .find_map(|dest| dest["cloudWatchLogsLogGroup"]["logGroupArn"].as_str())
+        })
+        .and_then(log_group_from_arn)
+    else {
         return;
-    }
-    let log_account_id = parts[4];
-    // `log-group:<name>`, which AWS's own ARNs follow with `:*`.
-    let log_group_name = match (parts.get(5), parts.get(6)) {
-        (Some(&"log-group"), Some(name)) => *name,
-        _ => return,
     };
-
-    let accounts = state.read();
-    let s = match accounts.by_arn(execution_arn) {
-        Some(st) => st,
-        None => return,
-    };
-    let exec = match s.executions.get(execution_arn) {
-        Some(e) => e,
-        None => return,
-    };
-
-    let _now = Utc::now().timestamp_millis();
-    let stream_name = exec.name.clone();
-
     let include_data = config["includeExecutionData"].as_bool().unwrap_or(false);
 
-    let events: Vec<(i64, String)> = exec
-        .history_events
-        .iter()
-        .filter_map(|ev| {
-            // Skip non-error events when level is ERROR unless it's a terminal failure.
-            if level == "ERROR"
-                && !matches!(
-                    ev.event_type.as_str(),
-                    "ExecutionFailed"
-                        | "TaskFailed"
-                        | "StateFailed"
-                        | "LambdaFunctionFailed"
-                        | "LambdaFunctionTimedOut"
-                )
-            {
-                return None;
-            }
-            let mut detail = json!({
-                "id": ev.id,
-                "type": ev.event_type,
-                "timestamp": ev.timestamp.timestamp_millis(),
-                "previousEventId": ev.previous_event_id,
-            });
-            if include_data {
-                detail["details"] = ev.details.clone();
-            }
-            Some((ev.timestamp.timestamp_millis(), detail.to_string()))
-        })
-        .collect();
-
+    let accounts = state.read();
+    let Some(exec) = accounts
+        .by_arn(execution_arn)
+        .and_then(|s| s.executions.get(execution_arn))
+    else {
+        return;
+    };
+    // Hourly for a STANDARD execution, by the minute for an EXPRESS one.
+    let stream_format = if crate::state::is_express_execution_arn(execution_arn) {
+        "%Y-%m-%d-%H-%M"
+    } else {
+        "%Y-%m-%d-%H"
+    };
+    let mut streams: Vec<(String, Vec<(i64, String)>)> = Vec::new();
+    for ev in &exec.history_events {
+        if !logged_at_level(level, &ev.event_type) {
+            continue;
+        }
+        let stream = format!(
+            "states/{}/{}/00000000",
+            exec.state_machine_name,
+            ev.timestamp.format(stream_format)
+        );
+        let message = log_message(exec, ev, include_data);
+        let entry = (ev.timestamp.timestamp_millis(), message);
+        match streams.iter_mut().find(|(name, _)| *name == stream) {
+            Some((_, events)) => events.push(entry),
+            None => streams.push((stream, vec![entry])),
+        }
+    }
     drop(accounts);
 
-    if let Some(d) = delivery {
-        d.put_log_events(
-            log_account_id,
-            parts[3],
-            log_group_name,
-            &stream_name,
-            &events,
-        );
+    for (stream, events) in streams {
+        delivery.put_log_events(log_account_id, log_region, log_group_name, &stream, &events);
     }
+}
+
+/// `(region, account, name)` of a log group ARN, `log-group:<name>` with or
+/// without the `:*` AWS's own ARNs end in.
+pub(crate) fn log_group_from_arn(arn: &str) -> Option<(&str, &str, &str)> {
+    let parts: Vec<&str> = arn.split(':').collect();
+    match parts.as_slice() {
+        ["arn", _, "logs", region, account, "log-group", name, ..] => Some((region, account, name)),
+        _ => None,
+    }
+}
+
+/// Whether a logging `level` takes an event: everything at `ALL`; failures,
+/// aborts and timeouts (and a `Fail` state's entry) at `ERROR`; the
+/// execution's own failure at `FATAL`, as AWS documents and records.
+fn logged_at_level(level: &str, event_type: &str) -> bool {
+    match level {
+        "ALL" => true,
+        "ERROR" => matches!(
+            event_type,
+            "ExecutionAborted"
+                | "ExecutionFailed"
+                | "ExecutionTimedOut"
+                | "FailStateEntered"
+                | "LambdaFunctionFailed"
+                | "LambdaFunctionScheduleFailed"
+                | "LambdaFunctionStartFailed"
+                | "LambdaFunctionTimedOut"
+                | "MapStateAborted"
+                | "MapStateFailed"
+                | "MapIterationAborted"
+                | "MapIterationFailed"
+                | "MapRunAborted"
+                | "MapRunFailed"
+                | "ParallelStateAborted"
+                | "ParallelStateFailed"
+                | "TaskFailed"
+                | "TaskStartFailed"
+                | "TaskStateAborted"
+                | "TaskSubmitFailed"
+                | "TaskTimedOut"
+                | "WaitStateAborted"
+        ),
+        "FATAL" => matches!(
+            event_type,
+            "ExecutionAborted" | "ExecutionFailed" | "ExecutionTimedOut"
+        ),
+        _ => false,
+    }
+}
+
+/// One event's log line, its keys in the recorded order.
+fn log_message(
+    exec: &crate::state::Execution,
+    ev: &crate::state::HistoryEvent,
+    include_data: bool,
+) -> String {
+    let mut details: std::collections::BTreeMap<String, Value> = ev
+        .details
+        .as_object()
+        .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    // As recorded, a map run's start is logged without its ARN.
+    if ev.event_type == "MapRunStarted" {
+        details.remove("mapRunArn");
+    }
+    for (field, detail) in [("input", "inputDetails"), ("output", "outputDetails")] {
+        if !include_data {
+            details.remove(field);
+            details.remove(detail);
+        } else if details.contains_key(field) {
+            details
+                .entry(detail.to_string())
+                .or_insert_with(|| json!({ "truncated": false }));
+        }
+    }
+    let text = |v: &dyn std::fmt::Display| Value::String(v.to_string());
+    let mut message = format!(
+        "{{\"details\":{},\"redrive_count\":{},\"id\":{},\"type\":{},\"previous_event_id\":{},\"event_timestamp\":{},\"execution_arn\":{}",
+        serde_json::to_string(&details).expect("details serialize"),
+        text(&exec.redrive_count),
+        text(&ev.id),
+        Value::String(ev.event_type.clone()),
+        text(&ev.previous_event_id),
+        text(&ev.timestamp.timestamp_millis()),
+        Value::String(exec.execution_arn.clone()),
+    );
+    // A map run child's start and end name its map run and parent.
+    let bookend = ev.event_type == "ExecutionStarted"
+        || matches!(
+            ev.event_type.as_str(),
+            "ExecutionSucceeded" | "ExecutionFailed" | "ExecutionAborted" | "ExecutionTimedOut"
+        );
+    if let (true, Some(map_run_arn)) = (bookend, &exec.map_run_arn) {
+        message.push_str(&format!(
+            ",\"map_run_arn\":{},\"parent_execution_arn\":{}",
+            Value::String(map_run_arn.clone()),
+            Value::String(exec.parent_execution_arn.clone().unwrap_or_default()),
+        ));
+    }
+    message.push('}');
+    message
 }
 
 #[cfg(test)]

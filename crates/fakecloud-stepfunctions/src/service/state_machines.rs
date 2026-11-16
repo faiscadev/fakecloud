@@ -14,6 +14,7 @@ impl StepFunctionsService {
         validate_required("name", &body["name"])?;
         let name = body["name"].as_str().ok_or_else(|| missing("name"))?;
         validate_name(name)?;
+        self.validate_log_destination(&body["loggingConfiguration"])?;
 
         validate_required("definition", &body["definition"])?;
         let definition = body["definition"]
@@ -207,6 +208,7 @@ impl StepFunctionsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_required("stateMachineArn", &body["stateMachineArn"])?;
+        self.validate_log_destination(&body["loggingConfiguration"])?;
         let arn = body["stateMachineArn"]
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?;
@@ -667,4 +669,39 @@ fn publish_version(
     let creation_date = v.creation_date;
     state.state_machine_versions.insert(version_arn.clone(), v);
     (version_arn, creation_date)
+}
+
+impl StepFunctionsService {
+    /// A logging configuration that logs must name a log group that exists,
+    /// as recorded: `InvalidLoggingConfiguration` otherwise. Nothing to check
+    /// against without a CloudWatch Logs sender wired.
+    fn validate_log_destination(&self, logging: &Value) -> Result<(), AwsServiceError> {
+        if logging["level"].as_str().unwrap_or("OFF") == "OFF" {
+            return Ok(());
+        }
+        let Some(delivery) = &self.delivery else {
+            return Ok(());
+        };
+        let groups = logging["destinations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d["cloudWatchLogsLogGroup"]["logGroupArn"].as_str());
+        for arn in groups {
+            let missing = match crate::interpreter::log_group_from_arn(arn) {
+                Some((region, account, name)) => {
+                    delivery.log_group_exists(account, region, name) == Some(false)
+                }
+                None => true,
+            };
+            if missing {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidLoggingConfiguration",
+                    "Invalid Logging Configuration: Log Destination not found.",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
