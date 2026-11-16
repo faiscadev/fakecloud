@@ -428,7 +428,8 @@ fn child_counts(
         "timedOut": tally(ExecutionStatus::TimedOut),
         "aborted": tally(ExecutionStatus::Aborted) + aborted_unstarted,
         "total": total,
-        "resultsWritten": succeeded + failed,
+        // Every child that ended, aborted ones too, as recorded.
+        "resultsWritten": succeeded + failed + tally(ExecutionStatus::TimedOut) + tally(ExecutionStatus::Aborted),
         "failuresNotRedrivable": 0,
         "pendingRedrive": 0,
     })

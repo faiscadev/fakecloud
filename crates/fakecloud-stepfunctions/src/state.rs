@@ -106,6 +106,11 @@ pub struct StepFunctionsState {
     /// Pending task tokens issued for sync activities + their outcome.
     #[serde(default)]
     pub task_tokens: BTreeMap<String, TaskTokenState>,
+    /// The task driving each running execution (or a map run's child), which
+    /// stopping the execution aborts. Not persisted: no driver survives a
+    /// restart.
+    #[serde(skip)]
+    pub drivers: BTreeMap<String, tokio::task::AbortHandle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +347,41 @@ pub struct Execution {
     pub item_count: Option<i64>,
 }
 
+impl Execution {
+    /// Stop a running execution: ABORTED, with `ExecutionAborted` as its last
+    /// event (`add_event` adds nothing to an aborted execution). `false` if it
+    /// had already ended.
+    pub fn abort(
+        &mut self,
+        now: DateTime<Utc>,
+        error: Option<String>,
+        cause: Option<String>,
+    ) -> bool {
+        if self.status != ExecutionStatus::Running {
+            return false;
+        }
+        let mut details = serde_json::Map::new();
+        if let Some(error) = &error {
+            details.insert("error".to_string(), Value::String(error.clone()));
+        }
+        if let Some(cause) = &cause {
+            details.insert("cause".to_string(), Value::String(cause.clone()));
+        }
+        self.status = ExecutionStatus::Aborted;
+        self.stop_date = Some(now);
+        self.error = error;
+        self.cause = cause;
+        self.history_events.push(HistoryEvent {
+            id: self.history_events.len() as i64 + 1,
+            event_type: "ExecutionAborted".to_string(),
+            timestamp: now,
+            previous_event_id: 0,
+            details: Value::Object(details),
+        });
+        true
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionStatus {
     Running,
@@ -386,6 +426,64 @@ impl StepFunctionsState {
             state_machine_aliases: BTreeMap::new(),
             map_runs: BTreeMap::new(),
             task_tokens: BTreeMap::new(),
+            drivers: BTreeMap::new(),
+        }
+    }
+
+    /// Stop the running execution `arn`, and everything it manages: its map
+    /// runs and their running children, theirs in turn. Each records
+    /// `ExecutionAborted`, the children with the cause AWS gives them.
+    /// Returns the executions stopped, whose drivers are to be cancelled.
+    pub fn abort_execution(
+        &mut self,
+        arn: &str,
+        now: DateTime<Utc>,
+        error: Option<String>,
+        cause: Option<String>,
+    ) -> Vec<String> {
+        let mut stopped = Vec::new();
+        if !self
+            .executions
+            .get_mut(arn)
+            .is_some_and(|exec| exec.abort(now, error, cause))
+        {
+            return stopped;
+        }
+        stopped.push(arn.to_string());
+        let mut pending = vec![arn.to_string()];
+        while let Some(parent) = pending.pop() {
+            let mut aborted_runs = Vec::new();
+            for run in self.map_runs.values_mut() {
+                if run.execution_arn == parent && run.abort(now) {
+                    aborted_runs.push(run.map_run_arn.clone());
+                }
+            }
+            for child in self.executions.values_mut() {
+                let Some(run) = child
+                    .map_run_arn
+                    .clone()
+                    .filter(|run| aborted_runs.contains(run))
+                else {
+                    continue;
+                };
+                let cause = format!(
+                    "The map run execution [{run}] which was managing this resource was aborted"
+                );
+                if child.abort(now, None, Some(cause)) {
+                    stopped.push(child.execution_arn.clone());
+                    pending.push(child.execution_arn.clone());
+                }
+            }
+        }
+        stopped
+    }
+
+    /// Cancel the tasks driving `executions`.
+    pub fn cancel_drivers(&mut self, executions: &[String]) {
+        for arn in executions {
+            if let Some(driver) = self.drivers.remove(arn) {
+                driver.abort();
+            }
         }
     }
 

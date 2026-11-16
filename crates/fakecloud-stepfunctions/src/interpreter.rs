@@ -92,10 +92,18 @@ pub async fn execute_state_machine(
         },
     ));
 
-    match handle.await {
+    // StopExecution aborts the task: its states stop where they are.
+    let driver = handle.abort_handle();
+    let driver_id = driver.id();
+    register_driver(&state, &execution_arn, driver);
+    let outcome = handle.await;
+    unregister_driver(&state, &execution_arn, driver_id);
+    match outcome {
         Ok(Ok(output)) => {
             succeed_execution(&state, &execution_arn, &output);
         }
+        // Stopped: the execution is already ABORTED.
+        Err(join_err) if join_err.is_cancelled() => {}
         Ok(Err((error, cause))) => {
             fail_execution(&state, &execution_arn, &error, &cause);
         }
@@ -906,9 +914,10 @@ async fn execute_parallel_state(
         let arn = execution_arn.to_string();
 
         let scope = crate::variables::child_scope(true);
-        handles.push(tokio::spawn(crate::variables::in_scope(scope, async move {
-            run_states(&branch, branch_input, &delivery, &ddb, &reg, &state, &arn).await
-        })));
+        handles.push(AbortOnDrop(tokio::spawn(crate::variables::in_scope(
+            scope,
+            async move { run_states(&branch, branch_input, &delivery, &ddb, &reg, &state, &arn).await },
+        ))));
     }
 
     // Collect results in order
@@ -1507,79 +1516,96 @@ async fn run_map_iterations(
 
         // A distributed Map's iterations cannot read outer variables.
         let scope = crate::variables::child_scope(!is_distributed);
-        handles.push(tokio::spawn(crate::variables::in_scope(
-            scope,
-            async move {
-                let _permit = permit;
-                let started = Utc::now();
-                // The map run may have been stopped since this iteration was
-                // let start: then it never does.
-                let started_child = match &child {
-                    Some(child) if may_start => {
-                        start_map_run_child(&state, &arn, child, &item_input)
-                    }
-                    _ => true,
-                };
-                if !may_start || !started_child {
-                    let record = recorded_input.map(|input| crate::map_s3::IterationRecord {
-                        input,
-                        started,
-                        stopped: started,
-                        outcome: crate::map_s3::IterationOutcome::Pending,
-                        execution: None,
-                    });
-                    return Ok::<_, (String, String)>((index, None, record));
-                }
-                let result = match &child {
-                    Some(child) => {
-                        let result = run_states(
-                            &iter_def, item_input, &delivery, &ddb, &reg, &state, &child.arn,
-                        )
-                        .await;
-                        match &result {
-                            Ok(output) => succeed_execution(&state, &child.arn, output),
-                            Err((error, cause)) => fail_execution(&state, &child.arn, error, cause),
-                        }
-                        // A child stopped on its own did not succeed, whatever
-                        // its states went on to return.
-                        match aborted_with(&state, &child.arn) {
-                            Some(failure) => Err(failure),
-                            None => result,
-                        }
-                    }
-                    None => {
-                        run_states(&iter_def, item_input, &delivery, &ddb, &reg, &state, &arn).await
-                    }
-                };
-                progress.record_finish(result.is_err(), tolerance, total_items);
+        let child_arn = child.as_ref().map(|c| c.arn.clone());
+        let iteration = tokio::spawn(crate::variables::in_scope(scope, async move {
+            let _permit = permit;
+            let started = Utc::now();
+            // The map run may have been stopped since this iteration was
+            // let start: then it never does.
+            let started_child = match &child {
+                Some(child) if may_start => start_map_run_child(&state, &arn, child, &item_input),
+                _ => true,
+            };
+            if !may_start || !started_child {
                 let record = recorded_input.map(|input| crate::map_s3::IterationRecord {
-                    execution: child.map(|c| (c.arn, c.name)),
                     input,
                     started,
-                    stopped: Utc::now(),
-                    outcome: match &result {
-                        Ok(output) => crate::map_s3::IterationOutcome::Succeeded(output.clone()),
-                        Err((error, cause)) => {
-                            crate::map_s3::IterationOutcome::Failed(error.clone(), cause.clone())
-                        }
-                    },
+                    stopped: started,
+                    outcome: crate::map_s3::IterationOutcome::Pending,
+                    execution: None,
                 });
-                Ok((index, Some(result), record))
-            },
-        )));
+                return Ok::<_, (String, String)>((index, None, record));
+            }
+            let result = match &child {
+                Some(child) => {
+                    let result = run_states(
+                        &iter_def, item_input, &delivery, &ddb, &reg, &state, &child.arn,
+                    )
+                    .await;
+                    match &result {
+                        Ok(output) => succeed_execution(&state, &child.arn, output),
+                        Err((error, cause)) => fail_execution(&state, &child.arn, error, cause),
+                    }
+                    // A child stopped on its own did not succeed, whatever
+                    // its states went on to return.
+                    match aborted_with(&state, &child.arn) {
+                        Some(failure) => Err(failure),
+                        None => result,
+                    }
+                }
+                None => {
+                    run_states(&iter_def, item_input, &delivery, &ddb, &reg, &state, &arn).await
+                }
+            };
+            progress.record_finish(result.is_err(), tolerance, total_items);
+            let record = recorded_input.map(|input| crate::map_s3::IterationRecord {
+                execution: child.map(|c| (c.arn, c.name)),
+                input,
+                started,
+                stopped: Utc::now(),
+                outcome: match &result {
+                    Ok(output) => crate::map_s3::IterationOutcome::Succeeded(output.clone()),
+                    Err((error, cause)) => {
+                        crate::map_s3::IterationOutcome::Failed(error.clone(), cause.clone())
+                    }
+                },
+            });
+            Ok((index, Some(result), record))
+        }));
+        // A map run's child is stopped by aborting the task running it.
+        if let Some(arn) = &child_arn {
+            register_driver(shared_state, arn, iteration.abort_handle());
+        }
+        handles.push((index, child_arn, AbortOnDrop(iteration)));
     }
 
     // Collect results in order
     let mut results: Vec<(usize, Value)> = Vec::with_capacity(handles.len());
     let mut iteration_records = Vec::new();
     let mut failure_count = 0usize;
-    for handle in handles {
-        let (index, result, record) = handle.await.map_err(|e| {
-            (
-                "States.Runtime".to_string(),
-                format!("Map iteration panicked: {e}"),
-            )
-        })??;
+    for (index, child_arn, handle) in handles {
+        let outcome = handle.await;
+        if let Some(arn) = &child_arn {
+            remove_driver(shared_state, arn);
+        }
+        let (index, result, record) = match outcome {
+            Ok(iteration) => iteration?,
+            // A child stopped on its own: its iteration failed as it was stopped.
+            Err(join_err) if join_err.is_cancelled() => {
+                let failure = child_arn
+                    .as_deref()
+                    .and_then(|arn| aborted_with(shared_state, arn))
+                    .unwrap_or_default();
+                (index, Some(Err(failure)), None)
+            }
+            Err(join_err) => {
+                return Err(StateFailure::from((
+                    "States.Runtime".to_string(),
+                    format!("Map iteration panicked: {join_err}"),
+                ))
+                .into())
+            }
+        };
         iteration_records.extend(record);
 
         match result {
@@ -3118,6 +3144,12 @@ async fn sync_wait_states_start_execution(
         })?
         .to_string();
 
+    // A child the Task stops waiting for without it having ended (the parent
+    // stopped) is stopped with it, as recorded.
+    let _guard = SyncChildGuard {
+        shared_state,
+        child_arn: &exec_arn,
+    };
     let deadline = sync_deadline(timeout_seconds);
     loop {
         let described = {
@@ -3158,6 +3190,94 @@ async fn sync_wait_states_start_execution(
             ));
         }
         tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// Stops a `.sync` child still running when the Task waiting for it goes
+/// away, naming its parent as AWS does.
+struct SyncChildGuard<'a> {
+    shared_state: &'a SharedStepFunctionsState,
+    child_arn: &'a str,
+}
+
+impl Drop for SyncChildGuard<'_> {
+    fn drop(&mut self) {
+        let mut accounts = self.shared_state.write();
+        let Some(state) = accounts.by_arn_mut(self.child_arn) else {
+            return;
+        };
+        let Some(parent) = state
+            .executions
+            .get(self.child_arn)
+            .filter(|child| child.status == ExecutionStatus::Running)
+            .and_then(|child| child.parent_execution_arn.clone())
+        else {
+            return;
+        };
+        let cause = format!(
+            "The Task state in AWS Step Functions execution [{parent}] which was managing this resource was aborted"
+        );
+        let stopped = state.abort_execution(self.child_arn, Utc::now(), None, Some(cause));
+        state.cancel_drivers(&stopped);
+    }
+}
+
+/// A task that is aborted when dropped: a Parallel's branches and a Map's
+/// iterations stop with the state that runs them.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+/// Record the task driving `execution_arn`, which StopExecution aborts.
+fn register_driver(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    driver: tokio::task::AbortHandle,
+) {
+    let mut accounts = shared_state.write();
+    if let Some(state) = accounts.by_arn_mut(execution_arn) {
+        state.drivers.insert(execution_arn.to_string(), driver);
+    }
+}
+
+/// Forget `execution_arn`'s driver once it has finished, unless a redrive has
+/// replaced it since.
+fn unregister_driver(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    driver_id: tokio::task::Id,
+) {
+    let mut accounts = shared_state.write();
+    if let Some(state) = accounts.by_arn_mut(execution_arn) {
+        if state
+            .drivers
+            .get(execution_arn)
+            .is_some_and(|driver| driver.id() == driver_id)
+        {
+            state.drivers.remove(execution_arn);
+        }
+    }
+}
+
+fn remove_driver(shared_state: &SharedStepFunctionsState, execution_arn: &str) {
+    let mut accounts = shared_state.write();
+    if let Some(state) = accounts.by_arn_mut(execution_arn) {
+        state.drivers.remove(execution_arn);
     }
 }
 
