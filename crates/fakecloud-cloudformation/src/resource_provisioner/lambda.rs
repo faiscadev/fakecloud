@@ -584,7 +584,7 @@ impl ResourceProvisioner {
         &self,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        let props = &resource.properties;
+        let props = &coerce_event_source_mapping_scalars(&resource.properties);
         let function_name = parse_lambda_function_name(
             props
                 .get("FunctionName")
@@ -653,6 +653,7 @@ impl ResourceProvisioner {
             scaling_config: source_configs.scaling,
             provisioned_poller_config: source_configs.provisioned_poller,
             logging_config: source_configs.logging,
+            tags: fakecloud_lambda::esm_config::tags(props),
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))
@@ -666,7 +667,8 @@ impl ResourceProvisioner {
         existing: &StackResource,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        let cfg = parse_lambda_event_source_mapping_props(&resource.properties)?;
+        let props = coerce_event_source_mapping_scalars(&resource.properties);
+        let cfg = parse_lambda_event_source_mapping_props(&props)?;
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
         let esm = state
@@ -681,7 +683,7 @@ impl ResourceProvisioner {
         // A setting the template no longer declares is removed, which the
         // Lambda API spells as an empty structure. The Kafka configs keep
         // their fixed-at-creation consumer group either way.
-        let mut settings = resource.properties.clone();
+        let mut settings = props.clone();
         if let Some(obj) = settings.as_object_mut() {
             for key in ["ScalingConfig", "ProvisionedPollerConfig", "LoggingConfig"] {
                 obj.entry(key)
@@ -691,6 +693,8 @@ impl ResourceProvisioner {
         fakecloud_lambda::event_source::validate_settings(&settings)
             .and_then(|()| fakecloud_lambda::esm_config::apply_update(esm, &settings))
             .map_err(|e| lambda_handler_error(&e))?;
+        // The template's Tags are the mapping's tags.
+        esm.tags = fakecloud_lambda::esm_config::tags(&props);
         esm.batch_size = cfg.batch_size;
         esm.enabled = cfg.enabled;
         esm.state = if cfg.enabled {
@@ -1551,6 +1555,50 @@ impl ResourceProvisioner {
 
 /// A Lambda API refusal as the CloudFormation resource handler reports it in
 /// the resource's status reason.
+/// AWS::Lambda::EventSourceMapping properties with the integer and boolean
+/// members a `Ref` / `Fn::Sub` resolved to strings (`"5"`, `"true"`) turned
+/// back into numbers and booleans, as CloudFormation converts them before
+/// calling Lambda. A string that is not a number / boolean is left for the
+/// Lambda checks to refuse.
+fn coerce_event_source_mapping_scalars(props: &serde_json::Value) -> serde_json::Value {
+    const INTEGERS: &[&[&str]] = &[
+        &["BatchSize"],
+        &["MaximumBatchingWindowInSeconds"],
+        &["ParallelizationFactor"],
+        &["MaximumRecordAgeInSeconds"],
+        &["MaximumRetryAttempts"],
+        &["TumblingWindowInSeconds"],
+        &["ScalingConfig", "MaximumConcurrency"],
+        &["ProvisionedPollerConfig", "MinimumPollers"],
+        &["ProvisionedPollerConfig", "MaximumPollers"],
+    ];
+    const BOOLEANS: &[&[&str]] = &[&["Enabled"], &["BisectBatchOnFunctionError"]];
+    fn slot<'a>(
+        value: &'a mut serde_json::Value,
+        path: &[&str],
+    ) -> Option<&'a mut serde_json::Value> {
+        path.iter().try_fold(value, |v, key| v.get_mut(*key))
+    }
+    let mut props = props.clone();
+    for path in INTEGERS {
+        if let Some(v) = slot(&mut props, path) {
+            if let Some(n) = v.as_str().and_then(|s| s.trim().parse::<i64>().ok()) {
+                *v = serde_json::Value::from(n);
+            }
+        }
+    }
+    for path in BOOLEANS {
+        if let Some(v) = slot(&mut props, path) {
+            match v.as_str() {
+                Some("true") => *v = serde_json::Value::Bool(true),
+                Some("false") => *v = serde_json::Value::Bool(false),
+                _ => {}
+            }
+        }
+    }
+    props
+}
+
 fn lambda_handler_error(err: &fakecloud_core::service::AwsServiceError) -> String {
     let request_id = Uuid::new_v4();
     let handler_code = match err.status().as_u16() {

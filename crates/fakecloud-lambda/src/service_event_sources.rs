@@ -147,6 +147,7 @@ impl LambdaService {
             scaling_config: source_configs.scaling,
             provisioned_poller_config: source_configs.provisioned_poller,
             logging_config: source_configs.logging,
+            tags: crate::esm_config::tags(&body),
         };
 
         let response = self.event_source_mapping_json(&mapping);

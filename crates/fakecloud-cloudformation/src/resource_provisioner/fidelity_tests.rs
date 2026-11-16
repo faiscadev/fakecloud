@@ -643,6 +643,47 @@ fn event_source_mapping_keeps_alias_qualifier_and_self_managed_config() {
 }
 
 #[test]
+fn event_source_mapping_takes_ref_parameters_as_numbers_and_keeps_its_tags() {
+    let prov = make_provisioner();
+    let resources = provision_template_with_params(
+        &prov,
+        json!({
+            "Parameters": {
+                "Concurrency": {"Type": "Number", "Default": "5"},
+                "Batch": {"Type": "Number", "Default": "7"},
+                "On": {"Type": "String", "Default": "false"},
+            },
+            "Resources": {
+                "F": {"Type": "AWS::Lambda::Function", "Properties": function_props("ref-esm-fn")},
+                "M": {
+                    "Type": "AWS::Lambda::EventSourceMapping",
+                    "DependsOn": "F",
+                    "Properties": {
+                        "FunctionName": "ref-esm-fn",
+                        "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:ref-queue",
+                        "BatchSize": {"Ref": "Batch"},
+                        "Enabled": {"Ref": "On"},
+                        "ScalingConfig": {"MaximumConcurrency": {"Ref": "Concurrency"}},
+                        "Tags": [{"Key": "team", "Value": "data"}],
+                    }
+                }
+            }
+        }),
+        &[("Concurrency", "5"), ("Batch", "7"), ("On", "false")],
+    );
+    let esm_id = &by_logical(&resources, "M").physical_id;
+    let lam = prov.lambda_state.read();
+    let esm = &lam
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .event_source_mappings[esm_id];
+    assert_eq!(esm.scaling_config, Some(json!({"MaximumConcurrency": 5})));
+    assert_eq!(esm.batch_size, 7);
+    assert!(!esm.enabled);
+    assert_eq!(esm.tags.get("team").map(String::as_str), Some("data"));
+}
+
+#[test]
 fn msk_event_source_mapping_keeps_its_kafka_and_poller_settings_across_updates() {
     let prov = make_provisioner();
     create(
@@ -732,8 +773,21 @@ fn provision_template(
     prov: &ResourceProvisioner,
     template: serde_json::Value,
 ) -> Vec<StackResource> {
+    provision_template_with_params(prov, template, &[])
+}
+
+/// [`provision_template`] with stack parameter values, which (as on
+/// CloudFormation) reach the resources as strings.
+fn provision_template_with_params(
+    prov: &ResourceProvisioner,
+    template: serde_json::Value,
+    values: &[(&str, &str)],
+) -> Vec<StackResource> {
     let body = template.to_string();
-    let mut params = BTreeMap::new();
+    let mut params: BTreeMap<String, String> = values
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     params.insert("AWS::StackName".to_string(), "samstack".to_string());
     params.insert("AWS::Region".to_string(), "us-east-1".to_string());
     params.insert("AWS::AccountId".to_string(), ACCT.to_string());

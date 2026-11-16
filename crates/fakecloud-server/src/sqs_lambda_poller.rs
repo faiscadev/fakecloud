@@ -1031,6 +1031,7 @@ mod tests {
                 scaling_config: None,
                 provisioned_poller_config: None,
                 logging_config: None,
+                tags: Default::default(),
             };
             l.event_source_mappings
                 .insert(mapping.uuid.clone(), mapping);

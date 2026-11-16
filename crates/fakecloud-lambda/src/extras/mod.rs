@@ -79,6 +79,81 @@ fn function_name_from_arn(arn: &str) -> Option<String> {
     )
 }
 
+/// What a tagging operation's `Resource` ARN names: a function (tags on
+/// aliases and versions land on the function) or an event source mapping
+/// (`arn:aws:lambda:<region>:<account>:event-source-mapping:<uuid>`).
+enum TagTarget {
+    Function(String),
+    EventSourceMapping(String),
+}
+
+fn tag_target(arn: &str) -> Result<TagTarget, AwsServiceError> {
+    if let Some(name) = function_name_from_arn(arn) {
+        return Ok(TagTarget::Function(name));
+    }
+    let uuid = fakecloud_aws::arn::arn_resource(arn, "lambda").and_then(|rest| {
+        let mut parts = rest.splitn(4, ':');
+        let (_region, _account) = (parts.next()?, parts.next()?);
+        (parts.next()? == "event-source-mapping")
+            .then(|| parts.next())
+            .flatten()
+            .filter(|uuid| !uuid.is_empty())
+    });
+    uuid.map(|u| TagTarget::EventSourceMapping(u.to_string()))
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("Resource ARN is not a Lambda function: {arn}"),
+            )
+        })
+}
+
+fn tag_target_not_found(target: &TagTarget) -> AwsServiceError {
+    match target {
+        TagTarget::Function(name) => AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("Function not found: {name}"),
+        ),
+        TagTarget::EventSourceMapping(uuid) => AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!(
+                "The resource you requested does not exist. (Service: Lambda, Status Code: 404, Request ID: {uuid})"
+            ),
+        ),
+    }
+}
+
+/// The tags of the resource `target` names.
+fn target_tags_mut<'a>(
+    state: &'a mut LambdaState,
+    target: &TagTarget,
+) -> Result<&'a mut std::collections::BTreeMap<String, String>, AwsServiceError> {
+    match target {
+        TagTarget::Function(name) => state.functions.get_mut(name).map(|f| &mut f.tags),
+        TagTarget::EventSourceMapping(uuid) => state
+            .event_source_mappings
+            .get_mut(uuid)
+            .map(|m| &mut m.tags),
+    }
+    .ok_or_else(|| tag_target_not_found(target))
+}
+
+fn target_tags<'a>(
+    state: &'a LambdaState,
+    target: &TagTarget,
+) -> Result<&'a std::collections::BTreeMap<String, String>, AwsServiceError> {
+    match target {
+        TagTarget::Function(name) => state.functions.get(name).map(|f| &f.tags),
+        TagTarget::EventSourceMapping(uuid) => {
+            state.event_source_mappings.get(uuid).map(|m| &m.tags)
+        }
+    }
+    .ok_or_else(|| tag_target_not_found(target))
+}
+
 /// Parse a raw query string into key/value pairs preserving repeats.
 /// `req.query_params` is a `HashMap<String, String>` and so collapses
 /// `tagKeys=A&tagKeys=B` to a single entry; this lets the
@@ -1209,26 +1284,14 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
-            )
-        })?;
+        let target = tag_target(resource_arn)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let func = state.functions.get_mut(&name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {name}"),
-            )
-        })?;
-        // Single source of truth: per-function `tags`. `GetFunction`,
-        // `ListTagsForResource`, and `UntagResource` all read here.
+        // Single source of truth: the function's (or mapping's) `tags`.
+        // `GetFunction`, `ListTags`, and `UntagResource` all read here.
+        let tags = target_tags_mut(state, &target)?;
         for (k, v) in new_tags {
-            func.tags.insert(k, v);
+            tags.insert(k, v);
         }
         empty()
     }
@@ -1271,24 +1334,12 @@ impl LambdaService {
                 }
             }
         }
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
-            )
-        })?;
+        let target = tag_target(resource_arn)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let func = state.functions.get_mut(&name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {name}"),
-            )
-        })?;
+        let tags = target_tags_mut(state, &target)?;
         for k in &keys {
-            func.tags.remove(k);
+            tags.remove(k);
         }
         empty()
     }
@@ -1299,24 +1350,10 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
-            )
-        })?;
+        let target = tag_target(resource_arn)?;
         let region = region.to_string();
         self.with_state_read(account_id, &region, |state| {
-            let func = state.functions.get(&name).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!("Function not found: {name}"),
-                )
-            })?;
-            let tags: serde_json::Map<String, Value> = func
-                .tags
+            let tags: serde_json::Map<String, Value> = target_tags(state, &target)?
                 .iter()
                 .map(|(k, v)| (k.clone(), Value::String(v.clone())))
                 .collect();

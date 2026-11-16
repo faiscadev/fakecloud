@@ -86,11 +86,18 @@ fn invalid_parameter(message: impl Into<String>) -> AwsServiceError {
     )
 }
 
-/// Lambda's "1 validation error detected" refusal for a nested member.
+/// Lambda's input-validation refusal for a nested member, the same
+/// `ValidationException` "1 validation error detected" it answers a
+/// top-level constraint violation with (`EventSourceArn`, recorded).
+/// `value` is shown as given (quoted for strings by the callers).
 fn violation(value: &str, member: &str, constraint: &str) -> AwsServiceError {
-    invalid_parameter(format!(
-        "1 validation error detected: Value {value} at '{member}' failed to satisfy constraint: {constraint}"
-    ))
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!(
+            "1 validation error detected: Value {value} at '{member}' failed to satisfy constraint: {constraint}"
+        ),
+    )
 }
 
 fn check_string_len(
@@ -515,6 +522,28 @@ fn kafka_on_create(body: &Value, key: &str, uuid: &str) -> Value {
     Value::Object(cfg)
 }
 
+/// A mapping's `Tags`: the API's `{key: value}` map, or CloudFormation's
+/// `[{Key, Value}]` list. Non-string values are skipped, as for function
+/// tags.
+pub fn tags(body: &Value) -> std::collections::BTreeMap<String, String> {
+    match body.get("Tags") {
+        Some(Value::Object(m)) => m
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|t| {
+                Some((
+                    t.get("Key")?.as_str()?.to_string(),
+                    t.get("Value")?.as_str()?.to_string(),
+                ))
+            })
+            .collect(),
+        _ => Default::default(),
+    }
+}
+
 /// The per-source settings a new mapping stores.
 #[derive(Debug, Default, Clone)]
 pub struct SourceConfigs {
@@ -566,12 +595,16 @@ fn kafka_on_update(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let requested_group = request.get("ConsumerGroupId").and_then(Value::as_str);
+    // A mapping stored before its Kafka config was recorded has no group on
+    // file: the one the caller resends is its group.
     let current_group = cfg
         .get("ConsumerGroupId")
         .and_then(Value::as_str)
+        .or(requested_group)
         .unwrap_or(uuid)
         .to_string();
-    if let Some(group) = request.get("ConsumerGroupId").and_then(Value::as_str) {
+    if let Some(group) = requested_group {
         if group != current_group {
             return Err(invalid_parameter(format!(
                 "ConsumerGroupId cannot be updated. The event source mapping's consumer group ID is {current_group}."
@@ -946,6 +979,62 @@ mod tests {
         );
         assert!(esm.provisioned_poller_config.is_none());
         assert!(esm.logging_config.is_none());
+    }
+
+    #[test]
+    fn constraint_violations_are_validation_exceptions() {
+        let body = json!({
+            "EventSourceArn": MSK,
+            "AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "bad#group"},
+        });
+        let err = validate_shapes(&body).unwrap_err();
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().starts_with(
+            "1 validation error detected: Value 'bad#group' at 'amazonManagedKafkaEventSourceConfig.consumerGroupId'"
+        ));
+        // A setting on the wrong source is a parameter error, not a shape one.
+        let err = create_configs(
+            &json!({"EventSourceArn": QUEUE, "LoggingConfig": {"SystemLogLevel": "INFO"}}),
+            "u",
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "InvalidParameterValueException");
+    }
+
+    #[test]
+    fn a_mapping_stored_without_its_kafka_config_adopts_the_resent_group() {
+        let mut esm = mapping(&json!({"EventSourceArn": MSK}));
+        // As persisted before the config was recorded.
+        esm.amazon_managed_kafka_event_source_config = None;
+        apply_update(
+            &mut esm,
+            &json!({"AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "legacy-group"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            esm.amazon_managed_kafka_event_source_config,
+            Some(json!({"ConsumerGroupId": "legacy-group"}))
+        );
+        // From then on it is fixed.
+        assert!(apply_update(
+            &mut esm,
+            &json!({"AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "other"}}),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tags_read_both_the_api_map_and_the_cloudformation_list() {
+        assert_eq!(
+            tags(&json!({"Tags": {"team": "data", "n": 1}})),
+            [("team".to_string(), "data".to_string())].into()
+        );
+        assert_eq!(
+            tags(&json!({"Tags": [{"Key": "team", "Value": "data"}, {"Key": "bad"}]})),
+            [("team".to_string(), "data".to_string())].into()
+        );
+        assert!(tags(&json!({})).is_empty());
     }
 
     #[test]

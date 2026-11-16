@@ -2799,6 +2799,59 @@ async fn list_tags_for_resource_reads_from_function_tags() {
 }
 
 #[tokio::test]
+async fn event_source_mapping_arns_are_taggable() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-tag-fn").await;
+    let created = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &[],
+        json!({
+            "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+            "FunctionName": "esm-tag-fn",
+            "Tags": {"team": "data"},
+        }),
+    )
+    .await
+    .unwrap();
+    let created = json_of(&created);
+    let arn = created["EventSourceMappingArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let uuid = created["UUID"].as_str().unwrap();
+    assert_eq!(
+        arn,
+        format!("arn:aws:lambda:us-east-1:123456789012:event-source-mapping:{uuid}")
+    );
+    async fn list(svc: &LambdaService, arn: &str) -> Value {
+        let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
+        let resp = svc.handle(req).await.unwrap();
+        serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["Tags"].clone()
+    }
+    assert_eq!(list(&svc, &arn).await, json!({"team": "data"}));
+
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &json!({"Tags": {"env": "prod"}}).to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let mut req = make_request(Method::DELETE, &format!("/2017-03-31/tags/{arn}"), "");
+    req.raw_query = "tagKeys=team".to_string();
+    svc.handle(req).await.unwrap();
+    assert_eq!(list(&svc, &arn).await, json!({"env": "prod"}));
+
+    // A mapping that does not exist is ResourceNotFoundException.
+    let missing = "arn:aws:lambda:us-east-1:123456789012:event-source-mapping:00000000-0000-0000-0000-000000000000";
+    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{missing}"), "");
+    let err = svc.handle(req).await.err().expect("missing mapping listed");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn untag_resource_with_multiple_keys() {
     // AWS sends `tagKeys=A&tagKeys=B`. The dispatcher's deduplicated
     // `query_params` HashMap collapses repeats, so the handler must
@@ -6117,7 +6170,7 @@ async fn self_managed_kafka_consumption_mode_round_trips_and_is_validated() {
     .await
     .err()
     .expect("unknown ConsumptionMode refused");
-    assert_eq!(err.code(), "InvalidParameterValueException");
+    assert_eq!(err.code(), "ValidationException");
 }
 
 #[tokio::test]

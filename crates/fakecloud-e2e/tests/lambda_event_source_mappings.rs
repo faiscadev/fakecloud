@@ -456,7 +456,7 @@ async fn msk_event_source_config_round_trips() {
         .send()
         .await
         .expect_err("a malformed ConsumerGroupId was accepted");
-    assert_eq!(error_code(err), "InvalidParameterValueException");
+    assert_eq!(error_code(err), "ValidationException");
     let sqs = server.sqs_client().await;
     let url = sqs
         .create_queue()
@@ -490,6 +490,83 @@ async fn msk_event_source_config_round_trips() {
         .await
         .expect_err("an MSK config was accepted on an SQS mapping");
     assert_eq!(error_code(err), "InvalidParameterValueException");
+}
+
+/// A mapping's `EventSourceMappingArn` is taggable: CreateEventSourceMapping's
+/// `Tags`, ListTags, TagResource and UntagResource all work on it, as the
+/// Terraform provider relies on after every read.
+#[tokio::test]
+async fn event_source_mapping_tags_round_trip() {
+    let server = TestServer::start().await;
+    let lambda = server.lambda_client().await;
+    create_function(&lambda, "esm-tags-fn").await;
+    let created = lambda
+        .create_event_source_mapping()
+        .function_name("esm-tags-fn")
+        .event_source_arn("arn:aws:kafka:us-east-1:123456789012:cluster/tags/0b1c2d3e-1111-2222-3333-444455556666-1")
+        .topics("t")
+        .tags("team", "data")
+        .tags("env", "dev")
+        .send()
+        .await
+        .unwrap();
+    let arn = created.event_source_mapping_arn().unwrap().to_string();
+    let tags = |arn: String| {
+        let lambda = lambda.clone();
+        async move {
+            let mut tags: Vec<(String, String)> = lambda
+                .list_tags()
+                .resource(arn)
+                .send()
+                .await
+                .unwrap()
+                .tags()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            tags.sort();
+            tags
+        }
+    };
+    assert_eq!(
+        tags(arn.clone()).await,
+        vec![
+            ("env".to_string(), "dev".to_string()),
+            ("team".to_string(), "data".to_string())
+        ]
+    );
+    lambda
+        .tag_resource()
+        .resource(&arn)
+        .tags("env", "prod")
+        .tags("owner", "platform")
+        .send()
+        .await
+        .unwrap();
+    lambda
+        .untag_resource()
+        .resource(&arn)
+        .tag_keys("team")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        tags(arn.clone()).await,
+        vec![
+            ("env".to_string(), "prod".to_string()),
+            ("owner".to_string(), "platform".to_string())
+        ]
+    );
+
+    let missing = "arn:aws:lambda:us-east-1:123456789012:event-source-mapping:00000000-0000-0000-0000-000000000000";
+    let err = lambda
+        .list_tags()
+        .resource(missing)
+        .send()
+        .await
+        .expect_err("a missing mapping's tags were listed");
+    assert_eq!(error_code(err), "ResourceNotFoundException");
 }
 
 /// An SQS mapping keeps its `ScalingConfig`; an empty one removes it.

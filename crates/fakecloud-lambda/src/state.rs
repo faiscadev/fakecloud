@@ -259,6 +259,10 @@ pub struct EventSourceMapping {
     /// `LoggingConfig` (`SystemLogLevel`, Kafka sources).
     #[serde(default)]
     pub logging_config: Option<serde_json::Value>,
+    /// Tags set by CreateEventSourceMapping's `Tags` or TagResource on the
+    /// mapping's `EventSourceMappingArn`.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
 }
 
 /// A recorded Lambda invocation from cross-service delivery.
@@ -1062,6 +1066,7 @@ mod tests {
                 scaling_config: None,
                 provisioned_poller_config: None,
                 logging_config: None,
+                tags: Default::default(),
             },
         );
         legacy.layers.insert(
