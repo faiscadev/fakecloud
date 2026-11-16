@@ -584,7 +584,7 @@ impl ResourceProvisioner {
         &self,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        let props = &coerce_event_source_mapping_scalars(&resource.properties);
+        let props = &coerce_event_source_mapping_scalars(&resource.properties)?;
         let function_name = parse_lambda_function_name(
             props
                 .get("FunctionName")
@@ -667,7 +667,7 @@ impl ResourceProvisioner {
         existing: &StackResource,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        let props = coerce_event_source_mapping_scalars(&resource.properties);
+        let props = coerce_event_source_mapping_scalars(&resource.properties)?;
         let cfg = parse_lambda_event_source_mapping_props(&props)?;
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
@@ -1553,14 +1553,17 @@ impl ResourceProvisioner {
     }
 }
 
-/// A Lambda API refusal as the CloudFormation resource handler reports it in
-/// the resource's status reason.
-/// AWS::Lambda::EventSourceMapping properties with the integer and boolean
-/// members a `Ref` / `Fn::Sub` resolved to strings (`"5"`, `"true"`) turned
-/// back into numbers and booleans, as CloudFormation converts them before
-/// calling Lambda. A string that is not a number / boolean is left for the
-/// Lambda checks to refuse.
-fn coerce_event_source_mapping_scalars(props: &serde_json::Value) -> serde_json::Value {
+/// AWS::Lambda::EventSourceMapping properties with the integer, number and
+/// boolean members a `Ref` / `Fn::Sub` resolved to strings (`"5"`,
+/// `"1700000000"`, `"False"`) turned back into numbers and booleans, as
+/// CloudFormation converts them before calling Lambda (booleans
+/// case-insensitively). A value that is not one (`"abc"`, `"1.0"` for an
+/// integer, `"yes"` for a boolean) fails the resource with Lambda's
+/// validation error rather than falling back to the default.
+fn coerce_event_source_mapping_scalars(
+    props: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
     const INTEGERS: &[&[&str]] = &[
         &["BatchSize"],
         &["MaximumBatchingWindowInSeconds"],
@@ -1572,33 +1575,98 @@ fn coerce_event_source_mapping_scalars(props: &serde_json::Value) -> serde_json:
         &["ProvisionedPollerConfig", "MinimumPollers"],
         &["ProvisionedPollerConfig", "MaximumPollers"],
     ];
+    const NUMBERS: &[&[&str]] = &[&["StartingPositionTimestamp"]];
     const BOOLEANS: &[&[&str]] = &[&["Enabled"], &["BisectBatchOnFunctionError"]];
-    fn slot<'a>(
-        value: &'a mut serde_json::Value,
-        path: &[&str],
-    ) -> Option<&'a mut serde_json::Value> {
+    fn slot<'a>(value: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
         path.iter().try_fold(value, |v, key| v.get_mut(*key))
     }
+    fn integer(value: &Value) -> Option<Value> {
+        match value {
+            Value::Number(n) => match n.as_i64() {
+                Some(i) => Some(Value::from(i)),
+                // An integral float (`60.0`) is still an integer.
+                None => n
+                    .as_f64()
+                    .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15)
+                    .map(|f| Value::from(f as i64)),
+            },
+            Value::String(s) => s.trim().parse::<i64>().ok().map(Value::from),
+            _ => None,
+        }
+    }
+    fn number(value: &Value) -> Option<Value> {
+        match value {
+            Value::Number(_) => Some(value.clone()),
+            Value::String(s) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            _ => None,
+        }
+    }
+    fn boolean(value: &Value) -> Option<Value> {
+        match value {
+            Value::Bool(_) => Some(value.clone()),
+            Value::String(s) if s.trim().eq_ignore_ascii_case("true") => Some(Value::Bool(true)),
+            Value::String(s) if s.trim().eq_ignore_ascii_case("false") => Some(Value::Bool(false)),
+            _ => None,
+        }
+    }
     let mut props = props.clone();
-    for path in INTEGERS {
-        if let Some(v) = slot(&mut props, path) {
-            if let Some(n) = v.as_str().and_then(|s| s.trim().parse::<i64>().ok()) {
-                *v = serde_json::Value::from(n);
+    for (paths, coerce, expected) in [
+        (
+            INTEGERS,
+            integer as fn(&Value) -> Option<Value>,
+            "an integer",
+        ),
+        (NUMBERS, number, "a number"),
+        (BOOLEANS, boolean, "a boolean"),
+    ] {
+        for path in paths {
+            let Some(v) = slot(&mut props, path) else {
+                continue;
+            };
+            if v.is_null() {
+                continue;
+            }
+            match coerce(v) {
+                Some(coerced) => *v = coerced,
+                None => {
+                    let shown = match &*v {
+                        Value::String(s) => format!("'{s}'"),
+                        other => other.to_string(),
+                    };
+                    let member = path
+                        .iter()
+                        .map(|p| {
+                            let mut c = p.chars();
+                            c.next()
+                                .map(|f| f.to_lowercase().chain(c).collect::<String>())
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    return Err(lambda_handler_error(
+                        &fakecloud_core::service::AwsServiceError::aws_error(
+                            http::StatusCode::BAD_REQUEST,
+                            "ValidationException",
+                            format!(
+                                "1 validation error detected: Value {shown} at '{member}' \
+                                 failed to satisfy constraint: Member must be {expected}"
+                            ),
+                        ),
+                    ));
+                }
             }
         }
     }
-    for path in BOOLEANS {
-        if let Some(v) = slot(&mut props, path) {
-            match v.as_str() {
-                Some("true") => *v = serde_json::Value::Bool(true),
-                Some("false") => *v = serde_json::Value::Bool(false),
-                _ => {}
-            }
-        }
-    }
-    props
+    Ok(props)
 }
 
+/// A Lambda API refusal as the CloudFormation resource handler reports it in
+/// the resource's status reason.
 fn lambda_handler_error(err: &fakecloud_core::service::AwsServiceError) -> String {
     let request_id = Uuid::new_v4();
     let handler_code = match err.status().as_u16() {

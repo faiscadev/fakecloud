@@ -56,10 +56,10 @@ fn body(req: &AwsRequest) -> Value {
 
 /// Extract the function name from a Lambda function ARN, ignoring any
 /// trailing `:version` / `:alias` qualifier. Returns `None` for ARNs
-/// that name a different resource type (event-source mapping,
-/// code-signing config, layer, …) — Lambda only supports tags on
-/// function ARNs in this implementation, so non-function ARNs are
-/// rejected by callers as `InvalidParameterValueException`.
+/// that name a different resource type (event source mapping,
+/// code-signing config, layer, ...); the tagging operations resolve an
+/// event source mapping ARN through [`tag_target`] instead and refuse the
+/// rest as `InvalidParameterValueException`.
 fn function_name_from_arn(arn: &str) -> Option<String> {
     let rest = fakecloud_aws::arn::arn_resource(arn, "lambda")?;
     let mut parts = rest.splitn(5, ':');
@@ -104,7 +104,7 @@ fn tag_target(arn: &str) -> Result<TagTarget, AwsServiceError> {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {arn}"),
+                format!("Resource ARN is not a Lambda function or event source mapping: {arn}"),
             )
         })
 }
