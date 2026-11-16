@@ -340,3 +340,184 @@ async fn stopped_map_run_children_name_their_map_run() {
     assert_eq!(types.last().map(String::as_str), Some("ExecutionAborted"));
     assert!(!types.iter().any(|t| t == "MapRunAborted"), "{types:?}");
 }
+
+// Stopped the moment it starts, before its states have run, an execution
+// still runs nothing.
+#[tokio::test]
+async fn an_execution_stopped_at_once_runs_nothing() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let (sqs, url) = queue(&server, "stopped-at-once").await;
+    let machine = create_machine(
+        &client,
+        "stop-at-once",
+        json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":1,"Next":"S"},"S":send_task(&url)}}),
+    )
+    .await;
+    let mut arns = Vec::new();
+    for _ in 0..5 {
+        let arn = client
+            .start_execution()
+            .state_machine_arn(&machine)
+            .send()
+            .await
+            .unwrap()
+            .execution_arn()
+            .to_string();
+        client
+            .stop_execution()
+            .execution_arn(&arn)
+            .send()
+            .await
+            .unwrap();
+        arns.push(arn);
+    }
+    sleep(Duration::from_millis(2000)).await;
+    assert_eq!(received(&sqs, &url).await, 0, "a stopped execution sent");
+    for arn in arns {
+        let types = history_types(&client, &arn).await;
+        assert_eq!(
+            types.last().map(String::as_str),
+            Some("ExecutionAborted"),
+            "{types:?}"
+        );
+    }
+}
+
+// A Parallel whose other branch fails leaves no map run child running.
+#[tokio::test]
+async fn a_failing_branch_leaves_no_map_run_child_running() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "branch-fails",
+        json!({"StartAt":"P","States":{"P":{"Type":"Parallel","End":true,"Branches":[
+            {"StartAt":"M","States":{"M":{
+                "Type":"Map",
+                "ItemProcessor":{
+                    "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                    "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}
+                },
+                "End":true
+            }}},
+            {"StartAt":"W","States":{
+                "W":{"Type":"Wait","Seconds":1,"Next":"F"},
+                "F":{"Type":"Fail","Error":"Boom"}
+            }}
+        ]}}}),
+    )
+    .await;
+    let parent = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input("[1,2]")
+        .send()
+        .await
+        .unwrap()
+        .execution_arn()
+        .to_string();
+    let mut status = String::new();
+    for _ in 0..200 {
+        status = client
+            .describe_execution()
+            .execution_arn(&parent)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_str()
+            .to_string();
+        if status != "RUNNING" {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(status, "FAILED");
+    let runs = client
+        .list_map_runs()
+        .execution_arn(&parent)
+        .send()
+        .await
+        .unwrap();
+    let run_arn = runs.map_runs()[0].map_run_arn().to_string();
+    let run = client
+        .describe_map_run()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(run.status().as_str(), "RUNNING");
+    let children = client
+        .list_executions()
+        .map_run_arn(&run_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(!children.executions().is_empty());
+    for child in children.executions() {
+        assert_eq!(
+            child.status().as_str(),
+            "ABORTED",
+            "{}",
+            child.execution_arn()
+        );
+    }
+}
+
+// A `.sync` Task that times out stops waiting; the child it started goes on.
+#[tokio::test]
+async fn a_timed_out_sync_task_leaves_its_child_running() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let child = create_machine(
+        &client,
+        "slow-child",
+        json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}}),
+    )
+    .await;
+    let parent = create_machine(
+        &client,
+        "impatient-parent",
+        json!({"StartAt":"T","States":{"T":{
+            "Type":"Task",
+            "Resource":"arn:aws:states:::states:startExecution.sync:2",
+            "Parameters":{"StateMachineArn":child},
+            "TimeoutSeconds":1,
+            "End":true
+        }}}),
+    )
+    .await;
+    let parent_arn = client
+        .start_execution()
+        .state_machine_arn(&parent)
+        .send()
+        .await
+        .unwrap()
+        .execution_arn()
+        .to_string();
+    let mut described = None;
+    for _ in 0..200 {
+        let d = client
+            .describe_execution()
+            .execution_arn(&parent_arn)
+            .send()
+            .await
+            .unwrap();
+        if d.status().as_str() != "RUNNING" {
+            described = Some(d);
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    let described = described.expect("the parent ended");
+    assert_eq!(described.status().as_str(), "FAILED");
+    assert_eq!(described.error(), Some("States.Timeout"));
+    let children = client
+        .list_executions()
+        .state_machine_arn(&child)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(children.executions()[0].status().as_str(), "RUNNING");
+}

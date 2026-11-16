@@ -450,30 +450,47 @@ impl StepFunctionsState {
             return stopped;
         }
         stopped.push(arn.to_string());
-        let mut pending = vec![arn.to_string()];
-        while let Some(parent) = pending.pop() {
-            let mut aborted_runs = Vec::new();
-            for run in self.map_runs.values_mut() {
-                if run.execution_arn == parent && run.abort(now) {
-                    aborted_runs.push(run.map_run_arn.clone());
-                }
+        let now_runs: Vec<String> = self
+            .map_runs
+            .values()
+            .filter(|run| run.execution_arn == arn)
+            .map(|run| run.map_run_arn.clone())
+            .collect();
+        for run in now_runs {
+            stopped.extend(self.abort_map_run_children(&run, now));
+        }
+        stopped
+    }
+
+    /// Stop a map run, if it is running, and its children still running,
+    /// with the cause AWS gives them, and the map runs those manage in turn.
+    /// Returns the executions stopped.
+    pub fn abort_map_run_children(&mut self, map_run_arn: &str, now: DateTime<Utc>) -> Vec<String> {
+        let mut stopped = Vec::new();
+        let mut runs = vec![map_run_arn.to_string()];
+        while let Some(run) = runs.pop() {
+            if let Some(map_run) = self.map_runs.get_mut(&run) {
+                map_run.abort(now);
             }
+            let cause = format!(
+                "The map run execution [{run}] which was managing this resource was aborted"
+            );
+            let mut aborted = Vec::new();
             for child in self.executions.values_mut() {
-                let Some(run) = child
-                    .map_run_arn
-                    .clone()
-                    .filter(|run| aborted_runs.contains(run))
-                else {
-                    continue;
-                };
-                let cause = format!(
-                    "The map run execution [{run}] which was managing this resource was aborted"
-                );
-                if child.abort(now, None, Some(cause)) {
-                    stopped.push(child.execution_arn.clone());
-                    pending.push(child.execution_arn.clone());
+                if child.map_run_arn.as_deref() == Some(run.as_str())
+                    && child.abort(now, None, Some(cause.clone()))
+                {
+                    aborted.push(child.execution_arn.clone());
                 }
             }
+            // Only the children that run map runs of their own lead further.
+            runs.extend(
+                self.map_runs
+                    .values()
+                    .filter(|r| aborted.contains(&r.execution_arn))
+                    .map(|r| r.map_run_arn.clone()),
+            );
+            stopped.extend(aborted);
         }
         stopped
     }
