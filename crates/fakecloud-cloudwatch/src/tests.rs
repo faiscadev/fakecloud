@@ -2409,16 +2409,742 @@ async fn composite_alarm_action_suppression_and_reason_data() {
         )
         .await,
     );
-    assert!(
-        comp_hist.contains("Alarm updated from INSUFFICIENT_DATA to ALARM"),
-        "{comp_hist}"
-    );
-    assert!(
-        comp_hist.contains("Alarm updated from ALARM to OK"),
-        "{comp_hist}"
-    );
+    // Evaluated as soon as it is created (child not in ALARM yet), then
+    // following the child.
+    for summary in [
+        "Alarm updated from INSUFFICIENT_DATA to OK",
+        "Alarm updated from OK to ALARM",
+        "Alarm updated from ALARM to OK",
+    ] {
+        assert!(comp_hist.contains(summary), "{summary}: {comp_hist}");
+    }
     assert!(
         comp_hist.contains("Alarm &quot;comp&quot; created"),
         "{comp_hist}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Alarm actions.
+// ---------------------------------------------------------------------------
+
+const TOPIC: &str = "arn:aws:sns:us-east-1:123456789012:alarms";
+
+/// Records SNS publishes; topics other than [`TOPIC`] don't exist.
+#[derive(Default)]
+struct RecordingSns {
+    published: parking_lot::Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+impl fakecloud_core::delivery::SnsDelivery for RecordingSns {
+    fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
+        let _ = self.try_publish_to_topic(topic_arn, message, subject);
+    }
+
+    fn try_publish_to_topic(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+    ) -> Result<String, String> {
+        if topic_arn != TOPIC {
+            return Err(format!("Topic does not exist: {topic_arn}"));
+        }
+        self.published.lock().push((
+            topic_arn.to_string(),
+            message.to_string(),
+            subject.map(str::to_string),
+        ));
+        Ok("msg-1".to_string())
+    }
+}
+
+/// Records EC2 alarm actions.
+#[derive(Default)]
+struct RecordingEc2 {
+    performed: Arc<parking_lot::Mutex<Vec<(String, crate::Ec2InstanceAction)>>>,
+}
+
+impl crate::Ec2AlarmActionHook for RecordingEc2 {
+    fn perform(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        instance_id: &str,
+        action: crate::Ec2InstanceAction,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+        self.performed
+            .lock()
+            .push((instance_id.to_string(), action));
+        Box::pin(async { Ok(()) })
+    }
+}
+
+type Performed = Arc<parking_lot::Mutex<Vec<(String, crate::Ec2InstanceAction)>>>;
+
+fn acting_service() -> (CloudWatchService, Arc<RecordingSns>, Performed) {
+    let sns = Arc::new(RecordingSns::default());
+    let ec2 = RecordingEc2::default();
+    let performed = ec2.performed.clone();
+    let bus = fakecloud_core::delivery::DeliveryBus::new().with_sns(sns.clone());
+    let svc = service()
+        .with_delivery(Arc::new(bus))
+        .with_ec2_actions(Arc::new(ec2));
+    (svc, sns, performed)
+}
+
+async fn history_of(svc: &CloudWatchService, name: &str, alarm_type: &str) -> String {
+    body_of(
+        &call(
+            svc,
+            "DescribeAlarmHistory",
+            &[
+                ("AlarmName", name),
+                ("AlarmTypes.member.1", alarm_type),
+                ("HistoryItemType", "Action"),
+            ],
+        )
+        .await,
+    )
+}
+
+#[tokio::test]
+async fn metric_alarm_publishes_notification_on_transition() {
+    let (svc, sns, _) = acting_service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "cpu"),
+            ("AlarmDescription", "CPU high"),
+            ("Namespace", "AWS/EC2"),
+            ("MetricName", "CPUUtilization"),
+            ("Statistic", "Average"),
+            ("Period", "60"),
+            ("Threshold", "80"),
+            ("Dimensions.member.1.Name", "InstanceId"),
+            ("Dimensions.member.1.Value", "i-123"),
+            ("AlarmActions.member.1", TOPIC),
+            (
+                "AlarmActions.member.2",
+                "arn:aws:sns:us-east-1:123456789012:missing",
+            ),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "AWS/EC2"),
+            ("MetricData.member.1.MetricName", "CPUUtilization"),
+            ("MetricData.member.1.Value", "95"),
+            ("MetricData.member.1.Dimensions.member.1.Name", "InstanceId"),
+            ("MetricData.member.1.Dimensions.member.1.Value", "i-123"),
+        ],
+    )
+    .await;
+    let published = sns.published.lock().clone();
+    assert_eq!(published.len(), 1, "{published:?}");
+    let (_, message, subject) = &published[0];
+    assert_eq!(
+        subject.as_deref(),
+        Some("ALARM: \"cpu\" in US East (N. Virginia)")
+    );
+    let m: serde_json::Value = serde_json::from_str(message).unwrap();
+    assert_eq!(m["AlarmName"], "cpu");
+    assert_eq!(m["AlarmDescription"], "CPU high");
+    assert_eq!(m["AWSAccountId"], ACCT);
+    assert_eq!(m["NewStateValue"], "ALARM");
+    assert_eq!(m["OldStateValue"], "INSUFFICIENT_DATA");
+    assert_eq!(m["Region"], "US East (N. Virginia)");
+    assert_eq!(
+        m["AlarmArn"],
+        "arn:aws:cloudwatch:us-east-1:123456789012:alarm:cpu"
+    );
+    assert_eq!(m["Trigger"]["MetricName"], "CPUUtilization");
+    assert_eq!(m["Trigger"]["Statistic"], "AVERAGE");
+    assert_eq!(m["Trigger"]["Threshold"], 80.0);
+    assert_eq!(
+        m["Trigger"]["Dimensions"],
+        serde_json::json!([{"value": "i-123", "name": "InstanceId"}])
+    );
+
+    // Both actions are recorded; the missing topic as a failure.
+    let hist = history_of(&svc, "cpu", "MetricAlarm").await;
+    assert!(
+        hist.contains(&format!("Successfully executed action {TOPIC}")),
+        "{hist}"
+    );
+    assert!(
+        hist.contains("Failed to execute action arn:aws:sns:us-east-1:123456789012:missing"),
+        "{hist}"
+    );
+
+    // Same state again: no new actions.
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "cpu"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "x"),
+        ],
+    )
+    .await;
+    assert_eq!(sns.published.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn disabled_actions_and_unlisted_states_do_not_fire() {
+    let (svc, sns, _) = acting_service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "quiet"),
+            ("Namespace", "N"),
+            ("MetricName", "M"),
+            ("Statistic", "Sum"),
+            ("Threshold", "1"),
+            ("ActionsEnabled", "false"),
+            ("AlarmActions.member.1", TOPIC),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "quiet"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "x"),
+        ],
+    )
+    .await;
+    // OK has no actions listed.
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "loud"),
+            ("Namespace", "N"),
+            ("MetricName", "M"),
+            ("Statistic", "Sum"),
+            ("Threshold", "1"),
+            ("AlarmActions.member.1", TOPIC),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "loud"),
+            ("StateValue", "OK"),
+            ("StateReason", "x"),
+        ],
+    )
+    .await;
+    assert!(sns.published.lock().is_empty());
+    let hist = history_of(&svc, "quiet", "MetricAlarm").await;
+    assert!(!hist.contains("<member>"), "{hist}");
+}
+
+#[tokio::test]
+async fn ec2_action_acts_on_the_instance_dimension() {
+    let (svc, _, performed) = acting_service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "stop-it"),
+            ("Namespace", "AWS/EC2"),
+            ("MetricName", "CPUUtilization"),
+            ("Statistic", "Average"),
+            ("Threshold", "80"),
+            ("Dimensions.member.1.Name", "InstanceId"),
+            ("Dimensions.member.1.Value", "i-abc"),
+            (
+                "AlarmActions.member.1",
+                "arn:aws:automate:us-east-1:ec2:stop",
+            ),
+            (
+                "OKActions.member.1",
+                "arn:aws:swf:us-east-1:123456789012:action/actions/AWS_EC2.InstanceId.Reboot/1.0",
+            ),
+        ],
+    )
+    .await;
+    for value in ["ALARM", "OK"] {
+        call(
+            &svc,
+            "SetAlarmState",
+            &[
+                ("AlarmName", "stop-it"),
+                ("StateValue", value),
+                ("StateReason", "x"),
+            ],
+        )
+        .await;
+    }
+    assert_eq!(
+        performed.lock().clone(),
+        vec![
+            ("i-abc".to_string(), crate::Ec2InstanceAction::Stop),
+            ("i-abc".to_string(), crate::Ec2InstanceAction::Reboot),
+        ]
+    );
+    let hist = history_of(&svc, "stop-it", "MetricAlarm").await;
+    assert!(
+        hist.contains("Successfully executed action arn:aws:automate:us-east-1:ec2:stop"),
+        "{hist}"
+    );
+}
+
+/// Records asynchronous Lambda invocations.
+#[derive(Default)]
+struct RecordingLambda {
+    invoked: parking_lot::Mutex<Vec<(String, String)>>,
+}
+
+impl fakecloud_core::delivery::LambdaDelivery for RecordingLambda {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        _payload: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
+        Box::pin(async { Err("sync invoke not expected".to_string()) })
+    }
+
+    fn invoke_lambda_async(&self, function_arn: &str, payload: &str) -> Result<(), String> {
+        self.invoked
+            .lock()
+            .push((function_arn.to_string(), payload.to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn lambda_action_receives_the_alarm_event() {
+    let lambda = Arc::new(RecordingLambda::default());
+    let bus = fakecloud_core::delivery::DeliveryBus::new().with_lambda(lambda.clone());
+    let svc = service().with_delivery(Arc::new(bus));
+    let function = "arn:aws:lambda:us-east-1:123456789012:function:on-alarm";
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "fn"),
+            ("Namespace", "N"),
+            ("MetricName", "M"),
+            ("Statistic", "Sum"),
+            ("Period", "60"),
+            ("Threshold", "1"),
+            ("AlarmActions.member.1", function),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "fn"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "test"),
+            ("StateReasonData", "{\"k\":1}"),
+        ],
+    )
+    .await;
+    let invoked = lambda.invoked.lock().clone();
+    assert_eq!(invoked.len(), 1);
+    assert_eq!(invoked[0].0, function);
+    let e: serde_json::Value = serde_json::from_str(&invoked[0].1).unwrap();
+    assert_eq!(e["source"], "aws.cloudwatch");
+    assert_eq!(e["accountId"], ACCT);
+    assert_eq!(e["region"], REGION);
+    assert_eq!(e["alarmData"]["alarmName"], "fn");
+    assert_eq!(e["alarmData"]["state"]["value"], "ALARM");
+    assert_eq!(e["alarmData"]["state"]["reason"], "test");
+    assert_eq!(e["alarmData"]["state"]["reasonData"], "{\"k\":1}");
+    assert_eq!(
+        e["alarmData"]["previousState"]["value"],
+        "INSUFFICIENT_DATA"
+    );
+    assert_eq!(
+        e["alarmData"]["configuration"]["metrics"][0]["metricStat"]["metric"]["name"],
+        "M"
+    );
+    let hist = history_of(&svc, "fn", "MetricAlarm").await;
+    assert!(
+        hist.contains(&format!("Successfully executed action {function}")),
+        "{hist}"
+    );
+}
+
+// A composite whose ActionsSuppressor is in ALARM doesn't act; once the
+// suppression ends while it is still in ALARM, it performs the owed actions.
+#[tokio::test]
+async fn suppressed_composite_acts_only_after_suppression_ends() {
+    let (svc, sns, _) = acting_service();
+    for name in ["child", "maint"] {
+        call(
+            &svc,
+            "PutMetricAlarm",
+            &[
+                ("AlarmName", name),
+                ("Namespace", "N"),
+                ("MetricName", name),
+                ("Statistic", "Sum"),
+                ("Threshold", "1"),
+            ],
+        )
+        .await;
+    }
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "svc"),
+            ("AlarmRule", "ALARM(child)"),
+            ("AlarmActions.member.1", TOPIC),
+            ("ActionsSuppressor", "maint"),
+            ("ActionsSuppressorWaitPeriod", "0"),
+            ("ActionsSuppressorExtensionPeriod", "0"),
+        ],
+    )
+    .await;
+    let set = |name: &'static str, value: &'static str| {
+        let svc = &svc;
+        async move {
+            call(
+                svc,
+                "SetAlarmState",
+                &[
+                    ("AlarmName", name),
+                    ("StateValue", value),
+                    ("StateReason", "x"),
+                ],
+            )
+            .await;
+        }
+    };
+    set("maint", "ALARM").await;
+    set("child", "ALARM").await;
+    assert!(
+        sns.published.lock().is_empty(),
+        "suppressed composite acted"
+    );
+    // The suppressor leaves ALARM with no extension period: actions run.
+    set("maint", "OK").await;
+    let published = sns.published.lock().clone();
+    assert_eq!(published.len(), 1, "{published:?}");
+    let m: serde_json::Value = serde_json::from_str(&published[0].1).unwrap();
+    assert_eq!(m["NewStateValue"], "ALARM");
+    assert_eq!(m["AlarmRule"], "ALARM(child)");
+    assert!(m["TriggeringChildren"][0]["Arn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":alarm:child"));
+    let hist = history_of(&svc, "svc", "CompositeAlarm").await;
+    assert!(hist.contains("Successfully executed action"), "{hist}");
+    // Nothing more is owed.
+    call(&svc, "DescribeAlarms", &[]).await;
+    assert_eq!(sns.published.lock().len(), 1);
+}
+
+// The wait period holds the actions back until it runs out.
+#[test]
+fn composite_actions_run_when_the_wait_period_ends() {
+    use crate::state::{AlarmState, CompositeAlarm};
+    let mut st = crate::state::CloudWatchState::new(ACCT);
+    let t0 = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    let composite = CompositeAlarm {
+        alarm_name: "svc".into(),
+        alarm_arn: crate::state::alarm_arn(REGION, ACCT, "svc"),
+        alarm_description: None,
+        alarm_rule: "TRUE".into(),
+        actions_enabled: true,
+        ok_actions: vec![],
+        alarm_actions: vec![TOPIC.into()],
+        insufficient_data_actions: vec![],
+        actions_suppressor: Some("maint".into()),
+        actions_suppressor_wait_period: Some(60),
+        actions_suppressor_extension_period: Some(60),
+        state_value: AlarmState::InsufficientData,
+        state_reason: String::new(),
+        state_updated_timestamp: t0,
+        alarm_configuration_updated_timestamp: t0,
+        action_configuration: None,
+        state_reason_data: None,
+        state_transitioned_timestamp: Some(t0),
+        actions_suppressed_by: None,
+        actions_suppressed_reason: None,
+        state_manually_set: false,
+        pending_action_from: None,
+        alarm_exit: crate::state::AlarmExit::new(),
+    };
+    st.composite_alarms_in_mut(REGION)
+        .insert("svc".into(), composite);
+    let first = crate::alarm_eval::evaluate_alarms(&mut st, REGION, t0);
+    assert!(first.notifications.is_empty());
+    let c = &st.composite_alarms_in(REGION).unwrap()["svc"];
+    assert_eq!(c.state_value, AlarmState::Alarm);
+    assert_eq!(
+        c.actions_suppressed_by,
+        Some(crate::state::ActionsSuppressedBy::WaitPeriod)
+    );
+    let during =
+        crate::alarm_eval::evaluate_alarms(&mut st, REGION, t0 + chrono::Duration::seconds(30));
+    assert!(during.notifications.is_empty());
+    let after =
+        crate::alarm_eval::evaluate_alarms(&mut st, REGION, t0 + chrono::Duration::seconds(61));
+    assert_eq!(after.notifications.len(), 1);
+    assert_eq!(after.notifications[0].actions, vec![TOPIC.to_string()]);
+    let again =
+        crate::alarm_eval::evaluate_alarms(&mut st, REGION, t0 + chrono::Duration::seconds(90));
+    assert!(again.notifications.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Review regressions.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn suppressor_periods_must_fit_32_bits() {
+    let svc = service();
+    for (param, value) in [
+        ("ActionsSuppressorWaitPeriod", "100000000000000"),
+        ("ActionsSuppressorExtensionPeriod", "-100000000000000"),
+        ("ActionsSuppressorWaitPeriod", "ten"),
+    ] {
+        let err = call_err(
+            &svc,
+            "PutCompositeAlarm",
+            &[
+                ("AlarmName", "c"),
+                ("AlarmRule", "TRUE"),
+                ("ActionsSuppressor", "s"),
+                (param, value),
+            ],
+        )
+        .await;
+        assert_eq!(err.code(), "InvalidParameterValue", "{param}={value}");
+    }
+    // An in-range maximum evaluates without overflow.
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "c"),
+            ("AlarmRule", "TRUE"),
+            ("ActionsSuppressor", "s"),
+            ("ActionsSuppressorWaitPeriod", "2147483647"),
+            ("ActionsSuppressorExtensionPeriod", "2147483647"),
+        ],
+    )
+    .await;
+    let b = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "CompositeAlarm")],
+        )
+        .await,
+    );
+    assert!(
+        b.contains("<ActionsSuppressedBy>WaitPeriod</ActionsSuppressedBy>"),
+        "{b}"
+    );
+}
+
+#[test]
+fn suppression_status_saturates_instead_of_overflowing() {
+    use crate::alarm_eval::{suppression_status, SuppressionInput};
+    use crate::state::AlarmState;
+    let now = chrono::Utc::now();
+    let by = suppression_status(&SuppressionInput {
+        composite_state: AlarmState::Alarm,
+        entered_state_at: now,
+        suppressor_state: Some(AlarmState::Ok),
+        suppressor_left_alarm_at: Some(now),
+        wait_period: i64::MAX,
+        extension_period: i64::MAX,
+        now,
+    });
+    assert_eq!(by, Some(crate::state::ActionsSuppressedBy::ExtensionPeriod));
+}
+
+#[tokio::test]
+async fn set_alarm_state_rejects_non_json_reason_data() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[("AlarmName", "j"), ("Namespace", "N"), ("MetricName", "M")],
+    )
+    .await;
+    let err = call_err(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "j"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "x"),
+            ("StateReasonData", "not json"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidFormat");
+    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+    // Nothing changed.
+    assert_eq!(
+        metric_alarm(&svc, "j").state_value,
+        crate::state::AlarmState::InsufficientData
+    );
+}
+
+#[tokio::test]
+async fn reput_to_unevaluated_config_clears_evaluation_error() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "e"),
+            ("Namespace", "N"),
+            ("MetricName", "M"),
+            ("Statistic", "Sum"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        metric_alarm(&svc, "e").evaluation_state,
+        Some(crate::state::EvaluationState::EvaluationError)
+    );
+    // Re-put as a metric-math alarm, which this evaluator doesn't evaluate.
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "e"),
+            ("Threshold", "1"),
+            ("Metrics.member.1.Id", "e1"),
+            ("Metrics.member.1.Expression", "SUM(METRICS())"),
+        ],
+    )
+    .await;
+    assert_eq!(metric_alarm(&svc, "e").evaluation_state, None);
+}
+
+#[tokio::test]
+async fn configuration_history_carries_alarm_configs() {
+    let svc = service();
+    for threshold in ["1", "2"] {
+        call(
+            &svc,
+            "PutMetricAlarm",
+            &[
+                ("AlarmName", "cfg"),
+                ("Namespace", "N"),
+                ("MetricName", "M"),
+                ("Statistic", "Sum"),
+                ("Threshold", threshold),
+            ],
+        )
+        .await;
+    }
+    let items = {
+        let state = svc.state.read();
+        state.get(ACCT).unwrap().alarm_history_in(REGION).unwrap()["cfg"]
+            .iter()
+            .filter(|i| i.history_item_type == "ConfigurationUpdate")
+            .map(|i| serde_json::from_str::<serde_json::Value>(&i.history_data).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["type"], "Create");
+    assert_eq!(items[0]["createdAlarm"]["threshold"], 1.0);
+    assert_eq!(items[0]["createdAlarm"]["alarmName"], "cfg");
+    assert_eq!(items[1]["type"], "Update");
+    assert_eq!(items[1]["originalAlarm"]["threshold"], 1.0);
+    assert_eq!(items[1]["updatedAlarm"]["threshold"], 2.0);
+
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[("AlarmName", "cc"), ("AlarmRule", "ALARM(cfg)")],
+    )
+    .await;
+    let state = svc.state.read();
+    let comp = &state.get(ACCT).unwrap().alarm_history_in(REGION).unwrap()["cc"][0];
+    let v: serde_json::Value = serde_json::from_str(&comp.history_data).unwrap();
+    assert_eq!(v["createdAlarm"]["alarmRule"], "ALARM(cfg)");
+}
+
+// The suppressor's exit from ALARM is recorded on the alarm; an alarm from an
+// older snapshot (untracked) falls back to its history.
+#[tokio::test]
+async fn suppressor_exit_is_tracked_on_the_alarm() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[("AlarmName", "s"), ("Namespace", "N"), ("MetricName", "M")],
+    )
+    .await;
+    for value in ["ALARM", "OK"] {
+        call(
+            &svc,
+            "SetAlarmState",
+            &[
+                ("AlarmName", "s"),
+                ("StateValue", value),
+                ("StateReason", "x"),
+            ],
+        )
+        .await;
+    }
+    let alarm = metric_alarm(&svc, "s");
+    assert!(alarm.alarm_exit.tracked);
+    assert_eq!(alarm.alarm_exit.at, Some(alarm.state_updated_timestamp));
+
+    // An untracked alarm reads it from history.
+    svc.state
+        .write()
+        .get_or_create(ACCT)
+        .alarms_in_mut(REGION)
+        .get_mut("s")
+        .unwrap()
+        .alarm_exit = crate::state::AlarmExit::default();
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "c"),
+            ("AlarmRule", "TRUE"),
+            ("ActionsSuppressor", "s"),
+            ("ActionsSuppressorWaitPeriod", "0"),
+            ("ActionsSuppressorExtensionPeriod", "3600"),
+        ],
+    )
+    .await;
+    let b = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "CompositeAlarm")],
+        )
+        .await,
+    );
+    assert!(
+        b.contains("<ActionsSuppressedBy>ExtensionPeriod</ActionsSuppressedBy>"),
+        "{b}"
     );
 }

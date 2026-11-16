@@ -1192,6 +1192,274 @@ async fn alarm_evaluation_renders_computed_state_outputs() {
     );
 }
 
+/// An SNS topic with an SQS queue subscribed (raw delivery off, so messages
+/// arrive in the SNS envelope). Returns (topic ARN, queue URL).
+async fn topic_with_queue(server: &TestServer, name: &str) -> (String, String) {
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+    let topic_arn = sns
+        .create_topic()
+        .name(name)
+        .send()
+        .await
+        .expect("create topic")
+        .topic_arn()
+        .unwrap()
+        .to_string();
+    let queue_url = sqs
+        .create_queue()
+        .queue_name(name)
+        .send()
+        .await
+        .expect("create queue")
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .expect("queue attrs")
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .clone();
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(queue_arn)
+        .send()
+        .await
+        .expect("subscribe");
+    (topic_arn, queue_url)
+}
+
+// An alarm transition publishes the alarm notification to its SNS action,
+// which reaches the subscribed queue, and records the action in history.
+#[tokio::test]
+async fn alarm_transition_publishes_to_sns_subscribers() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let sqs = server.sqs_client().await;
+    let (topic_arn, queue_url) = topic_with_queue(&server, "alarm-notify").await;
+
+    cw.put_metric_alarm()
+        .alarm_name("HighErrors")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(1.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .alarm_actions(&topic_arn)
+        .ok_actions(&topic_arn)
+        .send()
+        .await
+        .expect("put alarm");
+    cw.put_metric_data()
+        .namespace("App")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Errors")
+                .value(5.0)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put data");
+
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 1, std::time::Duration::from_secs(10))
+            .await;
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    let envelope: serde_json::Value = serde_json::from_str(messages[0].body().unwrap()).unwrap();
+    assert_eq!(
+        envelope["Subject"],
+        "ALARM: \"HighErrors\" in US East (N. Virginia)"
+    );
+    let alarm: serde_json::Value =
+        serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+    assert_eq!(alarm["AlarmName"], "HighErrors");
+    assert_eq!(alarm["NewStateValue"], "ALARM");
+    assert_eq!(alarm["OldStateValue"], "INSUFFICIENT_DATA");
+    assert_eq!(alarm["Trigger"]["MetricName"], "Errors");
+    assert_eq!(alarm["Trigger"]["Namespace"], "App");
+
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("HighErrors")
+        .history_item_type(aws_sdk_cloudwatch::types::HistoryItemType::Action)
+        .send()
+        .await
+        .expect("history");
+    let summaries: Vec<_> = history
+        .alarm_history_items()
+        .iter()
+        .filter_map(|i| i.history_summary())
+        .collect();
+    assert_eq!(
+        summaries,
+        [format!("Successfully executed action {topic_arn}")]
+    );
+}
+
+// A composite whose ActionsSuppressor is in ALARM transitions without acting.
+#[tokio::test]
+async fn suppressed_composite_alarm_does_not_notify() {
+    use aws_sdk_cloudwatch::types::AlarmType;
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let sqs = server.sqs_client().await;
+    let (topic_arn, queue_url) = topic_with_queue(&server, "composite-notify").await;
+    for name in ["child", "maintenance"] {
+        cw.put_metric_alarm()
+            .alarm_name(name)
+            .namespace("App")
+            .metric_name(name)
+            .statistic(Statistic::Sum)
+            .period(60)
+            .evaluation_periods(1)
+            .threshold(1.0)
+            .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+            .send()
+            .await
+            .expect("put alarm");
+    }
+    cw.put_composite_alarm()
+        .alarm_name("service")
+        .alarm_rule("ALARM(child)")
+        .alarm_actions(&topic_arn)
+        .actions_suppressor("maintenance")
+        .actions_suppressor_wait_period(600)
+        .actions_suppressor_extension_period(600)
+        .send()
+        .await
+        .expect("put composite");
+    for name in ["maintenance", "child"] {
+        cw.set_alarm_state()
+            .alarm_name(name)
+            .state_value(StateValue::Alarm)
+            .state_reason("test")
+            .send()
+            .await
+            .expect("set state");
+    }
+    let out = cw
+        .describe_alarms()
+        .alarm_names("service")
+        .alarm_types(AlarmType::CompositeAlarm)
+        .send()
+        .await
+        .expect("describe");
+    assert_eq!(
+        out.composite_alarms()[0].state_value(),
+        Some(&StateValue::Alarm)
+    );
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 1, std::time::Duration::from_secs(2)).await;
+    assert!(
+        messages.is_empty(),
+        "suppressed composite notified: {messages:?}"
+    );
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("service")
+        .alarm_types(AlarmType::CompositeAlarm)
+        .history_item_type(aws_sdk_cloudwatch::types::HistoryItemType::Action)
+        .send()
+        .await
+        .expect("history");
+    assert!(history.alarm_history_items().is_empty());
+}
+
+// An EC2 stop action stops the instance named by the InstanceId dimension.
+#[tokio::test]
+async fn alarm_ec2_stop_action_stops_the_instance() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let ec2 = server.ec2_client().await;
+    let instance_id = ec2
+        .run_instances()
+        .image_id("ami-12345678")
+        .min_count(1)
+        .max_count(1)
+        .send()
+        .await
+        .expect("run instances")
+        .instances()[0]
+        .instance_id()
+        .unwrap()
+        .to_string();
+    let state_of = || {
+        let ec2 = ec2.clone();
+        let id = instance_id.clone();
+        async move {
+            ec2.describe_instances()
+                .instance_ids(&id)
+                .send()
+                .await
+                .unwrap()
+                .reservations()[0]
+                .instances()[0]
+                .state()
+                .and_then(|s| s.name())
+                .map(|n| n.as_str().to_string())
+        }
+    };
+    assert!(
+        helpers::wait_until(std::time::Duration::from_secs(60), || async {
+            (state_of().await.as_deref() == Some("running")).then_some(())
+        })
+        .await
+        .is_some(),
+        "instance never reached running"
+    );
+
+    cw.put_metric_alarm()
+        .alarm_name("StopIdle")
+        .namespace("AWS/EC2")
+        .metric_name("CPUUtilization")
+        .statistic(Statistic::Average)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(5.0)
+        .comparison_operator(ComparisonOperator::LessThanThreshold)
+        .dimensions(
+            Dimension::builder()
+                .name("InstanceId")
+                .value(&instance_id)
+                .build(),
+        )
+        .alarm_actions("arn:aws:automate:us-east-1:ec2:stop")
+        .send()
+        .await
+        .expect("put alarm");
+    cw.set_alarm_state()
+        .alarm_name("StopIdle")
+        .state_value(StateValue::Alarm)
+        .state_reason("idle")
+        .send()
+        .await
+        .expect("set state");
+
+    assert_eq!(state_of().await.as_deref(), Some("stopped"));
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("StopIdle")
+        .history_item_type(aws_sdk_cloudwatch::types::HistoryItemType::Action)
+        .send()
+        .await
+        .expect("history");
+    assert_eq!(
+        history.alarm_history_items()[0].history_summary(),
+        Some("Successfully executed action arn:aws:automate:us-east-1:ec2:stop")
+    );
+}
+
 // A metric alarm with no Threshold can't be evaluated: EVALUATION_ERROR.
 #[tokio::test]
 async fn unevaluable_alarm_reports_evaluation_error() {
@@ -1328,11 +1596,13 @@ async fn composite_alarm_reports_action_suppression() {
         .iter()
         .filter_map(|i| i.history_summary())
         .collect();
+    // Evaluated on creation (child not in ALARM yet), then following it.
     assert_eq!(
         summaries,
         [
             "Alarm updated from ALARM to OK",
-            "Alarm updated from INSUFFICIENT_DATA to ALARM"
+            "Alarm updated from OK to ALARM",
+            "Alarm updated from INSUFFICIENT_DATA to OK"
         ]
     );
 }

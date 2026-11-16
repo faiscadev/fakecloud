@@ -14,11 +14,12 @@ use fakecloud_core::query::{optional_query_param, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{
-    collect_member_values, configuration_update_item, empty_metadata_response, push_alarm_history,
-    push_state_reason_data, push_state_transitioned_timestamp, validate_len, xml_escape,
+    collect_member_values, composite_alarm_config, configuration_update_item,
+    empty_metadata_response, push_alarm_history, push_state_reason_data,
+    push_state_transitioned_timestamp, validate_len, validate_range_i64, xml_escape,
     CloudWatchService,
 };
-use crate::state::{AlarmState, CompositeAlarm};
+use crate::state::{AlarmExit, AlarmState, CompositeAlarm};
 
 impl CloudWatchService {
     pub(crate) fn put_composite_alarm(
@@ -29,6 +30,13 @@ impl CloudWatchService {
         validate_len(req, "AlarmRule", 1, 10240)?;
         validate_len(req, "AlarmDescription", 0, 1024)?;
         validate_len(req, "ActionsSuppressor", 1, 1600)?;
+        // SuppressorPeriod is a 32-bit integer.
+        for p in [
+            "ActionsSuppressorWaitPeriod",
+            "ActionsSuppressorExtensionPeriod",
+        ] {
+            validate_range_i64(req, p, i64::from(i32::MIN), i64::from(i32::MAX))?;
+        }
         let alarm_name = required_query_param(req, "AlarmName")?;
         let alarm_rule = required_query_param(req, "AlarmRule")?;
         // The AlarmRule must be a well-formed boolean expression over
@@ -103,13 +111,24 @@ impl CloudWatchService {
             actions_suppressed_reason: existing
                 .as_ref()
                 .and_then(|a| a.actions_suppressed_reason.clone()),
+            // A configuration update re-evaluates the rule, ending any state
+            // set by SetAlarmState.
+            state_manually_set: false,
+            pending_action_from: existing
+                .as_ref()
+                .and_then(|a| a.pending_action_from.clone()),
+            alarm_exit: existing
+                .as_ref()
+                .map(|a| a.alarm_exit)
+                .unwrap_or_else(AlarmExit::new),
         };
-        let created = existing.is_none();
+        let original = existing.as_ref().map(composite_alarm_config);
+        let updated = composite_alarm_config(&alarm);
         composites.insert(alarm_name.clone(), alarm);
         push_alarm_history(
             acct,
             &req.region,
-            configuration_update_item(&alarm_name, "CompositeAlarm", created, now),
+            configuration_update_item(&alarm_name, "CompositeAlarm", original, updated, now),
         );
 
         Ok(empty_metadata_response(

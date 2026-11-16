@@ -377,6 +377,38 @@ pub struct MetricAlarm {
     /// alarm normally, absent otherwise.
     #[serde(default)]
     pub evaluation_state: Option<EvaluationState>,
+    /// When the alarm last left ALARM (what an `ActionsSuppressor`'s
+    /// extension period counts from).
+    #[serde(default)]
+    pub alarm_exit: AlarmExit,
+}
+
+/// When an alarm last left the ALARM state. `tracked` is false on alarms
+/// persisted before this was recorded; their exit time is then read from the
+/// alarm history.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct AlarmExit {
+    #[serde(default)]
+    pub tracked: bool,
+    #[serde(default)]
+    pub at: Option<DateTime<Utc>>,
+}
+
+impl AlarmExit {
+    /// A new alarm's (it has never been in ALARM).
+    pub fn new() -> Self {
+        AlarmExit {
+            tracked: true,
+            at: None,
+        }
+    }
+
+    /// Record a state change from `old` to `new` at `at`.
+    pub fn note(&mut self, old: AlarmState, new: AlarmState, at: DateTime<Utc>) {
+        if old == AlarmState::Alarm && new != AlarmState::Alarm {
+            self.at = Some(at);
+        }
+    }
 }
 
 /// The `EvaluationState` enum of a metric or log alarm.
@@ -533,6 +565,26 @@ pub struct CompositeAlarm {
     pub actions_suppressed_by: Option<ActionsSuppressedBy>,
     #[serde(default)]
     pub actions_suppressed_reason: Option<String>,
+    /// Whether the current state came from `SetAlarmState`. AWS keeps it until
+    /// a child alarm changes state or the configuration is updated.
+    #[serde(default)]
+    pub state_manually_set: bool,
+    /// The state before the last transition while that transition's actions
+    /// are still owed (held back by the `ActionsSuppressor`).
+    #[serde(default)]
+    pub pending_action_from: Option<PreviousState>,
+    #[serde(default)]
+    pub alarm_exit: AlarmExit,
+}
+
+/// An alarm's state before a transition, as alarm notifications report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreviousState {
+    pub value: AlarmState,
+    pub reason: String,
+    #[serde(default)]
+    pub reason_data: Option<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// A log alarm: evaluates a scheduled CloudWatch Logs query's results against
@@ -579,6 +631,8 @@ pub struct LogAlarm {
     /// `StateTransitionedTimestamp`: when `StateValue` last changed.
     #[serde(default)]
     pub state_transitioned_timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub alarm_exit: AlarmExit,
 }
 
 /// An anomaly detection model on a metric (single-metric or metric-math).

@@ -200,6 +200,7 @@ impl ResourceProvisioner {
             state_reason_data: None,
             state_transitioned_timestamp: Some(now),
             evaluation_state: None,
+            alarm_exit: fakecloud_cloudwatch::AlarmExit::new(),
         };
         let region_alarms = state.alarms_in_mut(&self.region);
         if region_alarms.contains_key(&alarm_name) {

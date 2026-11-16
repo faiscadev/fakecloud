@@ -37,10 +37,11 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Map, Value};
 
+use crate::alarm_actions::AlarmNotification;
 use crate::service::{collect_metric_buckets, resolve_stat};
 use crate::state::{
     ActionsSuppressedBy, AlarmHistoryItem, AlarmState, CloudWatchState, EvaluationState,
-    MetricAlarm, MetricDatum,
+    MetricAlarm, MetricDatum, PreviousState,
 };
 
 /// Timestamp format AWS uses inside `StateReasonData` and history JSON
@@ -110,9 +111,25 @@ pub(crate) fn state_update_item(
     }
 }
 
+/// What one evaluation pass changed.
+#[derive(Debug, Default)]
+pub(crate) struct Evaluated {
+    /// Whether any alarm's stored state changed (so it needs persisting).
+    pub changed: bool,
+    /// The actions owed for the state changes, to run outside the lock.
+    pub notifications: Vec<AlarmNotification>,
+}
+
 /// Evaluate every alarm in `region` against the stored metric data at `now`,
-/// updating states and recording transitions in the alarm history.
-pub(crate) fn evaluate_alarms(state: &mut CloudWatchState, region: &str, now: DateTime<Utc>) {
+/// updating states, recording transitions in the alarm history and returning
+/// the actions they owe.
+pub(crate) fn evaluate_alarms(
+    state: &mut CloudWatchState,
+    region: &str,
+    now: DateTime<Utc>,
+) -> Evaluated {
+    let mut out = Evaluated::default();
+    let account_id = state.account_id.clone();
     // ---- Metric alarms ----
     let mut history: Vec<AlarmHistoryItem> = Vec::new();
     {
@@ -134,7 +151,24 @@ pub(crate) fn evaluate_alarms(state: &mut CloudWatchState, region: &str, now: Da
                 if ev.had_data {
                     alarm.state_manually_set = false;
                 }
+                let before = (alarm.state_value, alarm.evaluation_state);
+                let prev = PreviousState {
+                    value: alarm.state_value,
+                    reason: alarm.state_reason.clone(),
+                    reason_data: alarm.state_reason_data.clone(),
+                    timestamp: alarm.state_updated_timestamp,
+                };
                 apply_metric_evaluation(alarm, ev, now, &mut history);
+                if before != (alarm.state_value, alarm.evaluation_state) {
+                    out.changed = true;
+                }
+                out.notifications
+                    .extend(crate::alarm_actions::metric_alarm_notification(
+                        &account_id,
+                        region,
+                        alarm,
+                        &prev,
+                    ));
             }
         }
     }
@@ -143,7 +177,8 @@ pub(crate) fn evaluate_alarms(state: &mut CloudWatchState, region: &str, now: Da
     }
 
     // ---- Composite alarms ----
-    evaluate_composite_alarms(state, region, now);
+    evaluate_composite_alarms(state, region, now, &mut out);
+    out
 }
 
 /// Apply an evaluation result to `alarm`. `StateUpdatedTimestamp` moves when
@@ -177,6 +212,7 @@ fn apply_metric_evaluation(
             },
         ));
         alarm.state_transitioned_timestamp = Some(now);
+        alarm.alarm_exit.note(alarm.state_value, ev.state, now);
     }
     alarm.state_value = ev.state;
     alarm.state_reason = ev.reason;
@@ -194,12 +230,20 @@ struct RuleMember {
 
 /// Evaluate the composite alarms in `region`, propagating child states through
 /// the rule expressions. Runs to a fixpoint so a composite that references
-/// another composite settles.
-fn evaluate_composite_alarms(state: &mut CloudWatchState, region: &str, now: DateTime<Utc>) {
+/// another composite settles. A composite whose state was set by
+/// `SetAlarmState` keeps it until one of its children changes state or its
+/// configuration is updated, as on AWS.
+fn evaluate_composite_alarms(
+    state: &mut CloudWatchState,
+    region: &str,
+    now: DateTime<Utc>,
+    out: &mut Evaluated,
+) {
     let composite_names: Vec<String> = match state.composite_alarms.get(region) {
         Some(c) if !c.is_empty() => c.keys().cloned().collect(),
         _ => return,
     };
+    let account_id = state.account_id.clone();
 
     // Seed the member map from every alarm a rule can reference.
     let mut members: HashMap<String, RuleMember> = HashMap::new();
@@ -248,11 +292,41 @@ fn evaluate_composite_alarms(state: &mut CloudWatchState, region: &str, now: Dat
     let mut states: HashMap<String, AlarmState> =
         members.iter().map(|(n, m)| (n.clone(), m.state)).collect();
 
+    // Manually set composites none of whose children changed since.
+    let mut frozen: HashSet<String> = HashSet::new();
+    if let Some(c) = state.composite_alarms.get_mut(region) {
+        for (name, al) in c.iter_mut() {
+            if !al.state_manually_set {
+                continue;
+            }
+            let child_changed = parse_alarm_rule(&al.alarm_rule)
+                .map(|node| {
+                    let mut refs = Vec::new();
+                    referenced_names(&node, &mut refs);
+                    refs.iter().any(|r| {
+                        members
+                            .get(*r)
+                            .is_some_and(|m| m.transitioned > al.state_updated_timestamp)
+                    })
+                })
+                .unwrap_or(false);
+            if child_changed {
+                al.state_manually_set = false;
+                out.changed = true;
+            } else {
+                frozen.insert(name.clone());
+            }
+        }
+    }
+
     // Recompute composite states until stable (bounded by the composite count
     // so a reference cycle can't loop forever).
     for _ in 0..composite_names.len() {
         let mut changed = false;
         for name in &composite_names {
+            if frozen.contains(name) {
+                continue;
+            }
             let Some(rule) = state
                 .composite_alarms
                 .get(region)
@@ -316,18 +390,73 @@ fn evaluate_composite_alarms(state: &mut CloudWatchState, region: &str, now: Dat
                     reason_data: reason_data.as_deref(),
                 },
             ));
+            // The actions for this transition are owed until the suppressor
+            // lets them run (see `owed_composite_actions`).
+            al.pending_action_from = Some(PreviousState {
+                value: al.state_value,
+                reason: std::mem::take(&mut al.state_reason),
+                reason_data: al.state_reason_data.take(),
+                timestamp: al.state_updated_timestamp,
+            });
+            al.alarm_exit.note(al.state_value, new_state, now);
             al.state_value = new_state;
             al.state_reason = reason;
             al.state_reason_data = reason_data;
             al.state_updated_timestamp = now;
             al.state_transitioned_timestamp = Some(now);
+            out.changed = true;
         }
     }
     for item in history {
         crate::service::push_alarm_history(state, region, item);
     }
 
-    update_action_suppression(state, region, &composite_names, &states, now);
+    if update_action_suppression(state, region, &composite_names, &states, now) {
+        out.changed = true;
+    }
+    owed_composite_actions(state, &account_id, region, out);
+}
+
+/// Every alarm name a rule references.
+fn referenced_names<'a>(node: &'a RuleNode, out: &mut Vec<&'a str>) {
+    match node {
+        RuleNode::And(a, b) | RuleNode::Or(a, b) => {
+            referenced_names(a, out);
+            referenced_names(b, out);
+        }
+        RuleNode::Not(a) => referenced_names(a, out),
+        RuleNode::State(_, name) => out.push(name),
+        RuleNode::True | RuleNode::False => {}
+    }
+}
+
+/// Collect the actions composites owe for their last transition. A composite
+/// in ALARM whose actions are suppressed keeps owing them and performs them
+/// once the suppression ends (the wait period runs out, or the extension
+/// period after the suppressor leaves ALARM), if it is still in ALARM.
+fn owed_composite_actions(
+    state: &mut CloudWatchState,
+    account_id: &str,
+    region: &str,
+    out: &mut Evaluated,
+) {
+    let Some(c) = state.composite_alarms.get_mut(region) else {
+        return;
+    };
+    for al in c.values_mut() {
+        if al.pending_action_from.is_none()
+            || (al.state_value == AlarmState::Alarm && al.actions_suppressed_by.is_some())
+        {
+            continue;
+        }
+        if let Some(prev) = al.pending_action_from.take() {
+            out.changed = true;
+            out.notifications
+                .extend(crate::alarm_actions::composite_alarm_notification(
+                    account_id, region, al, &prev,
+                ));
+        }
+    }
 }
 
 /// The `StateReasonData` of a composite rule transition: every referenced
@@ -375,14 +504,14 @@ fn collect_satisfied<'a>(
 }
 
 /// Recompute `ActionsSuppressedBy` / `ActionsSuppressedReason` for every
-/// composite alarm with an `ActionsSuppressor`.
+/// composite alarm with an `ActionsSuppressor`. Returns whether any changed.
 fn update_action_suppression(
     state: &mut CloudWatchState,
     region: &str,
     composite_names: &[String],
     states: &HashMap<String, AlarmState>,
     now: DateTime<Utc>,
-) {
+) -> bool {
     let mut results: Vec<(String, Option<ActionsSuppressedBy>)> = Vec::new();
     if let Some(c) = state.composite_alarms.get(region) {
         for name in composite_names {
@@ -397,7 +526,7 @@ fn update_action_suppression(
                         .state_transitioned_timestamp
                         .unwrap_or(al.state_updated_timestamp),
                     suppressor_state: states.get(&suppressor).copied(),
-                    suppressor_left_alarm_at: last_alarm_exit(state, region, &suppressor),
+                    suppressor_left_alarm_at: suppressor_exit(state, region, &suppressor),
                     wait_period: al.actions_suppressor_wait_period.unwrap_or(0),
                     extension_period: al.actions_suppressor_extension_period.unwrap_or(0),
                     now,
@@ -406,19 +535,57 @@ fn update_action_suppression(
             results.push((name.clone(), by));
         }
     }
+    let mut changed = false;
     if let Some(c) = state.composite_alarms.get_mut(region) {
         for (name, by) in results {
             if let Some(al) = c.get_mut(&name) {
+                if al.actions_suppressed_by != by {
+                    changed = true;
+                }
                 al.actions_suppressed_by = by;
                 al.actions_suppressed_reason =
                     by.map(|b| format!("Actions suppressed by {}", b.as_str()));
             }
         }
     }
+    changed
+}
+
+/// When alarm `name` last left ALARM: recorded on the alarm, or read from its
+/// history for an alarm persisted before that was tracked.
+fn suppressor_exit(state: &CloudWatchState, region: &str, name: &str) -> Option<DateTime<Utc>> {
+    let exit = state
+        .alarms
+        .get(region)
+        .and_then(|a| a.get(name))
+        .map(|a| a.alarm_exit)
+        .or_else(|| {
+            state
+                .composite_alarms
+                .get(region)
+                .and_then(|a| a.get(name))
+                .map(|a| a.alarm_exit)
+        })
+        .or_else(|| {
+            state
+                .log_alarms
+                .get(region)
+                .and_then(|a| a.get(name))
+                .map(|a| a.alarm_exit)
+        })?;
+    if exit.tracked {
+        exit.at
+    } else {
+        last_alarm_exit_from_history(state, region, name)
+    }
 }
 
 /// The most recent time alarm `name` left the ALARM state, from its history.
-fn last_alarm_exit(state: &CloudWatchState, region: &str, name: &str) -> Option<DateTime<Utc>> {
+fn last_alarm_exit_from_history(
+    state: &CloudWatchState,
+    region: &str,
+    name: &str,
+) -> Option<DateTime<Utc>> {
     state
         .alarm_history_in(region)?
         .get(name)?
@@ -463,8 +630,15 @@ pub(crate) fn suppression_status(i: &SuppressionInput) -> Option<ActionsSuppress
     if i.suppressor_state == Some(AlarmState::Alarm) {
         return Some(ActionsSuppressedBy::Alarm);
     }
+    // `start + seconds`, saturating to "never ends" if it overflows.
+    let still_within = |start: DateTime<Utc>, seconds: i64| match Duration::try_seconds(seconds)
+        .and_then(|d| start.checked_add_signed(d))
+    {
+        Some(end) => i.now < end,
+        None => seconds > 0,
+    };
     if let Some(left) = i.suppressor_left_alarm_at {
-        if i.now < left + Duration::seconds(i.extension_period) {
+        if still_within(left, i.extension_period) {
             return Some(ActionsSuppressedBy::ExtensionPeriod);
         }
         // The suppressor went into ALARM during the wait, so the wait is over.
@@ -472,10 +646,18 @@ pub(crate) fn suppression_status(i: &SuppressionInput) -> Option<ActionsSuppress
             return None;
         }
     }
-    if i.now < i.entered_state_at + Duration::seconds(i.wait_period) {
+    if still_within(i.entered_state_at, i.wait_period) {
         return Some(ActionsSuppressedBy::WaitPeriod);
     }
     None
+}
+
+/// Whether [`evaluate_metric_alarm`] leaves `alarm` alone (metric-math,
+/// anomaly-detection and PromQL alarms).
+pub(crate) fn not_single_metric(alarm: &MetricAlarm) -> bool {
+    !alarm.metrics.is_empty()
+        || alarm.threshold_metric_id.is_some()
+        || alarm.evaluation_criteria.is_some()
 }
 
 /// Why a single-metric alarm's configuration can't be evaluated, if it can't.
@@ -524,10 +706,7 @@ pub(crate) fn evaluate_metric_alarm(
     // Only plain single-metric alarms with a static threshold are evaluated.
     // Metric-math (`Metrics`), anomaly-detection (`ThresholdMetricId`) and
     // PromQL (`EvaluationCriteria`) alarms are left untouched.
-    if !alarm.metrics.is_empty()
-        || alarm.threshold_metric_id.is_some()
-        || alarm.evaluation_criteria.is_some()
-    {
+    if not_single_metric(alarm) {
         return None;
     }
     if let Some(problem) = configuration_error(alarm) {
@@ -1090,6 +1269,7 @@ mod tests {
             state_reason_data: None,
             state_transitioned_timestamp: None,
             evaluation_state: None,
+            alarm_exit: crate::state::AlarmExit::new(),
         }
     }
 
