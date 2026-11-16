@@ -94,10 +94,14 @@ pub async fn execute_state_machine(
 
     // StopExecution aborts the task: its states stop where they are.
     let driver = handle.abort_handle();
-    let driver_id = driver.id();
+    let registration = DriverRegistration {
+        shared_state: &state,
+        execution_arn: &execution_arn,
+        driver_id: driver.id(),
+    };
     register_driver(&state, &execution_arn, driver);
     let outcome = handle.await;
-    unregister_driver(&state, &execution_arn, driver_id);
+    drop(registration);
     match outcome {
         Ok(Ok(output)) => {
             succeed_execution(&state, &execution_arn, &output);
@@ -118,7 +122,7 @@ pub async fn execute_state_machine(
                     "execution task panicked".to_string()
                 }
             } else {
-                format!("execution task cancelled: {join_err}")
+                join_err.to_string()
             };
             tracing::error!(
                 execution_arn = %execution_arn,
@@ -1526,6 +1530,7 @@ async fn run_map_iterations(
         // A distributed Map's iterations cannot read outer variables.
         let scope = crate::variables::child_scope(!is_distributed);
         let child_arn = child.as_ref().map(|c| c.arn.clone());
+        let child_name = child.as_ref().map(|c| c.name.clone());
         let cancelled_record = recorded_input.clone();
         let iteration = tokio::spawn(crate::variables::in_scope(scope, async move {
             let _permit = permit;
@@ -1590,6 +1595,7 @@ async fn run_map_iterations(
         handles.push((
             index,
             child_arn,
+            child_name,
             driver_id,
             cancelled_record,
             AbortOnDrop(iteration),
@@ -1600,7 +1606,7 @@ async fn run_map_iterations(
     let mut results: Vec<(usize, Value)> = Vec::with_capacity(handles.len());
     let mut iteration_records = Vec::new();
     let mut failure_count = 0usize;
-    for (index, child_arn, driver_id, cancelled_record, handle) in handles {
+    for (index, child_arn, child_name, driver_id, cancelled_record, handle) in handles {
         let outcome = handle.await;
         if let Some(arn) = &child_arn {
             unregister_driver(shared_state, arn, driver_id);
@@ -1620,15 +1626,15 @@ async fn run_map_iterations(
                         )
                     });
                 progress.record_finish(true, tolerance, total_items);
-                let now = Utc::now();
+                let (started, stopped) = child_arn
+                    .as_deref()
+                    .and_then(|arn| execution_span(shared_state, arn))
+                    .unwrap_or_else(|| (Utc::now(), Utc::now()));
                 let record = cancelled_record.map(|input| crate::map_s3::IterationRecord {
-                    execution: child_arn.clone().map(|arn| {
-                        let name = arn.rsplit_once(':').map_or("", |(_, n)| n).to_string();
-                        (arn, name)
-                    }),
+                    execution: child_arn.clone().zip(child_name.clone()),
                     input,
-                    started: now,
-                    stopped: now,
+                    started,
+                    stopped,
                     outcome: crate::map_s3::IterationOutcome::Failed(
                         failure.0.clone(),
                         failure.1.clone(),
@@ -3295,6 +3301,33 @@ impl<T> std::future::Future for AbortOnDrop<T> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+/// When an execution started and stopped.
+fn execution_span(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
+    let accounts = shared_state.read();
+    let exec = accounts
+        .by_arn(execution_arn)?
+        .executions
+        .get(execution_arn)?;
+    Some((exec.start_date, exec.stop_date.unwrap_or_else(Utc::now)))
+}
+
+/// Forgets an execution's driver however its run ends, the caller giving up
+/// on it (a dropped StartSyncExecution request) included.
+struct DriverRegistration<'a> {
+    shared_state: &'a SharedStepFunctionsState,
+    execution_arn: &'a str,
+    driver_id: tokio::task::Id,
+}
+
+impl Drop for DriverRegistration<'_> {
+    fn drop(&mut self) {
+        unregister_driver(self.shared_state, self.execution_arn, self.driver_id);
     }
 }
 
