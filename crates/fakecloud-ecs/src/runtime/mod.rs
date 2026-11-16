@@ -343,6 +343,139 @@ pub(crate) struct ContainerPlan {
     pub(crate) interactive: bool,
     /// `readonlyRootFilesystem` from the container definition. Emits `--read-only` when true.
     pub(crate) readonly_rootfs: bool,
+    /// Host namespaces the task joins: a daemon task definition's
+    /// `pidMode`/`ipcMode` `shared`, or a task definition's `host`.
+    pub(crate) host_namespaces: HostNamespaces,
+    /// The container definition's `logConfiguration`, which decides whether
+    /// the container's output lands in a daemon's log driver volume.
+    pub(crate) log_configuration: Option<LogConfiguration>,
+    /// Engine-specific `--log-driver`/`--log-opt` flags for
+    /// `log_configuration`, filled in by the Docker/Podman launch path once
+    /// it knows which engine runs the container (see [`log_driver_argv`]).
+    pub(crate) log_argv: Vec<String>,
+}
+
+/// Host namespaces a task's containers share with the container instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HostNamespaces {
+    /// `--pid host` / `hostPID`.
+    pub pid: bool,
+    /// `--ipc host` / `hostIPC`.
+    pub ipc: bool,
+}
+
+/// A container definition's `logConfiguration`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LogConfiguration {
+    pub driver: String,
+    pub options: Vec<(String, String)>,
+}
+
+/// The only driver a daemon log driver volume supports.
+pub(crate) const JSON_FILE_LOG_DRIVER: &str = "json-file";
+
+/// The `--log-driver`/`--log-opt` flags that make a container's log files
+/// land in (or stay out of) the engine's json-file log directory, which is
+/// what a daemon's `logDriverVolumeConfiguration` volume mounts.
+///
+/// - `json-file`: the container runs with the json-file driver (and, on
+///   Docker, its options), so its `<id>/<id>-json.log` is in the volume.
+/// - another driver on Docker: the `local` driver, so `docker logs` (which
+///   fakecloud reads to emulate awslogs and friends) keeps working but no
+///   json-file log is written, as on ECS where containers using a different
+///   driver don't write to the volume.
+/// - no `logConfiguration`: the engine default, which on ECS (and on a
+///   default Docker install) is json-file.
+///
+/// Podman has no separate json-file format (`json-file` is an alias for its
+/// `k8s-file` driver, and it has no `local` driver), so only the driver name
+/// is passed there.
+pub(crate) fn log_driver_argv(log: Option<&LogConfiguration>, podman: bool) -> Vec<String> {
+    let Some(log) = log else {
+        return Vec::new();
+    };
+    let mut argv = Vec::new();
+    if log.driver == JSON_FILE_LOG_DRIVER {
+        argv.push("--log-driver".to_string());
+        argv.push(JSON_FILE_LOG_DRIVER.to_string());
+        if !podman {
+            for (k, v) in &log.options {
+                argv.push("--log-opt".to_string());
+                argv.push(format!("{k}={v}"));
+            }
+        }
+    } else if !podman {
+        argv.push("--log-driver".to_string());
+        argv.push("local".to_string());
+    }
+    argv
+}
+
+/// The per-container log directory from the engine's `info` answer:
+/// Docker's `{{.DockerRootDir}}` -> `<root>/containers`, Podman's
+/// `{{.Store.GraphRoot}}|{{.Store.GraphDriverName}}` ->
+/// `<root>/<driver>-containers`.
+pub(crate) fn engine_log_dir(info: &str, podman: bool) -> Option<String> {
+    let info = info.trim();
+    if podman {
+        let (root, driver) = info.split_once('|')?;
+        let (root, driver) = (root.trim().trim_end_matches('/'), driver.trim());
+        (!root.is_empty() && !driver.is_empty()).then(|| format!("{root}/{driver}-containers"))
+    } else {
+        let root = info.trim_end_matches('/');
+        (!root.is_empty()).then(|| format!("{root}/containers"))
+    }
+}
+
+/// The definition a task launches from. Daemon task definitions live in
+/// their own family/revision namespace (`daemon-task-definition/...`), so a
+/// daemon task must never be resolved against a regular task definition of
+/// the same family.
+struct LaunchDefinition<'a> {
+    container_definitions: &'a [serde_json::Value],
+    volumes: &'a [serde_json::Value],
+    network_mode: Option<String>,
+    host_namespaces: HostNamespaces,
+}
+
+/// Whether `arn` names a daemon task definition.
+pub(crate) fn is_daemon_task_definition_arn(arn: &str) -> bool {
+    arn.split(':')
+        .nth(5)
+        .is_some_and(|resource| resource.starts_with("daemon-task-definition/"))
+}
+
+fn launch_definition<'a>(
+    s: &'a crate::state::EcsState,
+    task: &crate::state::Task,
+) -> Option<LaunchDefinition<'a>> {
+    if is_daemon_task_definition_arn(&task.task_definition_arn) {
+        let td = s
+            .daemon_task_definitions
+            .get(&task.family)?
+            .get(&task.revision)?;
+        // `shared` joins the host namespace, the one non-daemon tasks reach
+        // with `pidMode`/`ipcMode` `host`.
+        return Some(LaunchDefinition {
+            container_definitions: &td.container_definitions,
+            volumes: &td.volumes,
+            network_mode: None,
+            host_namespaces: HostNamespaces {
+                pid: td.pid_mode.as_deref() == Some("shared"),
+                ipc: td.ipc_mode.as_deref() == Some("shared"),
+            },
+        });
+    }
+    let td = s.task_definitions.get(&task.family)?.get(&task.revision)?;
+    Some(LaunchDefinition {
+        container_definitions: &td.container_definitions,
+        volumes: &td.volumes,
+        network_mode: td.network_mode.clone(),
+        host_namespaces: HostNamespaces {
+            pid: td.pid_mode.as_deref() == Some("host"),
+            ipc: td.ipc_mode.as_deref() == Some("host"),
+        },
+    })
 }
 
 /// One parsed `dependsOn[]` entry on a container. Pairs the upstream
@@ -473,6 +606,10 @@ pub(crate) struct VolumeMount {
     /// teardown. `false` for host bind mounts, EFS/FSx shared stubs, and
     /// `scope=shared` docker volumes, which persist independently of the task.
     pub cleanup_on_stop: bool,
+    /// The log driver of a daemon `logDriverVolumeConfiguration` volume.
+    /// Its `source` is a placeholder until the launch path resolves the
+    /// engine's log directory for that driver.
+    pub log_driver: Option<String>,
 }
 
 /// One `ulimits` entry. Becomes `--ulimit <name>=<soft>:<hard>`.
@@ -620,18 +757,20 @@ fn build_container_plans(
         ));
     }
     let has_task_role = task.task_role_arn.is_some();
-    let task_def = s
-        .task_definitions
-        .get(&task.family)
-        .and_then(|revs| revs.get(&task.revision));
-    let network_mode = task_def.and_then(|td| td.network_mode.clone());
+    let launch = launch_definition(s, task);
+    let network_mode = launch.as_ref().and_then(|l| l.network_mode.clone());
+    let host_namespaces = launch
+        .as_ref()
+        .map(|l| l.host_namespaces)
+        .unwrap_or_default();
     // Index `volumes[]` by name so each container's `mountPoints[]` can
     // resolve its volume in O(1). Real ECS rejects mountPoints that
     // reference an undeclared volume at register time; we don't yet, so
     // unresolved names just produce zero mounts at launch.
-    let volumes_by_name: std::collections::HashMap<String, &serde_json::Value> = task_def
-        .map(|td| {
-            td.volumes
+    let volumes_by_name: std::collections::HashMap<String, &serde_json::Value> = launch
+        .as_ref()
+        .map(|l| {
+            l.volumes
                 .iter()
                 .filter_map(|v| {
                     let name = v.get("name").and_then(|n| n.as_str())?;
@@ -642,7 +781,12 @@ fn build_container_plans(
         .unwrap_or_default();
     let mut plans = Vec::with_capacity(task.containers.len());
     for container in &task.containers {
-        let def = find_container_definition(s, &task.family, task.revision, &container.name);
+        let def = launch.as_ref().and_then(|l| {
+            l.container_definitions
+                .iter()
+                .find(|c| c.get("name").and_then(|v| v.as_str()) == Some(container.name.as_str()))
+                .cloned()
+        });
         let secrets_refs = def
             .as_ref()
             .and_then(|d| d.get("secrets").and_then(|v| v.as_array()).cloned())
@@ -715,10 +859,32 @@ fn build_container_plans(
             .and_then(|d| d.get("ulimits").and_then(|v| v.as_array()).cloned())
             .map(|arr| arr.iter().filter_map(parse_ulimit).collect::<Vec<_>>())
             .unwrap_or_default();
-        let linux_parameters = def
+        let mut linux_parameters = def
             .as_ref()
             .and_then(|d| d.get("linuxParameters"))
             .and_then(parse_linux_parameters);
+        // `privileged` and `systemControls` are container-definition members
+        // (on both `ContainerDefinition` and `DaemonContainerDefinition`).
+        if let Some(d) = def.as_ref() {
+            let privileged = d
+                .get("privileged")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let system_controls: Vec<Sysctl> = d
+                .get("systemControls")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(parse_system_control).collect())
+                .unwrap_or_default();
+            if privileged || !system_controls.is_empty() {
+                let lp = linux_parameters.get_or_insert_with(LinuxParameters::default);
+                lp.privileged |= privileged;
+                lp.sysctls.extend(system_controls);
+            }
+        }
+        let log_configuration = def
+            .as_ref()
+            .and_then(|d| d.get("logConfiguration"))
+            .and_then(parse_log_configuration);
         let stop_timeout = def.as_ref().and_then(|d| {
             d.get("stopTimeout")
                 .and_then(|v| v.as_u64())
@@ -732,9 +898,15 @@ fn build_container_plans(
                 .and_then(|v| v.as_str())
                 .map(String::from)
         });
+        // `pseudoTerminal` is the container-definition member; `tty` is kept
+        // for definitions stored before it was read.
         let tty = def
             .as_ref()
-            .and_then(|d| d.get("tty").and_then(|v| v.as_bool()))
+            .and_then(|d| {
+                d.get("pseudoTerminal")
+                    .or_else(|| d.get("tty"))
+                    .and_then(|v| v.as_bool())
+            })
             .unwrap_or(false);
         let interactive = def
             .as_ref()
@@ -773,6 +945,9 @@ fn build_container_plans(
             tty,
             interactive,
             readonly_rootfs,
+            host_namespaces,
+            log_configuration,
+            log_argv: Vec::new(),
         });
     }
     let plans = topo_sort_plans(plans);
@@ -800,6 +975,16 @@ fn resolve_mount_point(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let volume = volumes_by_name.get(source_volume)?;
+    if let Some(driver) = log_driver_volume_driver(volume) {
+        // Bound to the engine's log directory at launch; the engine owns it.
+        return Some(VolumeMount {
+            source: format!("fakecloud-ecs-log-driver-{driver}"),
+            container_path,
+            read_only,
+            cleanup_on_stop: false,
+            log_driver: Some(driver.to_string()),
+        });
+    }
     let source = resolve_volume_source(source_volume, volume)?;
     let cleanup_on_stop = volume_is_task_scoped(volume);
     Some(VolumeMount {
@@ -807,6 +992,39 @@ fn resolve_mount_point(
         container_path,
         read_only,
         cleanup_on_stop,
+        log_driver: None,
+    })
+}
+
+/// The driver of a daemon `logDriverVolumeConfiguration` volume.
+fn log_driver_volume_driver(volume: &serde_json::Value) -> Option<&str> {
+    volume
+        .get("logDriverVolumeConfiguration")?
+        .get("driver")?
+        .as_str()
+}
+
+/// Parse a `logConfiguration` (`logDriver` plus string `options`).
+fn parse_log_configuration(value: &serde_json::Value) -> Option<LogConfiguration> {
+    let driver = value.get("logDriver").and_then(|v| v.as_str())?.to_string();
+    let mut options: Vec<(String, String)> = value
+        .get("options")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    options.sort();
+    Some(LogConfiguration { driver, options })
+}
+
+/// Parse one `systemControls[]` entry (`namespace` + `value`).
+fn parse_system_control(value: &serde_json::Value) -> Option<Sysctl> {
+    Some(Sysctl {
+        name: value.get("namespace").and_then(|v| v.as_str())?.to_string(),
+        value: value.get("value").and_then(|v| v.as_str())?.to_string(),
     })
 }
 
@@ -1502,6 +1720,15 @@ pub(crate) fn build_run_argv(
         let suffix = if vm.read_only { ":ro" } else { "" };
         argv.push(format!("{}:{}{}", vm.source, vm.container_path, suffix));
     }
+    if plan.host_namespaces.pid {
+        argv.push("--pid".into());
+        argv.push("host".into());
+    }
+    if plan.host_namespaces.ipc {
+        argv.push("--ipc".into());
+        argv.push("host".into());
+    }
+    argv.extend(plan.log_argv.iter().cloned());
     for ul in &plan.ulimits {
         argv.push("--ulimit".into());
         argv.push(format!("{}={}:{}", ul.name, ul.soft_limit, ul.hard_limit));
@@ -1778,22 +2005,6 @@ fn apply_container_override(
             *command = cmd;
         }
     }
-}
-
-fn find_container_definition(
-    state: &crate::state::EcsState,
-    family: &str,
-    revision: i32,
-    name: &str,
-) -> Option<serde_json::Value> {
-    state
-        .task_definitions
-        .get(family)?
-        .get(&revision)?
-        .container_definitions
-        .iter()
-        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some(name))
-        .cloned()
 }
 
 fn mark_pull_started(state: &SharedEcsState, account_id: &str, task_id: &str) {
@@ -2163,6 +2374,9 @@ sleep 1000 & echo $! >> "$d/pids"; wait
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         }
     }
 }
@@ -2730,6 +2944,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         }
     }
 
@@ -2892,6 +3109,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         };
         let argv = build_run_argv(
             &plan,
@@ -2936,6 +3156,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         };
         let argv = build_run_argv(
             &plan,
@@ -3001,6 +3224,7 @@ mod tests {
                 container_path: "/in/container".into(),
                 read_only: true,
                 cleanup_on_stop: false,
+                log_driver: None,
             }],
             ulimits: Vec::new(),
             linux_parameters: None,
@@ -3010,6 +3234,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         };
         let argv = build_run_argv(
             &plan,
@@ -3337,6 +3564,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         };
         let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", OWN_NET, "img");
         assert!(argv.contains(&"--ulimit".to_string()));
@@ -3387,6 +3617,9 @@ mod tests {
             tty: true,
             interactive: true,
             readonly_rootfs: true,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         };
         let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", OWN_NET, "img");
         assert!(argv.contains(&"--cap-add".to_string()));
@@ -3787,5 +4020,319 @@ mod tests {
             Some(std::process::id()),
             "reaper must be able to parse the owning pid out of {label}",
         );
+    }
+
+    fn regular_task_definition(
+        family: &str,
+        containers: Vec<serde_json::Value>,
+        volumes: Vec<serde_json::Value>,
+    ) -> crate::state::TaskDefinition {
+        crate::state::TaskDefinition {
+            family: family.into(),
+            revision: 1,
+            task_definition_arn: format!(
+                "arn:aws:ecs:us-east-1:000000000000:task-definition/{family}:1"
+            ),
+            container_definitions: containers,
+            network_mode: Some("bridge".into()),
+            status: "ACTIVE".into(),
+            task_role_arn: None,
+            execution_role_arn: None,
+            requires_compatibilities: Vec::new(),
+            compatibilities: Vec::new(),
+            cpu: None,
+            memory: None,
+            pid_mode: None,
+            ipc_mode: None,
+            volumes,
+            placement_constraints: Vec::new(),
+            proxy_configuration: None,
+            inference_accelerators: Vec::new(),
+            ephemeral_storage: None,
+            runtime_platform: None,
+            requires_attributes: Vec::new(),
+            registered_at: Utc::now(),
+            registered_by: None,
+            deregistered_at: None,
+            tags: Vec::new(),
+            enable_fault_injection: None,
+        }
+    }
+
+    /// Registers a regular task definition and a daemon task definition in
+    /// the same family, spawns the daemon's task, and returns the state and
+    /// the daemon task's id.
+    fn daemon_task_state(
+        daemon_td: crate::state::DaemonTaskDefinition,
+    ) -> (SharedEcsState, String) {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        // Same family as the daemon task definition, different containers.
+        acct.task_definitions.insert("agent".into(), {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                1,
+                regular_task_definition(
+                    "agent",
+                    vec![serde_json::json!({
+                        "name": "agent", "image": "busybox", "command": ["regular"]
+                    })],
+                    Vec::new(),
+                ),
+            );
+            m
+        });
+        let daemon_td_arn = daemon_td.task_definition_arn.clone();
+        acct.daemon_task_definitions.insert("agent".into(), {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(1, daemon_td);
+            m
+        });
+        let now = Utc::now();
+        let daemon = crate::state::Daemon {
+            daemon_name: "d1".into(),
+            daemon_arn: "arn:aws:ecs:us-east-1:000000000000:daemon/default/d1".into(),
+            cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
+            cluster_name: "default".into(),
+            daemon_task_definition_arn: daemon_td_arn,
+            status: "ACTIVE".into(),
+            deployment_arn: String::new(),
+            created_at: now,
+            updated_at: now,
+            capacity_provider_arns: vec![
+                "arn:aws:ecs:us-east-1:000000000000:capacity-provider/mi".into()
+            ],
+            deployment_configuration: None,
+            propagate_tags: None,
+            enable_ecs_managed_tags: false,
+            enable_execute_command: false,
+            client_token: None,
+            tags: Vec::new(),
+            deployment_history: Vec::new(),
+            task_arns: Vec::new(),
+        };
+        let ids = crate::service::spawn_daemon_tasks(acct, "us-east-1", &daemon, "", "EC2");
+        assert_eq!(ids.len(), 1);
+        (Arc::new(RwLock::new(accounts)), ids[0].clone())
+    }
+
+    fn daemon_task_definition(
+        containers: Vec<serde_json::Value>,
+        volumes: Vec<serde_json::Value>,
+    ) -> crate::state::DaemonTaskDefinition {
+        crate::state::DaemonTaskDefinition {
+            family: "agent".into(),
+            revision: 1,
+            task_definition_arn:
+                "arn:aws:ecs:us-east-1:000000000000:daemon-task-definition/agent:1".into(),
+            status: "ACTIVE".into(),
+            container_definitions: containers,
+            task_role_arn: None,
+            execution_role_arn: None,
+            cpu: None,
+            memory: None,
+            volumes,
+            registered_at: Utc::now(),
+            deregistered_at: None,
+            tags: Vec::new(),
+            pid_mode: Some("shared".into()),
+            ipc_mode: Some("shared".into()),
+        }
+    }
+
+    #[test]
+    fn daemon_task_launches_from_its_daemon_task_definition() {
+        let containers = vec![serde_json::json!({
+            "name": "agent",
+            "image": "busybox",
+            "command": ["daemon"],
+            "environment": [{"name": "MODE", "value": "daemon"}],
+            "privileged": true,
+            "pseudoTerminal": true,
+            "systemControls": [{"namespace": "kernel.shmmax", "value": "1024"}],
+            "mountPoints": [
+                {"sourceVolume": "host-data", "containerPath": "/data"},
+                {"sourceVolume": "logs", "containerPath": "/logs", "readOnly": true}
+            ]
+        })];
+        let volumes = vec![
+            serde_json::json!({"name": "host-data", "host": {"sourcePath": "/tmp/fakecloud-daemon-unit"}}),
+            serde_json::json!({"name": "logs", "logDriverVolumeConfiguration": {"driver": "json-file"}}),
+        ];
+        let (state, task_id) = daemon_task_state(daemon_task_definition(containers, volumes));
+        let plans = build_container_plans(&state, "000000000000", &task_id, 4566).unwrap();
+        assert_eq!(plans.len(), 1);
+        let plan = &plans[0];
+        // The daemon task definition, not the regular one of the same family.
+        assert_eq!(plan.command, vec!["daemon".to_string()]);
+        assert!(plan.env.contains(&("MODE".into(), "daemon".into())));
+        assert_eq!(plan.network_mode, None);
+        assert_eq!(
+            plan.host_namespaces,
+            HostNamespaces {
+                pid: true,
+                ipc: true
+            }
+        );
+        assert!(plan.tty);
+        let lp = plan.linux_parameters.as_ref().expect("linux parameters");
+        assert!(lp.privileged);
+        assert_eq!(
+            lp.sysctls,
+            vec![Sysctl {
+                name: "kernel.shmmax".into(),
+                value: "1024".into()
+            }]
+        );
+
+        assert_eq!(plan.volume_mounts.len(), 2);
+        let host = &plan.volume_mounts[0];
+        assert_eq!(host.source, "/tmp/fakecloud-daemon-unit");
+        assert_eq!(host.container_path, "/data");
+        assert_eq!(host.log_driver, None);
+        let logs = &plan.volume_mounts[1];
+        assert_eq!(logs.container_path, "/logs");
+        assert!(logs.read_only);
+        assert!(!logs.cleanup_on_stop);
+        assert_eq!(logs.log_driver.as_deref(), Some("json-file"));
+
+        let argv = build_run_argv(plan, &[], "t", "host.docker.internal", OWN_NET, "busybox");
+        let joined = argv.join(" ");
+        assert!(joined.contains("--pid host"), "{joined}");
+        assert!(joined.contains("--ipc host"), "{joined}");
+        assert!(joined.contains("--privileged"), "{joined}");
+        assert!(joined.contains("--sysctl kernel.shmmax=1024"), "{joined}");
+        assert!(joined.contains("--tty"), "{joined}");
+        assert!(
+            joined.contains("-v /tmp/fakecloud-daemon-unit:/data "),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn daemon_namespaces_default_to_isolated() {
+        let mut td = daemon_task_definition(
+            vec![serde_json::json!({"name": "agent", "image": "busybox"})],
+            Vec::new(),
+        );
+        td.pid_mode = Some("none".into());
+        td.ipc_mode = None;
+        let (state, task_id) = daemon_task_state(td);
+        let plans = build_container_plans(&state, "000000000000", &task_id, 4566).unwrap();
+        assert_eq!(plans[0].host_namespaces, HostNamespaces::default());
+        let argv = build_run_argv(
+            &plans[0],
+            &[],
+            "t",
+            "host.docker.internal",
+            OWN_NET,
+            "busybox",
+        );
+        assert!(!argv.iter().any(|a| a == "--pid" || a == "--ipc"));
+    }
+
+    #[test]
+    fn regular_task_still_launches_from_its_task_definition() {
+        let (state, _) = daemon_task_state(daemon_task_definition(
+            vec![serde_json::json!({"name": "agent", "image": "busybox", "command": ["daemon"]})],
+            Vec::new(),
+        ));
+        {
+            let mut accounts = state.write();
+            let acct = accounts.get_mut("000000000000").unwrap();
+            let mut task = make_task("regular");
+            task.family = "agent".into();
+            task.task_definition_arn =
+                "arn:aws:ecs:us-east-1:000000000000:task-definition/agent:1".into();
+            let mut container = acct.tasks.values().next().unwrap().containers[0].clone();
+            container.name = "agent".into();
+            task.containers = vec![container];
+            acct.tasks.insert("regular".into(), task);
+        }
+        let plans = build_container_plans(&state, "000000000000", "regular", 4566).unwrap();
+        assert_eq!(plans[0].command, vec!["regular".to_string()]);
+        assert_eq!(plans[0].network_mode.as_deref(), Some("bridge"));
+    }
+
+    #[test]
+    fn daemon_task_definition_arns_are_recognised() {
+        assert!(is_daemon_task_definition_arn(
+            "arn:aws:ecs:us-east-1:000000000000:daemon-task-definition/agent:3"
+        ));
+        assert!(!is_daemon_task_definition_arn(
+            "arn:aws:ecs:us-east-1:000000000000:task-definition/agent:3"
+        ));
+        // A regular family that merely contains the word.
+        assert!(!is_daemon_task_definition_arn(
+            "arn:aws:ecs:us-east-1:000000000000:task-definition/daemon-task-definition:3"
+        ));
+    }
+
+    #[test]
+    fn log_driver_flags_keep_other_drivers_out_of_the_json_file_volume() {
+        let json_file = LogConfiguration {
+            driver: "json-file".into(),
+            options: vec![("max-size".into(), "10m".into())],
+        };
+        let awslogs = LogConfiguration {
+            driver: "awslogs".into(),
+            options: vec![("awslogs-group".into(), "/ecs/app".into())],
+        };
+        assert_eq!(
+            log_driver_argv(Some(&json_file), false),
+            vec!["--log-driver", "json-file", "--log-opt", "max-size=10m"]
+        );
+        assert_eq!(
+            log_driver_argv(Some(&json_file), true),
+            vec!["--log-driver", "json-file"]
+        );
+        assert_eq!(
+            log_driver_argv(Some(&awslogs), false),
+            vec!["--log-driver", "local"]
+        );
+        assert!(log_driver_argv(Some(&awslogs), true).is_empty());
+        assert!(log_driver_argv(None, false).is_empty());
+
+        let mut plan = tests_support::minimal_plan();
+        plan.log_argv = log_driver_argv(Some(&json_file), false);
+        let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", OWN_NET, "img");
+        let image_at = argv.iter().position(|a| a == "img").unwrap();
+        let driver_at = argv.iter().position(|a| a == "--log-driver").unwrap();
+        assert!(driver_at < image_at);
+        assert_eq!(argv[driver_at + 1], "json-file");
+    }
+
+    #[test]
+    fn engine_log_dir_comes_from_the_engines_storage_root() {
+        assert_eq!(
+            engine_log_dir("/var/lib/docker\n", false).as_deref(),
+            Some("/var/lib/docker/containers")
+        );
+        assert_eq!(
+            engine_log_dir("/home/u/.local/share/containers/storage|overlay\n", true).as_deref(),
+            Some("/home/u/.local/share/containers/storage/overlay-containers")
+        );
+        assert_eq!(engine_log_dir("", false), None);
+        assert_eq!(engine_log_dir("/var/lib/containers/storage|", true), None);
+        assert_eq!(engine_log_dir("/var/lib/containers/storage", true), None);
+    }
+
+    #[test]
+    fn log_configuration_parses_driver_and_string_options() {
+        let parsed = parse_log_configuration(&serde_json::json!({
+            "logDriver": "json-file",
+            "options": {"max-size": "5m", "max-file": "2"}
+        }))
+        .unwrap();
+        assert_eq!(parsed.driver, "json-file");
+        assert_eq!(
+            parsed.options,
+            vec![
+                ("max-file".to_string(), "2".to_string()),
+                ("max-size".to_string(), "5m".to_string())
+            ]
+        );
+        assert!(parse_log_configuration(&serde_json::json!({"options": {}})).is_none());
     }
 }

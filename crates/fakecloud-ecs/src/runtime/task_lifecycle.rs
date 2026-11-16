@@ -3,6 +3,58 @@
 use super::*;
 
 impl EcsRuntime {
+    /// Fill in each plan's engine-specific log driver flags and bind every
+    /// daemon log driver volume to the engine's json-file log directory.
+    async fn bind_engine_logging(
+        &self,
+        mut plans: Vec<ContainerPlan>,
+    ) -> Result<Vec<ContainerPlan>, RuntimeError> {
+        let podman = fakecloud_core::container_net::is_podman_async(&self.cli).await;
+        let mut log_dir: Option<String> = None;
+        for plan in &mut plans {
+            plan.log_argv = log_driver_argv(plan.log_configuration.as_ref(), podman);
+            for vm in &mut plan.volume_mounts {
+                if vm.log_driver.is_none() {
+                    continue;
+                }
+                if log_dir.is_none() {
+                    log_dir = Some(self.json_file_log_dir(podman).await?);
+                }
+                vm.source = log_dir.clone().unwrap_or_default();
+            }
+        }
+        Ok(plans)
+    }
+
+    /// The engine directory holding one directory per container, named with
+    /// the container ID: Docker's `<DockerRootDir>/containers` (each holds
+    /// the container's `<id>-json.log` and rotated files), Podman's
+    /// `<GraphRoot>/<driver>-containers`. The engine resolves the path on
+    /// its own host, so it is right when fakecloud itself runs in a
+    /// container, or the engine in a VM.
+    async fn json_file_log_dir(&self, podman: bool) -> Result<String, RuntimeError> {
+        let format = if podman {
+            "{{.Store.GraphRoot}}|{{.Store.GraphDriverName}}"
+        } else {
+            "{{.DockerRootDir}}"
+        };
+        let out = self
+            .cli_output(["info", "--format", format], CLI_CALL_TIMEOUT)
+            .await
+            .map_err(RuntimeError::ContainerStart)?;
+        let dir = if out.status.success() {
+            engine_log_dir(&String::from_utf8_lossy(&out.stdout), podman)
+        } else {
+            None
+        };
+        dir.ok_or_else(|| {
+            RuntimeError::ContainerStart(format!(
+                "could not locate the container engine's log directory for a log driver volume: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        })
+    }
+
     /// Spawn the task asynchronously. Returns immediately after transitioning
     /// the task to `PENDING`; the background task advances it to `RUNNING`
     /// once the container is created and to `STOPPED` once the container
@@ -59,6 +111,7 @@ impl EcsRuntime {
         // match real ECS's "failed to retrieve secret" behaviour — there's
         // no point starting a sidecar when the app container will fail.
         let mut resolved_plans: Vec<ResolvedContainerPlan> = Vec::with_capacity(plans.len());
+        let plans = self.bind_engine_logging(plans).await?;
         let reader = super::secrets::execution_role_reader(state, account_id, task_id);
         for plan in plans {
             let mut env = plan.env.clone();

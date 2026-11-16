@@ -981,6 +981,10 @@ fn build_task_pod(
         })
         .collect();
 
+    // Host namespaces are task-level: every plan carries the same value.
+    let host_pid = resolved.iter().any(|(p, _)| p.host_namespaces.pid);
+    let host_ipc = resolved.iter().any(|(p, _)| p.host_namespaces.ipc);
+
     let pull_secrets = pull_secret.map(|name| {
         vec![LocalObjectReference {
             name: name.to_string(),
@@ -1000,6 +1004,8 @@ fn build_task_pod(
             containers: app_containers,
             volumes: (!pod_volumes.is_empty()).then_some(pod_volumes),
             image_pull_secrets: pull_secrets,
+            host_pid: host_pid.then_some(true),
+            host_ipc: host_ipc.then_some(true),
             ..PodSpec::default()
         }),
         ..Pod::default()
@@ -1197,6 +1203,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: vec![],
         }
     }
 
@@ -1387,12 +1396,31 @@ mod tests {
             container_path: "/data".to_string(),
             read_only: false,
             cleanup_on_stop: true,
+            log_driver: None,
         };
         a.volume_mounts = vec![vm.clone()];
         b.volume_mounts = vec![vm];
         let (pod, _) = build(&[(a, vec![]), (b, vec![])]);
         let vols = pod.spec.unwrap().volumes.unwrap();
         assert_eq!(vols.len(), 1, "same source should share one volume");
+    }
+
+    #[test]
+    fn host_namespaces_set_host_pid_and_ipc_on_the_pod() {
+        let (pod, _) = build(&[(plan("app", true), vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.host_pid, None);
+        assert_eq!(spec.host_ipc, None);
+
+        let mut agent = plan("agent", true);
+        agent.host_namespaces = crate::runtime::HostNamespaces {
+            pid: true,
+            ipc: true,
+        };
+        let (pod, _) = build(&[(agent, vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.host_pid, Some(true));
+        assert_eq!(spec.host_ipc, Some(true));
     }
 
     fn creds_init() -> CredsInit {

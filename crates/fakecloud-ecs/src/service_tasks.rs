@@ -1465,6 +1465,9 @@ mod port_mapping_tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         }
     }
 
