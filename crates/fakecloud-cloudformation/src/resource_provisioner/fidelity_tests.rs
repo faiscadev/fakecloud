@@ -642,6 +642,88 @@ fn event_source_mapping_keeps_alias_qualifier_and_self_managed_config() {
     assert_eq!(esm.source_access_configurations.len(), 1);
 }
 
+#[test]
+fn msk_event_source_mapping_keeps_its_kafka_and_poller_settings_across_updates() {
+    let prov = make_provisioner();
+    create(
+        &prov,
+        "AWS::Lambda::Function",
+        "F",
+        function_props("msk-fn"),
+    );
+    let cluster =
+        "arn:aws:kafka:us-east-1:123456789012:cluster/c/0b1c2d3e-1111-2222-3333-444455556666-1";
+    let props = |extra: serde_json::Value| {
+        let mut props = json!({
+            "FunctionName": "msk-fn",
+            "EventSourceArn": cluster,
+            "Topics": ["t"],
+            "StartingPosition": "LATEST",
+            "AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "g"},
+        });
+        props
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        props
+    };
+    let sr = create(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "M",
+        props(json!({
+            "ProvisionedPollerConfig": {"MaximumPollers": 10},
+            "LoggingConfig": {"SystemLogLevel": "DEBUG"},
+        })),
+    );
+    let stored = |prov: &ResourceProvisioner| {
+        prov.lambda_state
+            .read()
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .event_source_mappings[&sr.physical_id]
+            .clone()
+    };
+    let esm = stored(&prov);
+    assert_eq!(
+        esm.amazon_managed_kafka_event_source_config,
+        Some(json!({"ConsumerGroupId": "g"}))
+    );
+    assert_eq!(
+        esm.provisioned_poller_config,
+        Some(json!({"MinimumPollers": 1, "MaximumPollers": 10}))
+    );
+    assert_eq!(esm.logging_config, Some(json!({"SystemLogLevel": "DEBUG"})));
+
+    // Dropping the poller and logging settings from the template removes them.
+    let updated = make_resource("AWS::Lambda::EventSourceMapping", "M", props(json!({})));
+    prov.update_resource(&sr, &updated).unwrap();
+    let esm = stored(&prov);
+    assert!(esm.provisioned_poller_config.is_none());
+    assert!(esm.logging_config.is_none());
+    assert_eq!(
+        esm.amazon_managed_kafka_event_source_config,
+        Some(json!({"ConsumerGroupId": "g"}))
+    );
+
+    // The consumer group is fixed at creation.
+    let regrouped = make_resource(
+        "AWS::Lambda::EventSourceMapping",
+        "M",
+        props(json!({"AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "other"}})),
+    );
+    assert!(prov.update_resource(&sr, &regrouped).is_err());
+
+    // A scaling config belongs to SQS mappings only.
+    let err = create_err(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "M2",
+        props(json!({"ScalingConfig": {"MaximumConcurrency": 5}})),
+    );
+    assert!(err.contains("ScalingConfig"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // SAM templates provisioned end to end.
 // ---------------------------------------------------------------------------
@@ -779,6 +861,7 @@ fn sam_cognito_logs_iot_and_kafka_events_provision() {
                             "Kafka": {"Type": "SelfManagedKafka", "Properties": {
                                 "KafkaBootstrapServers": ["broker:9092"],
                                 "Topics": ["orders"],
+                                "ConsumerGroupId": "sam-group",
                                 "SourceAccessConfigurations": [{"Type": "BASIC_AUTH", "URI": "arn:aws:secretsmanager:us-east-1:123456789012:secret:k"}]
                             }}
                         }
@@ -819,6 +902,10 @@ fn sam_cognito_logs_iot_and_kafka_events_provision() {
     assert_eq!(
         mapping.self_managed_event_source,
         Some(json!({"Endpoints": {"KAFKA_BOOTSTRAP_SERVERS": ["broker:9092"]}}))
+    );
+    assert_eq!(
+        mapping.self_managed_kafka_event_source_config,
+        Some(json!({"ConsumerGroupId": "sam-group"}))
     );
 }
 

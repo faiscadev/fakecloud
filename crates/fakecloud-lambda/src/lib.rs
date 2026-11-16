@@ -1,5 +1,6 @@
 pub mod capacity;
 pub(crate) mod durable;
+pub mod esm_config;
 pub mod event_source;
 pub mod eventstream;
 pub mod extras;

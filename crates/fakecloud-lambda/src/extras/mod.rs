@@ -1369,6 +1369,10 @@ impl LambdaService {
             .event_source_mappings
             .get_mut(uuid)
             .ok_or_else(|| not_found("EventSourceMapping", uuid))?;
+        // The per-source settings (Kafka configs, scaling, provisioned
+        // pollers, logging) are checked against the mapping's source and
+        // its fixed-at-creation members first: a refusal changes nothing.
+        crate::esm_config::apply_update(esm, &body)?;
         if let Some(b) = body["BatchSize"].as_i64() {
             esm.batch_size = b;
         }

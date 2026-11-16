@@ -676,8 +676,23 @@ fn event_source_mapping(
                 "KafkaBootstrapServers": props.get("KafkaBootstrapServers").cloned().unwrap_or_else(|| json!([]))
             }
         });
-        if let Some(group) = props.get("ConsumerGroupId") {
-            esm["SelfManagedKafkaEventSourceConfig"] = json!({ "ConsumerGroupId": group });
+    }
+    // SAM's Kafka events carry the consumer group and schema registry flat;
+    // the mapping takes them in its source's Kafka config.
+    let kafka_config = match event_type {
+        "MSK" => Some("AmazonManagedKafkaEventSourceConfig"),
+        "SelfManagedKafka" => Some("SelfManagedKafkaEventSourceConfig"),
+        _ => None,
+    };
+    if let Some(config_key) = kafka_config {
+        let mut cfg = Map::new();
+        for key in ["ConsumerGroupId", "SchemaRegistryConfig"] {
+            if let Some(v) = props.get(key) {
+                cfg.insert(key.to_string(), v.clone());
+            }
+        }
+        if !cfg.is_empty() {
+            esm[config_key] = Value::Object(cfg);
         }
     }
     if event_type == "DocumentDB" {
@@ -708,6 +723,8 @@ fn event_source_mapping(
         "KmsKeyArn",
         "MetricsConfig",
         "ScalingConfig",
+        "ProvisionedPollerConfig",
+        "LoggingConfig",
     ] {
         if let Some(v) = props.get(key) {
             esm[key] = v.clone();

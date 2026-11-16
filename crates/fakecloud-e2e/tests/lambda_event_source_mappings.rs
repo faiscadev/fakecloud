@@ -246,3 +246,308 @@ async fn event_sources_must_exist() {
         .to_string();
     create(&ddb_stream).await.unwrap();
 }
+
+fn error_code<E: aws_sdk_lambda::error::ProvideErrorMetadata>(
+    err: aws_sdk_lambda::error::SdkError<E>,
+) -> String {
+    aws_sdk_lambda::error::ProvideErrorMetadata::code(&err)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// An Amazon MSK mapping keeps its `AmazonManagedKafkaEventSourceConfig`
+/// (consumer group, schema registry), `ProvisionedPollerConfig` and
+/// `LoggingConfig` on every response; the consumer group defaults to the
+/// mapping's UUID and cannot be updated, the schema registry can.
+#[tokio::test]
+async fn msk_event_source_config_round_trips() {
+    use aws_sdk_lambda::types::{
+        AmazonManagedKafkaEventSourceConfig, EventSourceMappingLoggingConfig,
+        EventSourceMappingSystemLogLevel, KafkaSchemaRegistryAccessConfig,
+        KafkaSchemaRegistryAuthType, KafkaSchemaRegistryConfig, KafkaSchemaValidationAttribute,
+        KafkaSchemaValidationConfig, ProvisionedPollerConfig, SchemaRegistryEventRecordFormat,
+    };
+
+    let server = TestServer::start().await;
+    let lambda = server.lambda_client().await;
+    create_function(&lambda, "esm-msk-fn").await;
+    let cluster = "arn:aws:kafka:us-east-1:123456789012:cluster/orders/0b1c2d3e-1111-2222-3333-444455556666-1";
+
+    let registry = KafkaSchemaRegistryConfig::builder()
+        .schema_registry_uri("arn:aws:glue:us-east-1:123456789012:registry/orders")
+        .event_record_format(SchemaRegistryEventRecordFormat::Json)
+        .access_configs(
+            KafkaSchemaRegistryAccessConfig::builder()
+                .r#type(KafkaSchemaRegistryAuthType::BasicAuth)
+                .uri("arn:aws:secretsmanager:us-east-1:123456789012:secret:registry")
+                .build(),
+        )
+        .schema_validation_configs(
+            KafkaSchemaValidationConfig::builder()
+                .attribute(KafkaSchemaValidationAttribute::Value)
+                .build(),
+        )
+        .build();
+    let created = lambda
+        .create_event_source_mapping()
+        .function_name("esm-msk-fn")
+        .event_source_arn(cluster)
+        .topics("orders")
+        .starting_position(aws_sdk_lambda::types::EventSourcePosition::TrimHorizon)
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("orders-consumers")
+                .schema_registry_config(registry)
+                .build(),
+        )
+        .provisioned_poller_config(
+            ProvisionedPollerConfig::builder()
+                .maximum_pollers(50)
+                .build(),
+        )
+        .logging_config(
+            EventSourceMappingLoggingConfig::builder()
+                .system_log_level(EventSourceMappingSystemLogLevel::Info)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let uuid = created.uuid().unwrap().to_string();
+    assert_eq!(
+        created.event_source_mapping_arn(),
+        Some(format!("arn:aws:lambda:us-east-1:123456789012:event-source-mapping:{uuid}").as_str())
+    );
+
+    let got = lambda
+        .get_event_source_mapping()
+        .uuid(&uuid)
+        .send()
+        .await
+        .unwrap();
+    let kafka = got.amazon_managed_kafka_event_source_config().unwrap();
+    assert_eq!(kafka.consumer_group_id(), Some("orders-consumers"));
+    let got_registry = kafka.schema_registry_config().unwrap();
+    assert_eq!(
+        got_registry.schema_registry_uri(),
+        Some("arn:aws:glue:us-east-1:123456789012:registry/orders")
+    );
+    assert_eq!(
+        got_registry.event_record_format(),
+        Some(&SchemaRegistryEventRecordFormat::Json)
+    );
+    assert_eq!(got_registry.access_configs().len(), 1);
+    assert_eq!(
+        got_registry.schema_validation_configs()[0].attribute(),
+        Some(&KafkaSchemaValidationAttribute::Value)
+    );
+    let pollers = got.provisioned_poller_config().unwrap();
+    assert_eq!(pollers.maximum_pollers(), Some(50));
+    assert_eq!(pollers.minimum_pollers(), Some(1));
+    assert_eq!(
+        got.logging_config().unwrap().system_log_level(),
+        Some(&EventSourceMappingSystemLogLevel::Info)
+    );
+    let listed = lambda
+        .list_event_source_mappings()
+        .function_name("esm-msk-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.event_source_mappings()[0]
+            .amazon_managed_kafka_event_source_config()
+            .and_then(|c| c.consumer_group_id()),
+        Some("orders-consumers")
+    );
+
+    // The consumer group is fixed at creation.
+    let err = lambda
+        .update_event_source_mapping()
+        .uuid(&uuid)
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("other-group")
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("ConsumerGroupId was updated");
+    assert_eq!(error_code(err), "InvalidParameterValueException");
+
+    // The schema registry is not.
+    let updated = lambda
+        .update_event_source_mapping()
+        .uuid(&uuid)
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .schema_registry_config(
+                    KafkaSchemaRegistryConfig::builder()
+                        .schema_registry_uri("https://registry.example.com:8081")
+                        .event_record_format(SchemaRegistryEventRecordFormat::Source)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let kafka = updated.amazon_managed_kafka_event_source_config().unwrap();
+    assert_eq!(kafka.consumer_group_id(), Some("orders-consumers"));
+    assert_eq!(
+        kafka
+            .schema_registry_config()
+            .unwrap()
+            .schema_registry_uri(),
+        Some("https://registry.example.com:8081")
+    );
+
+    // An empty ProvisionedPollerConfig returns the mapping to on-demand mode.
+    let updated = lambda
+        .update_event_source_mapping()
+        .uuid(&uuid)
+        .provisioned_poller_config(ProvisionedPollerConfig::builder().build())
+        .send()
+        .await
+        .unwrap();
+    assert!(updated.provisioned_poller_config().is_none());
+
+    let deleted = lambda
+        .delete_event_source_mapping()
+        .uuid(&uuid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted
+            .amazon_managed_kafka_event_source_config()
+            .and_then(|c| c.consumer_group_id()),
+        Some("orders-consumers")
+    );
+
+    // Without one, the consumer group is the mapping's UUID.
+    let defaulted = lambda
+        .create_event_source_mapping()
+        .function_name("esm-msk-fn")
+        .event_source_arn(cluster)
+        .topics("payments")
+        .starting_position(aws_sdk_lambda::types::EventSourcePosition::Latest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        defaulted
+            .amazon_managed_kafka_event_source_config()
+            .and_then(|c| c.consumer_group_id()),
+        defaulted.uuid()
+    );
+
+    // A malformed consumer group, and a Kafka config on an SQS mapping, are refused.
+    let err = lambda
+        .create_event_source_mapping()
+        .function_name("esm-msk-fn")
+        .event_source_arn(cluster)
+        .topics("orders")
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("bad#group")
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("a malformed ConsumerGroupId was accepted");
+    assert_eq!(error_code(err), "InvalidParameterValueException");
+    let sqs = server.sqs_client().await;
+    let url = sqs
+        .create_queue()
+        .queue_name("esm-msk-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()[&aws_sdk_sqs::types::QueueAttributeName::QueueArn]
+        .clone();
+    let err = lambda
+        .create_event_source_mapping()
+        .function_name("esm-msk-fn")
+        .event_source_arn(&queue_arn)
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("g")
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("an MSK config was accepted on an SQS mapping");
+    assert_eq!(error_code(err), "InvalidParameterValueException");
+}
+
+/// An SQS mapping keeps its `ScalingConfig`; an empty one removes it.
+#[tokio::test]
+async fn sqs_scaling_config_round_trips() {
+    let server = TestServer::start().await;
+    let lambda = server.lambda_client().await;
+    create_function(&lambda, "esm-scaling-fn").await;
+    let sqs = server.sqs_client().await;
+    let url = sqs
+        .create_queue()
+        .queue_name("esm-scaling-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()[&aws_sdk_sqs::types::QueueAttributeName::QueueArn]
+        .clone();
+    let created = lambda
+        .create_event_source_mapping()
+        .function_name("esm-scaling-fn")
+        .event_source_arn(&queue_arn)
+        .scaling_config(
+            aws_sdk_lambda::types::ScalingConfig::builder()
+                .maximum_concurrency(10)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let uuid = created.uuid().unwrap().to_string();
+    assert!(created.amazon_managed_kafka_event_source_config().is_none());
+    let got = lambda
+        .get_event_source_mapping()
+        .uuid(&uuid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        got.scaling_config().and_then(|s| s.maximum_concurrency()),
+        Some(10)
+    );
+    let updated = lambda
+        .update_event_source_mapping()
+        .uuid(&uuid)
+        .scaling_config(aws_sdk_lambda::types::ScalingConfig::builder().build())
+        .send()
+        .await
+        .unwrap();
+    assert!(updated.scaling_config().is_none());
+}

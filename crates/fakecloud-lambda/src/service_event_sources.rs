@@ -24,6 +24,8 @@ impl LambdaService {
             &req.region,
             self.event_source_lookup.as_deref(),
         )?;
+        let mapping_uuid = uuid::Uuid::new_v4().to_string();
+        let source_configs = crate::esm_config::create_configs(&body, &mapping_uuid)?;
         let event_source_arn = body["EventSourceArn"]
             .as_str()
             .unwrap_or_default()
@@ -40,7 +42,6 @@ impl LambdaService {
 
         let batch_size = body["BatchSize"].as_i64().unwrap_or(10);
         let enabled = body["Enabled"].as_bool().unwrap_or(true);
-        let mapping_uuid = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
         let function_response_types: Vec<String> = body
@@ -137,14 +138,15 @@ impl LambdaService {
                 .get("SelfManagedEventSource")
                 .filter(|v| v.is_object())
                 .cloned(),
-            self_managed_kafka_event_source_config: body
-                .get("SelfManagedKafkaEventSourceConfig")
-                .filter(|v| v.is_object())
-                .cloned(),
+            self_managed_kafka_event_source_config: source_configs.self_managed_kafka,
+            amazon_managed_kafka_event_source_config: source_configs.amazon_managed_kafka,
             document_db_event_source_config: body
                 .get("DocumentDBEventSourceConfig")
                 .filter(|v| v.is_object())
                 .cloned(),
+            scaling_config: source_configs.scaling,
+            provisioned_poller_config: source_configs.provisioned_poller,
+            logging_config: source_configs.logging,
         };
 
         let response = self.event_source_mapping_json(&mapping);
@@ -265,12 +267,14 @@ impl LambdaService {
     }
 
     pub(crate) fn event_source_mapping_json(&self, mapping: &EventSourceMapping) -> Value {
-        // EventSourceMappingArn is the EventSourceArn variant prefixed with
-        // the mapping uuid; AWS started returning it in 2024 so newer SDKs
-        // expect to round-trip it.
+        // `arn:<partition>:lambda:<region>:<account>:event-source-mapping:<uuid>`
+        // (the `EventSourceMappingArn` pattern), in the partition, region
+        // and account of the function the mapping invokes, which are its own.
+        let arn_head: Vec<&str> = mapping.function_arn.splitn(6, ':').take(5).collect();
         let esm_arn = format!(
-            "{}:event-source-mapping/{}",
-            mapping.function_arn, mapping.uuid
+            "{}:event-source-mapping:{}",
+            arn_head.join(":"),
+            mapping.uuid
         );
         let mut out = json!({
             "UUID": mapping.uuid,
@@ -334,9 +338,7 @@ impl LambdaService {
         if let Some(ref src) = mapping.self_managed_event_source {
             obj.insert("SelfManagedEventSource".into(), src.clone());
         }
-        if let Some(ref cfg) = mapping.self_managed_kafka_event_source_config {
-            obj.insert("SelfManagedKafkaEventSourceConfig".into(), cfg.clone());
-        }
+        crate::esm_config::render(mapping, obj);
         if let Some(ref cfg) = mapping.document_db_event_source_config {
             obj.insert("DocumentDBEventSourceConfig".into(), cfg.clone());
         }

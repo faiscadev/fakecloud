@@ -600,6 +600,9 @@ impl ResourceProvisioner {
         )
         .map_err(|e| lambda_handler_error(&e))?;
         let cfg = parse_lambda_event_source_mapping_props(props)?;
+        let uuid = Uuid::new_v4().to_string();
+        let source_configs = fakecloud_lambda::esm_config::create_configs(props, &uuid)
+            .map_err(|e| lambda_handler_error(&e))?;
 
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
@@ -615,7 +618,6 @@ impl ResourceProvisioner {
             Some(arn) if arn.starts_with("arn:") => arn.to_string(),
             _ => fakecloud_lambda::function_arn(&self.region, &self.account_id, &function_name),
         };
-        let uuid = Uuid::new_v4().to_string();
         let esm = EventSourceMapping {
             uuid: uuid.clone(),
             function_arn,
@@ -645,8 +647,12 @@ impl ResourceProvisioner {
             queues: cfg.queues,
             source_access_configurations: cfg.source_access_configurations,
             self_managed_event_source: cfg.self_managed_event_source,
-            self_managed_kafka_event_source_config: cfg.self_managed_kafka_event_source_config,
+            self_managed_kafka_event_source_config: source_configs.self_managed_kafka,
+            amazon_managed_kafka_event_source_config: source_configs.amazon_managed_kafka,
             document_db_event_source_config: cfg.document_db_event_source_config,
+            scaling_config: source_configs.scaling,
+            provisioned_poller_config: source_configs.provisioned_poller,
+            logging_config: source_configs.logging,
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))
@@ -672,6 +678,19 @@ impl ResourceProvisioner {
                     existing.physical_id
                 )
             })?;
+        // A setting the template no longer declares is removed, which the
+        // Lambda API spells as an empty structure. The Kafka configs keep
+        // their fixed-at-creation consumer group either way.
+        let mut settings = resource.properties.clone();
+        if let Some(obj) = settings.as_object_mut() {
+            for key in ["ScalingConfig", "ProvisionedPollerConfig", "LoggingConfig"] {
+                obj.entry(key)
+                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            }
+        }
+        fakecloud_lambda::event_source::validate_settings(&settings)
+            .and_then(|()| fakecloud_lambda::esm_config::apply_update(esm, &settings))
+            .map_err(|e| lambda_handler_error(&e))?;
         esm.batch_size = cfg.batch_size;
         esm.enabled = cfg.enabled;
         esm.state = if cfg.enabled {

@@ -587,7 +587,11 @@ mod tests {
             source_access_configurations: Vec::new(),
             self_managed_event_source: None,
             self_managed_kafka_event_source_config: None,
+            amazon_managed_kafka_event_source_config: None,
             document_db_event_source_config: None,
+            scaling_config: None,
+            provisioned_poller_config: None,
+            logging_config: None,
         }
     }
 
