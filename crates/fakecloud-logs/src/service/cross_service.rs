@@ -17,6 +17,9 @@ use super::LogsService;
 /// The largest batch PutLogEvents takes.
 const MAX_BATCH_EVENTS: usize = 10_000;
 
+/// How long deliveries gather before one save persists them.
+const DELIVERY_SAVE_DELAY_MS: u64 = 200;
+
 fn internal_request(
     action: &str,
     account_id: &str,
@@ -51,10 +54,21 @@ impl LogsService {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        // One save covers a burst of deliveries (a map run's children, an
+        // API's requests).
+        if self
+            .delivery_save_pending
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
         let state = self.state.clone();
         let store = self.snapshot_store.clone();
         let lock = self.snapshot_lock.clone();
+        let pending = self.delivery_save_pending.clone();
         handle.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(DELIVERY_SAVE_DELAY_MS)).await;
+            pending.store(false, std::sync::atomic::Ordering::Release);
             if let Err(error) = super::save_logs_state(&state, store, &lock).await {
                 tracing::error!(%error, "failed to persist Logs state");
             }

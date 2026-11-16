@@ -14,7 +14,6 @@ impl StepFunctionsService {
         validate_required("name", &body["name"])?;
         let name = body["name"].as_str().ok_or_else(|| missing("name"))?;
         validate_name(name)?;
-        self.validate_log_destination(&body["loggingConfiguration"])?;
 
         validate_required("definition", &body["definition"])?;
         let definition = body["definition"]
@@ -70,6 +69,8 @@ impl StepFunctionsService {
             )?;
         }
 
+        // After the request's own checks, as AWS orders them.
+        self.validate_log_destination(&body["loggingConfiguration"])?;
         let sm = StateMachine {
             name: name.to_string(),
             arn: arn.clone(),
@@ -208,7 +209,6 @@ impl StepFunctionsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_required("stateMachineArn", &body["stateMachineArn"])?;
-        self.validate_log_destination(&body["loggingConfiguration"])?;
         let arn = body["stateMachineArn"]
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?;
@@ -220,6 +220,7 @@ impl StepFunctionsService {
             .state_machines
             .get_mut(arn)
             .ok_or_else(|| state_machine_not_found(arn))?;
+        self.validate_log_destination(&body["loggingConfiguration"])?;
 
         if let Some(definition) = body["definition"].as_str() {
             validate_definition(definition)?;

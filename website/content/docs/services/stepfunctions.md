@@ -26,7 +26,7 @@ fakecloud implements **37 of 37** Step Functions operations at 100% Smithy confo
 - **Variables**: `Assign` in JSONPath and JSONata states, on states, Choice rules and catchers. Parallel branches and Map iterations have their own scope and read outer ones, except a distributed Map's iterations, which cannot; an inner scope can't assign a name an outer scope assigns. References read the values from state entry.
 - **Parallel state** — concurrent branch execution
 - **Activities** — real worker pool. A `Task` state with an activity ARN inserts a pending task; `GetActivityTask` long-polls (up to `FAKECLOUD_SFN_GET_ACTIVITY_TIMEOUT_SECS`, default 5s) for the next pending task; `SendTaskSuccess` / `SendTaskFailure` resolve the workflow. `HeartbeatSeconds` and `TimeoutSeconds` are enforced, and tasks dispatched past their timeout are reaped automatically.
-- **Execution logging** — a state machine's `LoggingConfiguration` delivers its executions' history to the CloudWatch Logs group, in AWS's format:
+- **Execution logging**: a state machine's `LoggingConfiguration` delivers its executions' history to the CloudWatch Logs group, in AWS's format:
   - Each event is one JSON line, with `details` and string `id`, `type`, `previous_event_id`, `event_timestamp` and `execution_arn`.
   - Input and output appear only with `includeExecutionData`.
   - `ALL` logs every event, `ERROR` failures, aborts and timeouts, `FATAL` only the execution's own end.

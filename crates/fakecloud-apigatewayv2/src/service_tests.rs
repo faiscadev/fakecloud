@@ -2604,6 +2604,55 @@ async fn execute_api_emits_access_log_when_configured() {
     assert!(log_line.contains("\"status\":\"200\""));
 }
 
+/// Access logs go to the log group the destination ARN names, in its own
+/// account, its trailing `:*` aside.
+#[tokio::test]
+async fn execute_api_access_log_goes_where_its_destination_says() {
+    let mock = Arc::new(MockCloudwatchLogsDelivery::default());
+    let svc = make_svc_with_access_logs(mock.clone());
+    let api_id = create_api(&svc);
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "accessLogSettings": {
+            "destinationArn": "arn:aws:logs:us-west-2:210987654321:log-group:/central/access:*",
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::GET, "/prod/pets", "");
+    svc.handle(req).await.unwrap();
+
+    let events = mock.events.lock();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, "210987654321");
+    assert_eq!(events[0].1, "/central/access");
+}
+
 #[tokio::test]
 async fn execute_api_no_access_log_when_not_configured() {
     let mock = Arc::new(MockCloudwatchLogsDelivery::default());

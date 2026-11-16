@@ -2144,7 +2144,7 @@ fn logged_at_level(level: &str, event_type: &str) -> bool {
 }
 
 /// One event's log line, its keys in the recorded order.
-fn log_message(
+pub(crate) fn log_message(
     exec: &crate::state::Execution,
     ev: &crate::state::HistoryEvent,
     include_data: bool,
@@ -2157,6 +2157,10 @@ fn log_message(
     // As recorded, a map run's start is logged without its ARN.
     if ev.event_type == "MapRunStarted" {
         details.remove("mapRunArn");
+    }
+    // Without execution data a Task's parameters go too, as recorded.
+    if !include_data {
+        details.remove("parameters");
     }
     for (field, detail) in [("input", "inputDetails"), ("output", "outputDetails")] {
         if !include_data {
