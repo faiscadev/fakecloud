@@ -506,10 +506,13 @@ fn migrate_s3_sidecars(
 ) -> io::Result<()> {
     for path in read_dir_sorted(dir)? {
         let result = if path.is_dir() {
-            // `s3/buckets/<bucket>/{objects,mpu}`: only that level names the
-            // object trees (a bucket may itself be called `objects`).
+            // `s3/buckets/<bucket>/{objects,mpu}`, or
+            // `s3/accounts/<account>/buckets/<bucket>/{objects,mpu}` in the
+            // per-account layout: only that level names the object trees (a
+            // bucket may itself be called `objects`).
+            let objects_depth = if under_accounts(dir, depth) { 5 } else { 3 };
             let objects = in_objects
-                || (depth + 1 == 3
+                || (depth + 1 == objects_depth
                     && path
                         .file_name()
                         .is_some_and(|n| n == "objects" || n == "mpu"));
@@ -522,6 +525,14 @@ fn migrate_s3_sidecars(
         skip_unreadable(result, &path, report)?;
     }
     Ok(())
+}
+
+/// Whether `dir`, `depth` levels below the `s3` directory, lies in the
+/// per-account layout (`s3/accounts/...`).
+fn under_accounts(dir: &Path, depth: usize) -> bool {
+    dir.ancestors()
+        .nth(depth.saturating_sub(1))
+        .is_some_and(|top| depth > 0 && top.file_name().is_some_and(|n| n == "accounts"))
 }
 
 fn migrate_s3_sidecar(

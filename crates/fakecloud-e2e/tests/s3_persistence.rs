@@ -1342,7 +1342,10 @@ async fn persistence_plain_create_clears_orphan_create_time_subresources() {
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let _client = server.s3_client().await;
 
-    let orphan_dir = tmp.path().join("s3").join("buckets").join("orphan-subres");
+    let orphan_dir = tmp
+        .path()
+        .join("s3/accounts/123456789012/buckets")
+        .join("orphan-subres");
     std::fs::create_dir_all(&orphan_dir).unwrap();
     std::fs::write(
         orphan_dir.join("ownership.toml"),
@@ -1525,7 +1528,10 @@ async fn persistence_untagged_create_clears_an_orphan_tag_file() {
     let client = server.s3_client().await;
 
     // Simulate the half-written create: a bucket directory holding only tags.
-    let orphan_dir = tmp.path().join("s3").join("buckets").join("orphan-tags");
+    let orphan_dir = tmp
+        .path()
+        .join("s3/accounts/123456789012/buckets")
+        .join("orphan-tags");
     std::fs::create_dir_all(&orphan_dir).unwrap();
     std::fs::write(orphan_dir.join("tags.toml"), "[tags]\nteam = \"ghost\"\n").unwrap();
 
@@ -1678,7 +1684,10 @@ async fn persistence_create_over_a_leftover_bucket_dir_starts_clean() {
     let tmp = tempfile::tempdir().unwrap();
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let client = server.s3_client().await;
-    let bucket_dir = tmp.path().join("s3").join("buckets").join("leftover");
+    let bucket_dir = tmp
+        .path()
+        .join("s3/accounts/123456789012/buckets")
+        .join("leftover");
     let saved = tmp.path().join("saved-leftover");
 
     client
@@ -1788,8 +1797,7 @@ async fn persistence_recreating_a_load_refused_bucket_is_declined_not_destructiv
 
     let objects_dir = tmp
         .path()
-        .join("s3")
-        .join("buckets")
+        .join("s3/accounts/123456789012/buckets")
         .join("refused")
         .join("objects");
     let corrupt = objects_dir.join("corrupt.txt").join("null.toml");
@@ -1904,7 +1912,10 @@ async fn persistence_a_bucket_skipped_for_a_corrupt_sidecar_is_refused_not_clear
         .await
         .unwrap();
 
-    let bucket_dir = tmp.path().join("s3").join("buckets").join("sidecar");
+    let bucket_dir = tmp
+        .path()
+        .join("s3/accounts/123456789012/buckets")
+        .join("sidecar");
     let tags = bucket_dir.join("tags.toml");
     assert!(tags.exists(), "expected {tags:?}");
     std::fs::write(&tags, "not valid toml = = =").unwrap();
@@ -1976,7 +1987,10 @@ async fn persistence_removing_a_refused_directory_frees_the_name_without_a_resta
         .send()
         .await
         .unwrap();
-    let bucket_dir = tmp.path().join("s3").join("buckets").join("gone");
+    let bucket_dir = tmp
+        .path()
+        .join("s3/accounts/123456789012/buckets")
+        .join("gone");
     std::fs::write(
         bucket_dir.join("objects").join("k.txt").join("null.toml"),
         "not valid toml = = =",

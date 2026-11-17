@@ -494,7 +494,7 @@ impl S3Service {
         // orphaned in-memory upload.
         let init_snapshot = mpu_init_snapshot(&upload);
         self.store
-            .mpu_create(bucket, &upload_id, &init_snapshot)
+            .mpu_create(account_id, bucket, &upload_id, &init_snapshot)
             .map_err(super::persistence_error)?;
         b.multipart_uploads.insert(upload_id.clone(), upload);
 
@@ -623,6 +623,7 @@ impl S3Service {
         let body_ref = self
             .store
             .mpu_put_part(
+                account_id,
                 bucket,
                 upload_id,
                 pn,
@@ -905,6 +906,7 @@ impl S3Service {
         let body_ref = self
             .store
             .mpu_put_part(
+                account_id,
                 bucket,
                 upload_id,
                 part_number as u32,
@@ -1354,13 +1356,14 @@ impl S3Service {
                         // durable, so a failed cleanup only leaves part
                         // files behind and is not reported as a failed write.
                         let body = store.put_object(
+                            account_id,
                             bucket,
                             &obj.key,
                             meta.version_id.as_deref(),
                             BodySource::Bytes(cipher),
                             meta,
                         )?;
-                        if let Err(err) = store.mpu_abort(bucket, upload_id) {
+                        if let Err(err) = store.mpu_abort(account_id, bucket, upload_id) {
                             tracing::warn!(
                                 bucket,
                                 upload_id,
@@ -1371,6 +1374,7 @@ impl S3Service {
                         return Ok(body);
                     }
                     let assembled = store.mpu_complete(
+                        account_id,
                         bucket,
                         upload_id,
                         &obj.key,
@@ -1475,7 +1479,7 @@ impl S3Service {
         }
         // Store-first for consistency with other MPU ops.
         self.store
-            .mpu_abort(bucket, upload_id)
+            .mpu_abort(account_id, bucket, upload_id)
             .map_err(super::persistence_error)?;
         b.multipart_uploads.remove(upload_id);
 

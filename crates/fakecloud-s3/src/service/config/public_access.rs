@@ -50,7 +50,12 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.public_access_block = Some(body_str.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::PublicAccessBlock, &body_str)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::PublicAccessBlock,
+                &body_str,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -108,7 +113,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.public_access_block = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::PublicAccessBlock)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::PublicAccessBlock)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }

@@ -35,18 +35,18 @@ impl S3Service {
             b.lifecycle_config = Some(body_str.clone());
             b.lifecycle_transition_default_min_size = tdmos.clone();
             self.store
-                .put_bucket_subresource(bucket, BucketSubresource::Lifecycle, &body_str)
+                .put_bucket_subresource(account_id, bucket, BucketSubresource::Lifecycle, &body_str)
                 .map_err(crate::service::persistence_error)?;
         } else {
             b.lifecycle_config = None;
             b.lifecycle_transition_default_min_size = None;
             self.store
-                .delete_bucket_subresource(bucket, BucketSubresource::Lifecycle)
+                .delete_bucket_subresource(account_id, bucket, BucketSubresource::Lifecycle)
                 .map_err(crate::service::persistence_error)?;
         }
-        let meta = bucket_meta_snapshot(b);
+        let meta = bucket_meta_snapshot(account_id, b);
         self.store
-            .put_bucket_meta(bucket, &meta)
+            .put_bucket_meta(account_id, bucket, &meta)
             .map_err(crate::service::persistence_error)?;
         let mut resp = empty_response(StatusCode::OK);
         insert_tdmos_header(&mut resp.headers, tdmos.as_deref());
@@ -96,7 +96,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.lifecycle_config = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Lifecycle)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Lifecycle)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }

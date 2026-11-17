@@ -519,11 +519,13 @@ impl ResetState {
     fn reset_s3(&self, account: Option<&str>, teardown: &mut Teardown) {
         let detached: Vec<PathBuf> = {
             let mut mas = self.s3.write();
-            let buckets: Vec<String> = match account {
+            let buckets_by_account: Vec<(String, String)> = match account {
                 None => {
-                    let buckets = mas
+                    let buckets: Vec<(String, String)> = mas
                         .iter()
-                        .flat_map(|(_, s)| s.buckets.keys().cloned())
+                        .flat_map(|(aid, s)| {
+                            s.buckets.keys().map(move |b| (aid.to_string(), b.clone()))
+                        })
                         .collect();
                     // The recreated default account must keep the shared
                     // runtime wiring (body cache, write side effects) the
@@ -542,7 +544,11 @@ impl ResetState {
                 }
                 Some(account) => match mas.get_mut(account) {
                     Some(state) => {
-                        let buckets = state.buckets.keys().cloned().collect();
+                        let buckets = state
+                            .buckets
+                            .keys()
+                            .map(|b| (account.to_string(), b.clone()))
+                            .collect();
                         state.reset();
                         buckets
                     }
@@ -552,12 +558,12 @@ impl ResetState {
             let Some(store) = self.late().s3_store.as_ref() else {
                 return;
             };
-            buckets
+            buckets_by_account
                 .iter()
-                .filter_map(|bucket| match store.detach_bucket(bucket) {
+                .filter_map(|(aid, bucket)| match store.detach_bucket(aid, bucket) {
                     Ok(path) => path,
                     Err(err) => {
-                        tracing::error!(%bucket, %err, "reset could not remove the bucket from disk");
+                        tracing::error!(account = %aid, %bucket, %err, "reset could not remove the bucket from disk");
                         None
                     }
                 })
@@ -1406,6 +1412,8 @@ mod tests {
     #[tokio::test]
     async fn reset_deletes_s3_buckets_before_returning() {
         use fakecloud_persistence::S3Store;
+        const KEPT_ACCOUNT: &str = "123456789012";
+        const GONE_ACCOUNT: &str = "222222222222";
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(fakecloud_persistence::s3::DiskS3Store::new(
             tmp.path().to_path_buf(),
@@ -1415,12 +1423,12 @@ mod tests {
             name: "b".into(),
             ..Default::default()
         };
-        store.put_bucket_meta("kept", &meta).unwrap();
-        store.put_bucket_meta("gone", &meta).unwrap();
+        store.put_bucket_meta(KEPT_ACCOUNT, "kept", &meta).unwrap();
+        store.put_bucket_meta(GONE_ACCOUNT, "gone", &meta).unwrap();
         let state = test_state();
         {
             let mut s3 = state.s3.write();
-            for (account, bucket) in [("123456789012", "kept"), ("222222222222", "gone")] {
+            for (account, bucket) in [(KEPT_ACCOUNT, "kept"), (GONE_ACCOUNT, "gone")] {
                 s3.get_or_create(account).buckets.insert(
                     bucket.to_string(),
                     fakecloud_s3::S3Bucket::new(bucket, "us-east-1", account),
@@ -1433,20 +1441,18 @@ mod tests {
         };
         assert!(state.late.set(late).is_ok());
 
-        let teardown = state
-            .reset_service_for_account("s3", "222222222222")
-            .unwrap();
+        let teardown = state.reset_service_for_account("s3", GONE_ACCOUNT).unwrap();
         // Deleted by the time the reset returns, not by a deferred task...
-        assert!(store.bucket_state_exists("kept"));
-        assert!(!store.bucket_state_exists("gone"));
+        assert!(store.bucket_state_exists(KEPT_ACCOUNT, "kept"));
+        assert!(!store.bucket_state_exists(GONE_ACCOUNT, "gone"));
         // ...so a bucket recreated under the reset name right after the reset
         // keeps its directory when the teardown runs.
-        store.put_bucket_meta("gone", &meta).unwrap();
+        store.put_bucket_meta(GONE_ACCOUNT, "gone", &meta).unwrap();
         teardown.run().await;
-        assert!(store.bucket_state_exists("gone"));
+        assert!(store.bucket_state_exists(GONE_ACCOUNT, "gone"));
 
         let (_, teardown) = state.reset();
-        assert!(!store.bucket_state_exists("kept"));
+        assert!(!store.bucket_state_exists(KEPT_ACCOUNT, "kept"));
         teardown.run().await;
         assert!(state.s3.read().default_ref().buckets.is_empty());
     }

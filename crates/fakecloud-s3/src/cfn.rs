@@ -51,12 +51,17 @@ impl StagedWrites {
         self.subresources.push((kind, Some(payload)));
     }
 
-    fn persist(&self, store: &Arc<dyn S3Store>, bucket: &str) -> Result<(), String> {
+    fn persist(
+        &self,
+        store: &Arc<dyn S3Store>,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<(), String> {
         for (kind, payload) in &self.subresources {
             match payload {
-                Some(body) => persist_sub(store, bucket, *kind, body)?,
+                Some(body) => persist_sub(store, account_id, bucket, *kind, body)?,
                 None => store
-                    .delete_bucket_subresource(bucket, *kind)
+                    .delete_bucket_subresource(account_id, bucket, *kind)
                     .map_err(|e| persist_err(&format!("{kind:?}"), bucket, e))?,
             }
         }
@@ -79,6 +84,7 @@ pub fn apply_cfn_new_bucket(
     bucket: &mut S3Bucket,
     props: &Value,
     store: &Arc<dyn S3Store>,
+    account_id: &str,
 ) -> Result<(), String> {
     bucket.apply_new_bucket_defaults();
     let staged = stage_cfn_bucket_properties(bucket, props)?;
@@ -86,8 +92,16 @@ pub fn apply_cfn_new_bucket(
     // Same rules as CreateBucket for a name whose directory outlived its
     // bucket: data the loader refused is never cleared by a create, and any
     // other leftover (after a reset, or a create or delete that stopped
-    // partway) is cleared so the new bucket does not inherit it.
-    if store.bucket_load_refused(&name) && store.bucket_state_exists(&name) {
+    // partway) is cleared so the new bucket does not inherit it -- under
+    // every account holding the name, since names are global.
+    // The refusal comes from what the load recorded; the store is only read
+    // for a refused account's directory, and listed once the create goes
+    // ahead.
+    if store
+        .load_refused_accounts(&name)
+        .iter()
+        .any(|owner| store.bucket_state_exists(owner, &name))
+    {
         return Err(format!(
             "The requested bucket name is not available: {name} holds persisted data that \
              could not be read at load. Repair it in the data path and restart, or remove the \
@@ -95,23 +109,23 @@ pub fn apply_cfn_new_bucket(
              BucketAlreadyExists)"
         ));
     }
-    if store.bucket_state_exists(&name) {
+    for owner in &store.bucket_state_accounts(&name) {
         store
-            .delete_bucket(&name)
+            .delete_bucket(owner, &name)
             .map_err(|e| persist_err("leftover state", &name, e))?;
     }
-    if store.bucket_load_refused(&name) {
+    for owner in store.load_refused_accounts(&name) {
         store
-            .clear_bucket_load_refusal(&name)
+            .clear_bucket_load_refusal(&owner, &name)
             .map_err(|e| persist_err("load refusal", &name, e))?;
     }
     let written = (|| {
         store
-            .put_bucket_meta(&name, &bucket_meta_snapshot(bucket))
+            .put_bucket_meta(account_id, &name, &bucket_meta_snapshot(account_id, bucket))
             .map_err(|e| persist_err("meta", &name, e))?;
         for (kind, payload) in bucket.new_bucket_settings() {
             if let Some(body) = payload {
-                persist_sub(store, &name, kind, body)?;
+                persist_sub(store, account_id, &name, kind, body)?;
             }
         }
         // The create-time settings were just written from the bucket's final
@@ -130,10 +144,10 @@ pub fn apply_cfn_new_bucket(
                 .collect(),
             meta_dirty: false,
         };
-        rest.persist(store, &name)
+        rest.persist(store, account_id, &name)
     })();
     if let Err(e) = written {
-        if let Err(cleanup) = store.delete_bucket(&name) {
+        if let Err(cleanup) = store.delete_bucket(account_id, &name) {
             tracing::warn!(
                 bucket = %name,
                 error = %cleanup,
@@ -207,13 +221,14 @@ pub fn apply_cfn_bucket_properties(
     bucket: &mut S3Bucket,
     props: &Value,
     store: &Arc<dyn S3Store>,
+    account_id: &str,
 ) -> Result<(), String> {
     let staged = stage_cfn_bucket_properties(bucket, props)?;
-    staged.persist(store, &bucket.name)?;
+    staged.persist(store, account_id, &bucket.name)?;
     if staged.meta_dirty {
-        let meta = bucket_meta_snapshot(bucket);
+        let meta = bucket_meta_snapshot(account_id, bucket);
         store
-            .put_bucket_meta(&bucket.name, &meta)
+            .put_bucket_meta(account_id, &bucket.name, &meta)
             .map_err(|e| persist_err("meta", &bucket.name, e))?;
     }
     Ok(())
@@ -472,12 +487,13 @@ fn stage_cfn_bucket_properties(
 
 fn persist_sub(
     store: &Arc<dyn S3Store>,
+    account_id: &str,
     bucket: &str,
     kind: BucketSubresource,
     body: &str,
 ) -> Result<(), String> {
     store
-        .put_bucket_subresource(bucket, kind, body)
+        .put_bucket_subresource(account_id, bucket, kind, body)
         .map_err(|e| persist_err(&format!("{kind:?}"), bucket, e))
 }
 
@@ -1102,11 +1118,14 @@ mod tests {
     impl S3Store for RecordingStore {
         fn load(
             &self,
-        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::S3StateSnapshot> {
+        ) -> fakecloud_persistence::StoreResult<
+            std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>,
+        > {
             fakecloud_persistence::MemoryS3Store.load()
         }
         fn put_bucket_meta(
             &self,
+            _account_id: &str,
             bucket: &str,
             _meta: &fakecloud_persistence::BucketMeta,
         ) -> fakecloud_persistence::StoreResult<()> {
@@ -1115,6 +1134,7 @@ mod tests {
         }
         fn put_bucket_subresource(
             &self,
+            _account_id: &str,
             bucket: &str,
             kind: BucketSubresource,
             _payload: &str,
@@ -1127,18 +1147,24 @@ mod tests {
         }
         fn delete_bucket_subresource(
             &self,
+            _account_id: &str,
             bucket: &str,
             kind: BucketSubresource,
         ) -> fakecloud_persistence::StoreResult<()> {
             self.calls.lock().push(format!("delete {bucket} {kind:?}"));
             Ok(())
         }
-        fn delete_bucket(&self, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+        fn delete_bucket(
+            &self,
+            _account_id: &str,
+            bucket: &str,
+        ) -> fakecloud_persistence::StoreResult<()> {
             self.calls.lock().push(format!("delete-bucket {bucket}"));
             Ok(())
         }
         fn put_object(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _key: &str,
             _version: Option<&str>,
@@ -1149,6 +1175,7 @@ mod tests {
         }
         fn replace_object_body(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _key: &str,
             _version: Option<&str>,
@@ -1159,6 +1186,7 @@ mod tests {
         }
         fn put_object_meta(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _key: &str,
             _version: Option<&str>,
@@ -1168,6 +1196,7 @@ mod tests {
         }
         fn delete_object(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _key: &str,
             _version: Option<&str>,
@@ -1182,6 +1211,7 @@ mod tests {
         }
         fn mpu_create(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _upload_id: &str,
             _init: &fakecloud_persistence::MpuInit,
@@ -1190,6 +1220,7 @@ mod tests {
         }
         fn mpu_put_part(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _upload_id: &str,
             _part_number: u32,
@@ -1201,6 +1232,7 @@ mod tests {
         }
         fn mpu_abort(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _upload_id: &str,
         ) -> fakecloud_persistence::StoreResult<()> {
@@ -1208,6 +1240,7 @@ mod tests {
         }
         fn mpu_complete(
             &self,
+            _account_id: &str,
             _bucket: &str,
             _upload_id: &str,
             _final_key: &str,
@@ -1227,6 +1260,7 @@ mod tests {
             &mut b,
             &json!({ "Tags": [{ "Key": "k", "Value": "v" }] }),
             &store,
+            "123456789012",
         )
         .unwrap();
         let calls = rec.calls();
@@ -1258,6 +1292,7 @@ mod tests {
             &mut b,
             &json!({ "Tags": [{ "Key": "k", "Value": "v" }] }),
             &store,
+            "123456789012",
         )
         .unwrap_err();
         assert!(err.contains("disk full"), "{err}");
@@ -1281,6 +1316,7 @@ mod tests {
             &mut b,
             &json!({ "AccessControl": "LogDeliveryWrite" }),
             &store,
+            "123456789012",
         )
         .unwrap_err();
         assert!(rec.calls().is_empty(), "{:?}", rec.calls());
@@ -1303,6 +1339,7 @@ mod tests {
                     "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] }
                 }),
                 &store,
+                "123456789012",
             )
             .unwrap();
             assert_eq!(
@@ -1327,8 +1364,8 @@ mod tests {
         let unchanged = json!({
             "OwnershipControls": { "Rules": [{ "ObjectOwnership": "BucketOwnerEnforced" }] }
         });
-        apply_cfn_bucket_properties(&mut b, &unchanged, &store()).unwrap();
-        apply_cfn_bucket_properties(&mut b, &json!({}), &store()).unwrap();
+        apply_cfn_bucket_properties(&mut b, &unchanged, &store(), "123456789012").unwrap();
+        apply_cfn_bucket_properties(&mut b, &json!({}), &store(), "123456789012").unwrap();
 
         // Changing to BucketOwnerEnforced over such an ACL is refused.
         let mut b = bucket();
@@ -1338,7 +1375,8 @@ mod tests {
             "log-delivery-write",
             "123456789012",
         ));
-        let err = apply_cfn_bucket_properties(&mut b, &unchanged, &store()).unwrap_err();
+        let err =
+            apply_cfn_bucket_properties(&mut b, &unchanged, &store(), "123456789012").unwrap_err();
         assert!(err.contains("InvalidBucketAclWithObjectOwnership"), "{err}");
     }
 
@@ -1350,6 +1388,7 @@ mod tests {
                 &mut b,
                 &json!({ "PublicAccessBlockConfiguration": pab }),
                 &store(),
+                "123456789012",
             )
             .unwrap();
             let xml = b.public_access_block.unwrap();
@@ -1381,6 +1420,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap_err();
         assert!(err.starts_with("MalformedXML:"), "{err}");
@@ -1389,7 +1429,7 @@ mod tests {
     #[test]
     fn new_cfn_bucket_gets_the_create_bucket_defaults() {
         let mut b = bucket();
-        apply_cfn_new_bucket(&mut b, &json!({}), &store()).unwrap();
+        apply_cfn_new_bucket(&mut b, &json!({}), &store(), "123456789012").unwrap();
         assert!(crate::service::config::ownership_xml_enforced(
             b.ownership_controls.as_deref()
         ));
@@ -1412,6 +1452,7 @@ mod tests {
             &mut b,
             &json!({ "AccessControl": "LogDeliveryWrite" }),
             &store(),
+            "123456789012",
         )
         .unwrap_err();
         assert!(err.contains("InvalidBucketAclWithObjectOwnership"), "{err}");
@@ -1425,6 +1466,7 @@ mod tests {
                 "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         assert!(b
@@ -1446,6 +1488,7 @@ mod tests {
                 "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap_err();
         assert!(
@@ -1464,6 +1507,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         assert!(crate::service::config::grants_are_public(&b.acl_grants));
@@ -1474,7 +1518,7 @@ mod tests {
         let public = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::b/*"}]}"#;
         let scoped = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},"Action":"s3:PutObject","Resource":"arn:aws:s3:::b/*"}]}"#;
         let mut b = bucket();
-        apply_cfn_new_bucket(&mut b, &json!({}), &store()).unwrap();
+        apply_cfn_new_bucket(&mut b, &json!({}), &store(), "123456789012").unwrap();
         assert!(bucket_policy_blocked(&b, public));
         assert!(!bucket_policy_blocked(&b, scoped));
         let mut open = bucket();
@@ -1482,6 +1526,7 @@ mod tests {
             &mut open,
             &json!({ "PublicAccessBlockConfiguration": { "BlockPublicPolicy": false } }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         assert!(!bucket_policy_blocked(&open, public));
@@ -1501,6 +1546,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.encryption_config.unwrap();
@@ -1515,6 +1561,7 @@ mod tests {
             &mut b,
             &json!({ "VersioningConfiguration": { "Status": "Enabled" } }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         assert_eq!(b.versioning.as_deref(), Some("Enabled"));
@@ -1527,6 +1574,7 @@ mod tests {
             &mut b,
             &json!({ "VersioningConfiguration": { "Status": "Bogus" } }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         assert!(b.versioning.is_none());
@@ -1549,6 +1597,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.encryption_config.unwrap();
@@ -1575,6 +1624,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.encryption_config.unwrap();
@@ -1595,6 +1645,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.encryption_config.unwrap();
@@ -1617,6 +1668,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.public_access_block.unwrap();
@@ -1631,6 +1683,7 @@ mod tests {
             &mut b,
             &json!({ "PublicAccessBlockConfiguration": { "BlockPublicAcls": "true" } }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.public_access_block.unwrap();
@@ -1663,6 +1716,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.notification_config.clone().unwrap();
@@ -1695,7 +1749,7 @@ mod tests {
         apply_cfn_bucket_properties(
             &mut b,
             &json!({ "Tags": [{ "Key": "env", "Value": "prod" }, { "Key": "team", "Value": "core" }] }),
-            &store(),
+            &store(), "123456789012",
         )
         .unwrap();
         assert_eq!(b.tags.get("env").map(String::as_str), Some("prod"));
@@ -1708,7 +1762,7 @@ mod tests {
         apply_cfn_bucket_properties(
             &mut b,
             &json!({ "WebsiteConfiguration": { "IndexDocument": "index.html", "ErrorDocument": "error.html" } }),
-            &store(),
+            &store(), "123456789012",
         )
         .unwrap();
         let xml = b.website_config.unwrap();
@@ -1733,6 +1787,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.cors_config.unwrap();
@@ -1752,8 +1807,13 @@ mod tests {
         // property tolerates it, and failing the stack over one would be a
         // regression from "deploys with no CORS".
         let mut b = bucket();
-        apply_cfn_bucket_properties(&mut b, &json!({"CorsConfiguration": null}), &store())
-            .expect("an explicit null is treated as absent");
+        apply_cfn_bucket_properties(
+            &mut b,
+            &json!({"CorsConfiguration": null}),
+            &store(),
+            "123456789012",
+        )
+        .expect("an explicit null is treated as absent");
         assert!(b.cors_config.is_none());
 
         for bad in [
@@ -1762,9 +1822,13 @@ mod tests {
             json!("not-an-object"),
         ] {
             let mut b = bucket();
-            let err =
-                apply_cfn_bucket_properties(&mut b, &json!({ "CorsConfiguration": bad }), &store())
-                    .expect_err("a CorsRules type mismatch is a property error");
+            let err = apply_cfn_bucket_properties(
+                &mut b,
+                &json!({ "CorsConfiguration": bad }),
+                &store(),
+                "123456789012",
+            )
+            .expect_err("a CorsRules type mismatch is a property error");
             assert!(err.contains("Cors"), "{err}");
             assert!(b.cors_config.is_none());
         }
@@ -1788,6 +1852,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .expect_err("an out-of-range max-age is a property error");
         assert!(err.contains("MaxAge"), "{err}");
@@ -1808,6 +1873,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .expect("an integral float is a valid max-age");
         // `3600.0` would fail validation and take the whole bucket resource
@@ -1829,6 +1895,7 @@ mod tests {
                 "CorsConfiguration": {"CorsRules": [{"AllowedOrigins": ["*"]}]}
             }),
             &store(),
+            "123456789012",
         )
         .expect_err("a rule that can never match must not deploy");
         assert!(err.contains("MalformedXML"), "{err}");
@@ -1850,6 +1917,7 @@ mod tests {
                 }
             }),
             &store,
+            "123456789012",
         )
         .unwrap();
         assert!(b.cors_config.is_some());
@@ -1860,6 +1928,7 @@ mod tests {
             &mut b,
             &json!({"CorsConfiguration": {"CorsRules": []}}),
             &store,
+            "123456789012",
         )
         .unwrap();
         assert!(b.cors_config.is_none());
@@ -1874,9 +1943,10 @@ mod tests {
                 }
             }),
             &store,
+            "123456789012",
         )
         .unwrap();
-        apply_cfn_bucket_properties(&mut b, &json!({"Tags": []}), &store).unwrap();
+        apply_cfn_bucket_properties(&mut b, &json!({"Tags": []}), &store, "123456789012").unwrap();
         assert!(b.cors_config.is_some());
     }
 
@@ -1898,6 +1968,7 @@ mod tests {
                 }
             }),
             &store(),
+            "123456789012",
         )
         .unwrap();
         let xml = b.lifecycle_config.unwrap();
@@ -1917,7 +1988,7 @@ mod tests {
         apply_cfn_bucket_properties(
             &mut b,
             &json!({ "LoggingConfiguration": { "DestinationBucketName": "log-bkt", "LogFilePrefix": "s3/" } }),
-            &store(),
+            &store(), "123456789012",
         )
         .unwrap();
         let xml = b.logging_config.unwrap();
@@ -1928,7 +1999,13 @@ mod tests {
     #[test]
     fn absent_properties_are_noops() {
         let mut b = bucket();
-        apply_cfn_bucket_properties(&mut b, &json!({ "BucketName": "b" }), &store()).unwrap();
+        apply_cfn_bucket_properties(
+            &mut b,
+            &json!({ "BucketName": "b" }),
+            &store(),
+            "123456789012",
+        )
+        .unwrap();
         assert!(b.versioning.is_none());
         assert!(b.encryption_config.is_none());
         assert!(b.public_access_block.is_none());

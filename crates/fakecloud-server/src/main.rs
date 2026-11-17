@@ -2766,42 +2766,55 @@ async fn main() {
                 persistence_config.s3_cache_bytes,
             ));
             shared_body_cache = Some(cache.clone());
-            let disk = fakecloud_persistence::s3::DiskS3Store::new(s3_root, cache);
+            // Buckets of the flat pre-account layout belong to the default
+            // account unless their metadata names the account that created them.
+            let disk = fakecloud_persistence::s3::DiskS3Store::new(s3_root, cache)
+                .with_default_account(cli.account_id.clone());
             match <fakecloud_persistence::s3::DiskS3Store as fakecloud_persistence::S3Store>::load(
                 &disk,
             ) {
-                Ok(snapshot) => {
-                    let bucket_count = snapshot.buckets.len();
-                    let object_count: usize =
-                        snapshot.buckets.values().map(|b| b.objects.len()).sum();
-                    // Report each bucket the sidecar layer cannot read into the
-                    // store's refusal set. Its objects loaded fine, so nothing
-                    // below this layer knows the bucket is unusable -- and a name
-                    // absent from both memory and that set is one CreateBucket
-                    // clears the directory of, objects included.
-                    let mut refused = |bucket: &str, _err: &str| {
-                        <fakecloud_persistence::s3::DiskS3Store as fakecloud_persistence::S3Store>::
-                            mark_bucket_load_refused(&disk, bucket);
-                    };
-                    let hydrated = match fakecloud_s3::persistence::hydrate_s3_state_reporting(
-                        snapshot,
-                        &cli.account_id,
-                        &cli.region,
-                        &mut refused,
-                    ) {
-                        Ok(h) => h,
-                        Err(err) => fatal_exit(format_args!(
-                            "failed to hydrate s3 persistence snapshot: {err}"
-                        )),
-                    };
-                    {
-                        let account_id = hydrated.account_id.clone();
-                        let mut mas = s3_state.write();
-                        *mas.get_or_create(&account_id) = hydrated;
+                Ok(accounts_map) => {
+                    let mut total_buckets = 0;
+                    let mut total_objects = 0;
+                    let account_count = accounts_map.len();
+
+                    for (account_id, snapshot) in accounts_map {
+                        let bucket_count = snapshot.buckets.len();
+                        let object_count: usize =
+                            snapshot.buckets.values().map(|b| b.objects.len()).sum();
+                        total_buckets += bucket_count;
+                        total_objects += object_count;
+
+                        // Report each bucket the sidecar layer cannot read into the
+                        // store's refusal set. Its objects loaded fine, so nothing
+                        // below this layer knows the bucket is unusable -- and a name
+                        // absent from both memory and that set is one CreateBucket
+                        // clears the directory of, objects included.
+                        let mut refused = |bucket: &str, _err: &str| {
+                            <fakecloud_persistence::s3::DiskS3Store as fakecloud_persistence::S3Store>::
+                                mark_bucket_load_refused(&disk, &account_id, bucket);
+                        };
+                        let hydrated = match fakecloud_s3::persistence::hydrate_s3_state_reporting(
+                            snapshot,
+                            &account_id,
+                            &cli.region,
+                            &mut refused,
+                        ) {
+                            Ok(h) => h,
+                            Err(err) => fatal_exit(format_args!(
+                                "failed to hydrate s3 persistence snapshot for account {}: {err}",
+                                account_id
+                            )),
+                        };
+                        {
+                            let mut mas = s3_state.write();
+                            *mas.get_or_create(&account_id) = hydrated;
+                        }
                     }
                     tracing::info!(
-                        buckets = bucket_count,
-                        objects = object_count,
+                        buckets = total_buckets,
+                        objects = total_objects,
+                        accounts = account_count,
                         "loaded s3 persistence snapshot",
                     );
                 }
@@ -2827,7 +2840,11 @@ async fn main() {
     if let Some(ref cache) = shared_body_cache {
         // Share the cache between the S3Store and S3State so read_body honors
         // the persistent LRU on every read site, not just open_object_body.
-        s3_state.write().default_mut().set_body_cache(cache.clone());
+        // Every account hydrated above gets it, not only the default one:
+        // they were created before the default account held it to inherit.
+        for (_, account) in s3_state.write().iter_mut() {
+            account.set_body_cache(cache.clone());
+        }
     }
     registry.register(Arc::new(
         S3Service::with_store(s3_state.clone(), delivery_for_s3, s3_store.clone())
