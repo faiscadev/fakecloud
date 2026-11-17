@@ -954,7 +954,8 @@ public sealed record EcsTaskMetadataContainer(
     EcsTaskMetadataLimits? Limits,
     string? CreatedAt,
     string? StartedAt,
-    long? ExitCode);
+    long? ExitCode,
+    long? RestartCount = null);
 
 public sealed record EcsTaskMetadata(
     string? Cluster,

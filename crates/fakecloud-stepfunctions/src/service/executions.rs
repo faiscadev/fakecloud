@@ -176,12 +176,9 @@ impl StepFunctionsService {
         }
 
         let now = Utc::now();
-        exec.status = ExecutionStatus::Aborted;
-        exec.stop_date = Some(now);
-        exec.error = error;
-        exec.cause = cause;
-        push_aborted_event(exec, now);
-        abort_map_runs(state, exec_arn, now);
+        // Its states stop running with it, and so does everything it manages.
+        let stopped = state.abort_execution(exec_arn, now, error, cause);
+        state.cancel_drivers(&stopped);
 
         Ok(AwsResponse::ok_json(json!({
             "stopDate": now.timestamp_millis() as f64 / 1000.0,
@@ -633,56 +630,4 @@ impl StepFunctionsService {
 
         Ok(AwsResponse::ok_json(resp))
     }
-}
-
-/// A stopped execution's map runs stop with it, and so do their children
-/// still running, and theirs in turn: the iterations that finish later leave
-/// them as they are.
-fn abort_map_runs(state: &mut StepFunctionsState, execution_arn: &str, now: chrono::DateTime<Utc>) {
-    let mut stopped = vec![execution_arn.to_string()];
-    while let Some(parent) = stopped.pop() {
-        let mut aborted = Vec::new();
-        for run in state.map_runs.values_mut() {
-            if run.execution_arn == parent && run.abort(now) {
-                aborted.push(run.map_run_arn.clone());
-            }
-        }
-        for child in state.executions.values_mut() {
-            let in_run = child
-                .map_run_arn
-                .as_ref()
-                .is_some_and(|arn| aborted.contains(arn));
-            if in_run && child.status == ExecutionStatus::Running {
-                child.status = ExecutionStatus::Aborted;
-                child.stop_date = Some(now);
-                push_aborted_event(child, now);
-                stopped.push(child.execution_arn.clone());
-            }
-        }
-    }
-}
-
-/// An aborted execution's last event. Nothing follows it: `add_event` leaves an
-/// aborted execution's history as it is.
-fn push_aborted_event(exec: &mut Execution, now: chrono::DateTime<Utc>) {
-    let details = match (&exec.error, &exec.cause) {
-        (None, None) => json!({}),
-        (error, cause) => {
-            let mut details = json!({});
-            if let Some(error) = error {
-                details["error"] = json!(error);
-            }
-            if let Some(cause) = cause {
-                details["cause"] = json!(cause);
-            }
-            details
-        }
-    };
-    exec.history_events.push(crate::state::HistoryEvent {
-        id: exec.history_events.len() as i64 + 1,
-        event_type: "ExecutionAborted".to_string(),
-        timestamp: now,
-        previous_event_id: 0,
-        details,
-    });
 }

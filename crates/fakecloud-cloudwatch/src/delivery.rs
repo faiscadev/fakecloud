@@ -42,6 +42,7 @@ impl CloudwatchDelivery for CloudwatchDeliveryImpl {
         let acct = state.get_or_create(account_id);
         let metrics_map = acct.metrics_in_mut(region);
         let bucket = metrics_map.entry(namespace.to_string()).or_default();
+        let series = [(metric_name.to_string(), dimensions.clone())];
         bucket.push(MetricDatum {
             metric_name: metric_name.to_string(),
             dimensions,
@@ -51,6 +52,18 @@ impl CloudwatchDelivery for CloudwatchDeliveryImpl {
             unit: unit.map(|s| s.to_string()),
             storage_resolution: None,
         });
+        // Alarms on this metric evaluate now, as for PutMetricData; the
+        // actions they owe are queued on the account for the CloudWatch
+        // service to dispatch.
+        crate::alarm_eval::evaluate_alarms_in(
+            acct,
+            region,
+            Utc::now(),
+            crate::alarm_eval::Scope::Series {
+                namespace,
+                series: &series,
+            },
+        );
     }
 }
 

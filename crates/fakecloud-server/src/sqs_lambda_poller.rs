@@ -1032,6 +1032,7 @@ mod tests {
                 provisioned_poller_config: None,
                 logging_config: None,
                 tags: Default::default(),
+                last_processing_result: None,
             };
             l.event_source_mappings
                 .insert(mapping.uuid.clone(), mapping);

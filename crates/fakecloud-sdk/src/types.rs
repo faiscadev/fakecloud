@@ -1609,6 +1609,10 @@ pub struct EcsTaskMetadataContainer {
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
+    /// Times the container was restarted in place under its
+    /// `restartPolicy`; absent for containers without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

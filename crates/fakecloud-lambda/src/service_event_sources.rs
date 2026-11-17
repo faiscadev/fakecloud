@@ -39,8 +39,18 @@ impl LambdaService {
         let state = accounts.regional_mut(&req.account_id, &req.region);
 
         let function_arn = mapping_function_arn(state, &req.region, &function_name)?;
+        crate::esm_config::check_consumer_group_unique(
+            &source_configs,
+            state.event_source_mappings.values(),
+        )?;
 
-        let batch_size = body["BatchSize"].as_i64().unwrap_or(10);
+        let batch_size = body["BatchSize"].as_i64().unwrap_or_else(|| {
+            crate::esm_config::default_batch_size(
+                &event_source_arn,
+                body.get("SelfManagedEventSource")
+                    .is_some_and(|v| v.is_object()),
+            )
+        });
         let enabled = body["Enabled"].as_bool().unwrap_or(true);
         let now = Utc::now();
 
@@ -148,6 +158,7 @@ impl LambdaService {
             provisioned_poller_config: source_configs.provisioned_poller,
             logging_config: source_configs.logging,
             tags: crate::esm_config::tags(&body),
+            last_processing_result: None,
         };
 
         let response = self.event_source_mapping_json(&mapping);
@@ -293,7 +304,10 @@ impl LambdaService {
             "Topics": mapping.topics,
             "Queues": mapping.queues,
             "SourceAccessConfigurations": mapping.source_access_configurations,
-            "LastProcessingResult": "No records processed",
+            "LastProcessingResult": mapping
+                .last_processing_result
+                .as_deref()
+                .unwrap_or("No records processed"),
             "StateTransitionReason": "User action",
         });
         let obj = out.as_object_mut().expect("json! built object");

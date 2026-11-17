@@ -298,6 +298,7 @@ impl EcsService {
                         def,
                         body.get("overrides"),
                     ),
+                    restart_count: None,
                 })
                 .collect();
             let awslogs = td_containers.iter().find_map(|def| {
@@ -557,9 +558,8 @@ impl EcsService {
             (task_id, account, task.clone())
         };
         if let Some(rt) = &self.runtime {
-            rt.stop_task(&task_id, &reason).await;
+            rt.stop_task(&self.state, &account, &task_id, &reason).await;
         }
-        let _ = account;
         Ok(AwsResponse::ok_json(json!({
             "task": task_to_json(&task_snapshot),
         })))
@@ -1003,6 +1003,109 @@ pub(super) mod multi_container_tests {
         acct.tasks.insert(id.into(), task);
     }
 
+    /// A stopping task (DEACTIVATING / STOPPING / DEPROVISIONING) is no
+    /// longer in a service's runningCount, but still blocks DeleteCluster and
+    /// keeps a deleted service draining, as on ECS.
+    /// A stack deletion scales the services it removes to zero before
+    /// stopping their tasks, so the scheduler can't backfill them; other
+    /// clusters' services are untouched.
+    #[test]
+    fn cfn_drain_scales_services_to_zero_before_their_tasks_stop() {
+        let svc = fresh_service();
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({"family": "web", "containerDefinitions": [{"name": "web", "image": "busybox"}]}),
+        ))
+        .expect("register");
+        for (cluster, name) in [("default", "a"), ("default", "b"), ("other", "c")] {
+            if cluster != "default" {
+                svc.create_cluster(&make_request(
+                    "CreateCluster",
+                    json!({"clusterName": cluster}),
+                ))
+                .expect("cluster");
+            }
+            svc.create_service(&make_request(
+                "CreateService",
+                json!({"cluster": cluster, "serviceName": name, "taskDefinition": "web",
+                       "desiredCount": 2}),
+            ))
+            .expect("create_service");
+        }
+        let desired = |cluster: &str, name: &str| {
+            let accounts = svc.state.read();
+            let s = &accounts.get("000000000000").unwrap().services
+                [&EcsState::service_key(cluster, name)];
+            (s.desired_count, s.status.clone())
+        };
+        crate::cfn_provision::cfn_drain_services(&svc.state, "000000000000", "default", Some("a"));
+        assert_eq!(desired("default", "a"), (0, "DRAINING".to_string()));
+        assert_eq!(desired("default", "b"), (2, "ACTIVE".to_string()));
+        crate::cfn_provision::cfn_drain_services(&svc.state, "000000000000", "default", None);
+        assert_eq!(desired("default", "b"), (0, "DRAINING".to_string()));
+        assert_eq!(desired("other", "c"), (2, "ACTIVE".to_string()));
+    }
+
+    /// Scheduler-driven stops carry ServiceSchedulerInitiated and the
+    /// "Scaling activity" reason naming the primary deployment.
+    #[test]
+    fn scheduler_stops_are_service_scheduler_initiated() {
+        let svc = fresh_service();
+        insert_task(&svc, "a", "prod");
+        let mut accounts = svc.state.write();
+        let st = accounts.get_mut("000000000000").unwrap();
+        assert_eq!(
+            crate::service::helpers::scheduler_stop_reason(st, "prod", "missing"),
+            "Scaling activity initiated by (service scheduler)"
+        );
+        let task = st.tasks.get_mut("a").unwrap();
+        crate::service::helpers::mark_scheduler_stop(
+            task,
+            "Scaling activity initiated by (deployment ecs-svc/1)",
+        );
+        assert_eq!(task.desired_status, "STOPPED");
+        assert_eq!(task.stop_code.as_deref(), Some("ServiceSchedulerInitiated"));
+        assert_eq!(
+            task.stopped_reason.as_deref(),
+            Some("Scaling activity initiated by (deployment ecs-svc/1)")
+        );
+        assert!(task.stopping_at.is_some());
+    }
+
+    #[test]
+    fn stopping_tasks_leave_running_count_but_stay_live() {
+        let svc = fresh_service();
+        for (id, status) in [("a", "RUNNING"), ("b", "STOPPING"), ("c", "STOPPED")] {
+            insert_task(&svc, id, "prod");
+            let mut accounts = svc.state.write();
+            let t = accounts
+                .get_mut("000000000000")
+                .unwrap()
+                .tasks
+                .get_mut(id)
+                .unwrap();
+            t.last_status = status.into();
+            t.started_by = Some("ecs-svc/web".into());
+        }
+        let accounts = svc.state.read();
+        let st = accounts.get("000000000000").unwrap();
+        let mut json = json!({});
+        crate::service::helpers::recompute_service_counts(st, "web", "prod", &mut json);
+        assert_eq!(json["runningCount"], 1);
+        assert_eq!(json["pendingCount"], 0);
+        assert_eq!(
+            crate::service::helpers::cluster_active_task_count(st, "prod"),
+            2
+        );
+        assert!(crate::service::helpers::service_has_live_tasks(
+            st, "web", "prod"
+        ));
+        for s in ["DEACTIVATING", "STOPPING", "DEPROVISIONING", "ACTIVATING"] {
+            assert!(crate::service::helpers::task_status_is_live(s), "{s}");
+        }
+        assert!(!crate::service::helpers::task_status_is_live("STOPPED"));
+    }
+
     #[test]
     fn describe_tasks_scopes_to_requested_cluster() {
         let svc = fresh_service();
@@ -1398,6 +1501,7 @@ pub(super) mod multi_container_tests {
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: None,
+                restart_count: None,
             });
         }
 
@@ -1460,11 +1564,16 @@ mod port_mapping_tests {
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: Vec::new(),
         }
     }
 
@@ -1672,6 +1781,7 @@ mod port_mapping_tests {
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: None,
+                restart_count: None,
             }],
             overrides: serde_json::json!({}),
             started_by: None,

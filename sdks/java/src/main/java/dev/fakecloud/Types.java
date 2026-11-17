@@ -1150,7 +1150,8 @@ public final class Types {
             EcsTaskMetadataLimits limits,
             String createdAt,
             String startedAt,
-            Long exitCode) {}
+            Long exitCode,
+            Long restartCount) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EcsTaskMetadata(

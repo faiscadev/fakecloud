@@ -812,17 +812,18 @@ impl EcsService {
             (service_json, spawn, stop)
         };
 
-        // Always flip desired_status for tasks we plan to stop.
+        // Always flip desired_status for tasks we plan to stop: the service
+        // scheduler stops them (ServiceSchedulerInitiated), with or without
+        // a container runtime.
         for id in &stop_ids {
             let mut accounts = self.state.write();
             if let Some(state) = accounts.get_mut(&account) {
+                let reason = scheduler_stop_reason(state, &cluster_name, &service_name);
                 if let Some(task) = state.tasks.get_mut(id) {
-                    task.desired_status = "STOPPED".into();
-                    task.stopping_at = Some(Utc::now());
+                    mark_scheduler_stop(task, &reason);
                     if runtime.is_none() {
                         task.last_status = "STOPPED".into();
                         task.stopped_at = Some(Utc::now());
-                        task.stop_code = Some("UserInitiated".into());
                         for c in task.containers.iter_mut() {
                             c.last_status = "STOPPED".into();
                         }
@@ -843,8 +844,11 @@ impl EcsService {
             for id in stop_ids {
                 let rt2 = rt.clone();
                 let id_clone = id.clone();
+                let state = self.state.clone();
+                let account = account.clone();
                 tokio::spawn(async move {
-                    rt2.stop_task(&id_clone, "ECS service scale-down").await;
+                    rt2.stop_task(&state, &account, &id_clone, "ECS service scale-down")
+                        .await;
                 });
             }
         } else {
@@ -961,13 +965,12 @@ impl EcsService {
             {
                 let mut accounts = self.state.write();
                 if let Some(state) = accounts.get_mut(&request.account_id) {
+                    let reason = scheduler_stop_reason(state, &cluster_name, &service_name);
                     if let Some(task) = state.tasks.get_mut(id) {
-                        task.desired_status = "STOPPED".into();
-                        task.stopping_at = Some(Utc::now());
+                        mark_scheduler_stop(task, &reason);
                         if self.runtime.is_none() {
                             task.last_status = "STOPPED".into();
                             task.stopped_at = Some(Utc::now());
-                            task.stop_code = Some("UserInitiated".into());
                             for c in task.containers.iter_mut() {
                                 c.last_status = "STOPPED".into();
                             }
@@ -981,7 +984,8 @@ impl EcsService {
                 }
             }
             if let Some(rt) = &self.runtime {
-                rt.stop_task(id, "ECS service deletion").await;
+                rt.stop_task(&self.state, &request.account_id, id, "ECS service deletion")
+                    .await;
             }
         }
 

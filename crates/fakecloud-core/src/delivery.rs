@@ -231,6 +231,20 @@ pub trait SqsDelivery: Send + Sync {
 pub trait SnsDelivery: Send + Sync {
     fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>);
 
+    /// [`Self::publish_to_topic`], reporting whether SNS accepted the message:
+    /// `Ok` with the message ID, `Err` when the topic doesn't exist. Callers
+    /// that record the outcome (CloudWatch alarm action history) use this.
+    /// The default can't tell and reports an empty message ID.
+    fn try_publish_to_topic(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+    ) -> Result<String, String> {
+        self.publish_to_topic(topic_arn, message, subject);
+        Ok(String::new())
+    }
+
     /// Publish to a FIFO SNS topic carrying the message group/dedup IDs
     /// that downstream SQS subscribers need for ordering. Default impl
     /// drops the IDs so non-FIFO callers don't have to override.
@@ -1641,6 +1655,20 @@ impl DeliveryBus {
     pub fn publish_to_sns(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
         if let Some(ref sender) = self.sns_sender {
             sender.publish_to_topic(topic_arn, message, subject);
+        }
+    }
+
+    /// [`SnsDelivery::try_publish_to_topic`]; `Err` too when no SNS sender is
+    /// wired.
+    pub fn try_publish_to_sns(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+    ) -> Result<String, String> {
+        match self.sns_sender {
+            Some(ref sender) => sender.try_publish_to_topic(topic_arn, message, subject),
+            None => Err("SNS delivery is not available".to_string()),
         }
     }
 
