@@ -4792,6 +4792,120 @@ async fn dynamodb_query_paren_wrapped_key_condition() {
     );
 }
 
+/// Query with the whole key condition wrapped in parentheses, the shape boto3's
+/// `Key("pk").eq(..) & Key("sk").between(..)` sends
+/// (`(#n0 = :v0 AND #n1 BETWEEN :v1 AND :v2)`). The partition-key check used to
+/// read `#n0 = :v0 AND #n1` as the left side of the BETWEEN / `>=` and reject the
+/// request with "Query condition missed key schema element"; real DynamoDB accepts it.
+#[tokio::test]
+async fn dynamodb_query_fully_parenthesized_key_condition() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("BotoOrders")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("sk")
+                .key_type(KeyType::Range)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("sk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for pk in ["user#1", "user#2"] {
+        for i in [5, 10, 30, 50, 60] {
+            client
+                .put_item()
+                .table_name("BotoOrders")
+                .item("pk", AttributeValue::S(pk.to_string()))
+                .item("sk", AttributeValue::S(format!("order#{i:04}")))
+                .send()
+                .await
+                .unwrap();
+        }
+    }
+
+    let query = |expr: &'static str| {
+        client
+            .query()
+            .table_name("BotoOrders")
+            .key_condition_expression(expr)
+            .expression_attribute_names("#n0", "pk")
+            .expression_attribute_names("#n1", "sk")
+            .expression_attribute_values(":v0", AttributeValue::S("user#1".to_string()))
+            .expression_attribute_values(":v1", AttributeValue::S("order#0010".to_string()))
+            .expression_attribute_values(":v2", AttributeValue::S("order#0050".to_string()))
+    };
+    let sort_keys = |out: &aws_sdk_dynamodb::operation::query::QueryOutput| -> Vec<String> {
+        out.items()
+            .iter()
+            .map(|item| item["sk"].as_s().unwrap().clone())
+            .collect()
+    };
+
+    let between = query("(#n0 = :v0 AND #n1 BETWEEN :v1 AND :v2)")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        sort_keys(&between),
+        ["order#0010", "order#0030", "order#0050"]
+    );
+
+    // A sort-key operator that contains `=`.
+    let gte = client
+        .query()
+        .table_name("BotoOrders")
+        .key_condition_expression("(#n0 = :v0 AND #n1 >= :v1)")
+        .expression_attribute_names("#n0", "pk")
+        .expression_attribute_names("#n1", "sk")
+        .expression_attribute_values(":v0", AttributeValue::S("user#1".to_string()))
+        .expression_attribute_values(":v1", AttributeValue::S("order#0010".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        sort_keys(&gte),
+        ["order#0010", "order#0030", "order#0050", "order#0060"]
+    );
+
+    // Still rejected: the partition key must be constrained with `=`.
+    let err = query("(#n0 > :v0 AND #n1 BETWEEN :v1 AND :v2)")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("Query key condition not supported"),
+        "{err:?}"
+    );
+}
+
 /// UpdateItem with a dotted-path SET target — `SET #a.#b = :v`. Before the
 /// fix this silently created a top-level `"#a.#b"` attribute instead of
 /// updating the nested map; sibling keys under the parent were preserved by
