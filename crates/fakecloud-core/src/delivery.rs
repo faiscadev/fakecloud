@@ -599,10 +599,11 @@ pub trait CloudwatchDelivery: Send + Sync {
 }
 
 /// Put log events into CloudWatch Logs log groups from outside the
-/// logs crate. Used by Step Functions Express execution logging and
-/// ECS awslogs driver so they can deliver without depending directly
-/// on fakecloud_logs.
+/// logs crate: Step Functions execution logging and API Gateway access
+/// logs deliver through it without depending directly on fakecloud_logs.
 pub trait CloudwatchLogsDelivery: Send + Sync {
+    /// Append `events` (`(timestamp_ms, message)`) to the stream, creating
+    /// the stream if needed. A log group that doesn't exist takes nothing.
     fn put_log_events(
         &self,
         account_id: &str,
@@ -611,6 +612,57 @@ pub trait CloudwatchLogsDelivery: Send + Sync {
         log_stream_name: &str,
         events: &[(i64, String)],
     );
+
+    /// Whether the log group exists, for callers that refuse a missing
+    /// destination up front.
+    fn log_group_exists(&self, account_id: &str, region: &str, log_group_name: &str) -> bool;
+}
+
+/// A [`CloudwatchLogsDelivery`] bound once the Logs service exists, for the
+/// delivery buses built before it.
+#[derive(Clone, Default)]
+pub struct DeferredCloudwatchLogsDelivery {
+    inner: Arc<std::sync::OnceLock<Arc<dyn CloudwatchLogsDelivery>>>,
+}
+
+impl DeferredCloudwatchLogsDelivery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install the real sender. Only the first call takes effect.
+    pub fn set(&self, delivery: Arc<dyn CloudwatchLogsDelivery>) {
+        if self.inner.set(delivery).is_err() {
+            tracing::warn!("deferred CloudWatch Logs delivery already set; ignoring");
+        }
+    }
+}
+
+impl CloudwatchLogsDelivery for DeferredCloudwatchLogsDelivery {
+    fn put_log_events(
+        &self,
+        account_id: &str,
+        region: &str,
+        log_group_name: &str,
+        log_stream_name: &str,
+        events: &[(i64, String)],
+    ) {
+        match self.inner.get() {
+            Some(inner) => {
+                inner.put_log_events(account_id, region, log_group_name, log_stream_name, events)
+            }
+            None => tracing::warn!(
+                log_group_name,
+                "CloudWatch Logs delivery not wired yet; dropping events"
+            ),
+        }
+    }
+
+    fn log_group_exists(&self, account_id: &str, region: &str, log_group_name: &str) -> bool {
+        self.inner
+            .get()
+            .is_some_and(|inner| inner.log_group_exists(account_id, region, log_group_name))
+    }
 }
 
 /// Outbound email dispatch used by services that emulate AWS flows that
@@ -1283,6 +1335,19 @@ impl DeliveryBus {
         if let Some(ref sender) = self.cloudwatch_logs {
             sender.put_log_events(account_id, region, log_group_name, log_stream_name, events);
         }
+    }
+
+    /// Whether a CloudWatch Logs log group exists, or `None` when no
+    /// CloudWatch Logs sender is wired (nothing to check against).
+    pub fn log_group_exists(
+        &self,
+        account_id: &str,
+        region: &str,
+        log_group_name: &str,
+    ) -> Option<bool> {
+        self.cloudwatch_logs
+            .as_ref()
+            .map(|sender| sender.log_group_exists(account_id, region, log_group_name))
     }
 
     pub fn with_ses_dispatcher(mut self, dispatcher: Arc<dyn SesSendEmailDispatcher>) -> Self {

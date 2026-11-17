@@ -1312,6 +1312,10 @@ async fn run_map_iterations(
 ) -> Result<MapResults, MapRunError> {
     let map_run_arn = children.map(|c| c.map_run_arn.as_str());
     let child_type = map_child_type(state_def);
+    // A map run's children log under their root state machine's configuration.
+    let child_logging = children
+        .and_then(|_| root_logging_configuration(shared_state, execution_arn))
+        .map(Arc::new);
     let jsonata = crate::jsonata::is_jsonata(state_def);
     let input_path = state_def["InputPath"].as_str();
 
@@ -1491,6 +1495,7 @@ async fn run_map_iterations(
         let reg = registry.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
+        let child_logging = child_logging.clone();
         // Iterations start in item order, so what a failing run leaves pending is
         // the items at the end. A permit is held until the iteration has finished.
         let permit = semaphore
@@ -1553,6 +1558,13 @@ async fn run_map_iterations(
             }
             let result = match &child {
                 Some(child) => {
+                    let _log_guard = ChildLogGuard {
+                        shared_state: state.clone(),
+                        execution_arn: child.arn.clone(),
+                        map_run_arn: child.map_run_arn.clone(),
+                        delivery: delivery.clone(),
+                        logging: child_logging.clone(),
+                    };
                     let result = run_states(
                         &iter_def, item_input, &delivery, &ddb, &reg, &state, &child.arn,
                     )
@@ -1921,6 +1933,26 @@ fn finish_map_run(
     }
     mr.stop_date = Some(Utc::now());
     true
+}
+
+/// The logging configuration of the state machine `execution_arn` runs, or for
+/// a map run's child (whose state machine is `<machine>/<label>`) its root
+/// machine's.
+fn root_logging_configuration(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Option<Value> {
+    let accounts = shared_state.read();
+    let state = accounts.by_arn(execution_arn)?;
+    let machine_arn = &state.executions.get(execution_arn)?.state_machine_arn;
+    let root = machine_arn
+        .split_once('/')
+        .map_or(machine_arn.as_str(), |(root, _)| root);
+    state
+        .state_machines
+        .get(root)?
+        .logging_configuration
+        .clone()
 }
 
 /// The error and cause an execution was stopped with, if it was stopped.
@@ -3378,6 +3410,42 @@ impl Drop for MapRunGuard<'_> {
         for child in children {
             state.drivers.remove(&child);
         }
+    }
+}
+
+/// Delivers a map run child's history once its task is done with it, however
+/// that went: finished, stopped on its own, or stopped with its map run. A
+/// child still running then is one its map run is abandoning, so it is
+/// aborted first as its map run would abort it.
+struct ChildLogGuard {
+    shared_state: SharedStepFunctionsState,
+    execution_arn: String,
+    map_run_arn: String,
+    delivery: Option<Arc<DeliveryBus>>,
+    logging: Option<Arc<Value>>,
+}
+
+impl Drop for ChildLogGuard {
+    fn drop(&mut self) {
+        {
+            let mut accounts = self.shared_state.write();
+            if let Some(exec) = accounts
+                .by_arn_mut(&self.execution_arn)
+                .and_then(|state| state.executions.get_mut(&self.execution_arn))
+            {
+                let cause = format!(
+                    "The map run execution [{}] which was managing this resource was aborted",
+                    self.map_run_arn
+                );
+                exec.abort(Utc::now(), None, Some(cause));
+            }
+        }
+        deliver_execution_logs(
+            &self.shared_state,
+            &self.execution_arn,
+            self.delivery.as_ref(),
+            self.logging.as_deref(),
+        );
     }
 }
 

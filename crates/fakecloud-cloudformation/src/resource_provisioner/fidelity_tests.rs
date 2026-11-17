@@ -642,6 +642,211 @@ fn event_source_mapping_keeps_alias_qualifier_and_self_managed_config() {
     assert_eq!(esm.source_access_configurations.len(), 1);
 }
 
+#[test]
+fn event_source_mapping_takes_ref_parameters_as_numbers_and_keeps_its_tags() {
+    let prov = make_provisioner();
+    let resources = provision_template_with_params(
+        &prov,
+        json!({
+            "Parameters": {
+                "Concurrency": {"Type": "Number", "Default": "5"},
+                "Batch": {"Type": "Number", "Default": "7"},
+                "On": {"Type": "String", "Default": "false"},
+            },
+            "Resources": {
+                "F": {"Type": "AWS::Lambda::Function", "Properties": function_props("ref-esm-fn")},
+                "M": {
+                    "Type": "AWS::Lambda::EventSourceMapping",
+                    "DependsOn": "F",
+                    "Properties": {
+                        "FunctionName": "ref-esm-fn",
+                        "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:ref-queue",
+                        "BatchSize": {"Ref": "Batch"},
+                        "Enabled": {"Ref": "On"},
+                        "ScalingConfig": {"MaximumConcurrency": {"Ref": "Concurrency"}},
+                        "Tags": [{"Key": "team", "Value": "data"}],
+                    }
+                }
+            }
+        }),
+        &[("Concurrency", "5"), ("Batch", "7"), ("On", "false")],
+    );
+    let esm_id = &by_logical(&resources, "M").physical_id;
+    let lam = prov.lambda_state.read();
+    let esm = &lam
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .event_source_mappings[esm_id];
+    assert_eq!(esm.scaling_config, Some(json!({"MaximumConcurrency": 5})));
+    assert_eq!(esm.batch_size, 7);
+    assert!(!esm.enabled);
+    assert_eq!(esm.tags.get("team").map(String::as_str), Some("data"));
+}
+
+#[test]
+fn event_source_mapping_ref_booleans_are_case_insensitive_and_timestamps_numbers() {
+    let prov = make_provisioner();
+    let resources = provision_template_with_params(
+        &prov,
+        json!({
+            "Parameters": {
+                "On": {"Type": "String"},
+                "Bisect": {"Type": "String"},
+                "From": {"Type": "Number"},
+            },
+            "Resources": {
+                "F": {"Type": "AWS::Lambda::Function", "Properties": function_props("ref-bool-fn")},
+                "M": {
+                    "Type": "AWS::Lambda::EventSourceMapping",
+                    "DependsOn": "F",
+                    "Properties": {
+                        "FunctionName": "ref-bool-fn",
+                        "EventSourceArn": "arn:aws:kinesis:us-east-1:123456789012:stream/ref-stream",
+                        "StartingPosition": "AT_TIMESTAMP",
+                        "StartingPositionTimestamp": {"Ref": "From"},
+                        "Enabled": {"Ref": "On"},
+                        "BisectBatchOnFunctionError": {"Ref": "Bisect"},
+                    }
+                }
+            }
+        }),
+        &[("On", "False"), ("Bisect", "TRUE"), ("From", "1700000000")],
+    );
+    let esm_id = &by_logical(&resources, "M").physical_id;
+    let lam = prov.lambda_state.read();
+    let esm = &lam
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .event_source_mappings[esm_id];
+    assert!(!esm.enabled);
+    assert_eq!(esm.state, "Disabled");
+    assert_eq!(esm.bisect_batch_on_function_error, Some(true));
+    assert_eq!(esm.starting_position_timestamp, Some(1_700_000_000.0));
+}
+
+#[test]
+fn event_source_mapping_refuses_values_that_are_not_their_type() {
+    let prov = make_provisioner();
+    create(
+        &prov,
+        "AWS::Lambda::Function",
+        "F",
+        function_props("bad-ref-fn"),
+    );
+    for (key, value, member) in [
+        ("BatchSize", json!("abc"), "batchSize"),
+        ("BatchSize", json!("1.0"), "batchSize"),
+        ("MaximumRetryAttempts", json!("1e3"), "maximumRetryAttempts"),
+        ("Enabled", json!("yes"), "enabled"),
+        (
+            "StartingPositionTimestamp",
+            json!("2024-01-01T00:00:00Z"),
+            "startingPositionTimestamp",
+        ),
+    ] {
+        let mut props = json!({
+            "FunctionName": "bad-ref-fn",
+            "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:bad-ref-queue",
+        });
+        props[key] = value.clone();
+        let err = create_err(&prov, "AWS::Lambda::EventSourceMapping", "M", props);
+        assert!(
+            err.contains(&format!("at '{member}' failed to satisfy constraint")),
+            "{key}={value}: {err}"
+        );
+        assert!(err.contains("HandlerErrorCode: InvalidRequest"), "{err}");
+    }
+    assert!(prov
+        .lambda_state
+        .read()
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .event_source_mappings
+        .is_empty());
+}
+
+#[test]
+fn msk_event_source_mapping_keeps_its_kafka_and_poller_settings_across_updates() {
+    let prov = make_provisioner();
+    create(
+        &prov,
+        "AWS::Lambda::Function",
+        "F",
+        function_props("msk-fn"),
+    );
+    let cluster =
+        "arn:aws:kafka:us-east-1:123456789012:cluster/c/0b1c2d3e-1111-2222-3333-444455556666-1";
+    let props = |extra: serde_json::Value| {
+        let mut props = json!({
+            "FunctionName": "msk-fn",
+            "EventSourceArn": cluster,
+            "Topics": ["t"],
+            "StartingPosition": "LATEST",
+            "AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "g"},
+        });
+        props
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        props
+    };
+    let sr = create(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "M",
+        props(json!({
+            "ProvisionedPollerConfig": {"MaximumPollers": 10},
+            "LoggingConfig": {"SystemLogLevel": "DEBUG"},
+        })),
+    );
+    let stored = |prov: &ResourceProvisioner| {
+        prov.lambda_state
+            .read()
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .event_source_mappings[&sr.physical_id]
+            .clone()
+    };
+    let esm = stored(&prov);
+    assert_eq!(
+        esm.amazon_managed_kafka_event_source_config,
+        Some(json!({"ConsumerGroupId": "g"}))
+    );
+    assert_eq!(
+        esm.provisioned_poller_config,
+        Some(json!({"MinimumPollers": 1, "MaximumPollers": 10}))
+    );
+    assert_eq!(esm.logging_config, Some(json!({"SystemLogLevel": "DEBUG"})));
+
+    // Dropping the poller and logging settings from the template removes them.
+    let updated = make_resource("AWS::Lambda::EventSourceMapping", "M", props(json!({})));
+    prov.update_resource(&sr, &updated).unwrap();
+    let esm = stored(&prov);
+    assert!(esm.provisioned_poller_config.is_none());
+    assert!(esm.logging_config.is_none());
+    assert_eq!(
+        esm.amazon_managed_kafka_event_source_config,
+        Some(json!({"ConsumerGroupId": "g"}))
+    );
+
+    // The consumer group is fixed at creation.
+    let regrouped = make_resource(
+        "AWS::Lambda::EventSourceMapping",
+        "M",
+        props(json!({"AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "other"}})),
+    );
+    assert!(prov.update_resource(&sr, &regrouped).is_err());
+
+    // A scaling config belongs to SQS mappings only.
+    let err = create_err(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "M2",
+        props(json!({"ScalingConfig": {"MaximumConcurrency": 5}})),
+    );
+    assert!(err.contains("ScalingConfig"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // SAM templates provisioned end to end.
 // ---------------------------------------------------------------------------
@@ -650,8 +855,21 @@ fn provision_template(
     prov: &ResourceProvisioner,
     template: serde_json::Value,
 ) -> Vec<StackResource> {
+    provision_template_with_params(prov, template, &[])
+}
+
+/// [`provision_template`] with stack parameter values, which (as on
+/// CloudFormation) reach the resources as strings.
+fn provision_template_with_params(
+    prov: &ResourceProvisioner,
+    template: serde_json::Value,
+    values: &[(&str, &str)],
+) -> Vec<StackResource> {
     let body = template.to_string();
-    let mut params = BTreeMap::new();
+    let mut params: BTreeMap<String, String> = values
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     params.insert("AWS::StackName".to_string(), "samstack".to_string());
     params.insert("AWS::Region".to_string(), "us-east-1".to_string());
     params.insert("AWS::AccountId".to_string(), ACCT.to_string());
@@ -779,6 +997,7 @@ fn sam_cognito_logs_iot_and_kafka_events_provision() {
                             "Kafka": {"Type": "SelfManagedKafka", "Properties": {
                                 "KafkaBootstrapServers": ["broker:9092"],
                                 "Topics": ["orders"],
+                                "ConsumerGroupId": "sam-group",
                                 "SourceAccessConfigurations": [{"Type": "BASIC_AUTH", "URI": "arn:aws:secretsmanager:us-east-1:123456789012:secret:k"}]
                             }}
                         }
@@ -819,6 +1038,10 @@ fn sam_cognito_logs_iot_and_kafka_events_provision() {
     assert_eq!(
         mapping.self_managed_event_source,
         Some(json!({"Endpoints": {"KAFKA_BOOTSTRAP_SERVERS": ["broker:9092"]}}))
+    );
+    assert_eq!(
+        mapping.self_managed_kafka_event_source_config,
+        Some(json!({"ConsumerGroupId": "sam-group"}))
     );
 }
 

@@ -766,7 +766,6 @@ struct LambdaEventSourceMappingProps {
     queues: Vec<String>,
     source_access_configurations: Vec<serde_json::Value>,
     self_managed_event_source: Option<serde_json::Value>,
-    self_managed_kafka_event_source_config: Option<serde_json::Value>,
     document_db_event_source_config: Option<serde_json::Value>,
 }
 
@@ -885,7 +884,6 @@ fn parse_lambda_event_source_mapping_props(
     let object = |key: &str| props.get(key).filter(|v| v.is_object()).cloned();
     let self_managed_event_source =
         object("SelfManagedEventSource").map(self_managed_event_source_to_api);
-    let self_managed_kafka_event_source_config = object("SelfManagedKafkaEventSourceConfig");
     let document_db_event_source_config = object("DocumentDBEventSourceConfig");
 
     Ok(LambdaEventSourceMappingProps {
@@ -909,7 +907,6 @@ fn parse_lambda_event_source_mapping_props(
         queues,
         source_access_configurations,
         self_managed_event_source,
-        self_managed_kafka_event_source_config,
         document_db_event_source_config,
     })
 }
