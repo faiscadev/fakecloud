@@ -610,6 +610,141 @@ async fn lambda_tag_list_untag_roundtrip() {
     assert!(err.is_err(), "ListTags after DeleteFunction must 404");
 }
 
+#[tokio::test]
+async fn lambda_tags_follow_the_lambda_tagging_rules() {
+    use aws_sdk_lambda::error::ProvideErrorMetadata;
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let create = |name: &'static str| {
+        client
+            .create_function()
+            .function_name(name)
+            .runtime(aws_sdk_lambda::types::Runtime::Python312)
+            .role("arn:aws:iam::123456789012:role/test-role")
+            .handler("index.handler")
+            .code(
+                aws_sdk_lambda::types::FunctionCode::builder()
+                    .zip_file(Blob::new(make_python_zip()))
+                    .build(),
+            )
+    };
+    create("rules-fn").send().await.unwrap();
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:rules-fn";
+
+    // Model constraints on TagKey / TagValue are ValidationException.
+    let long_key = "k".repeat(129);
+    let long_value = "v".repeat(257);
+    for (key, value) in [
+        (long_key.as_str(), "v"),
+        ("bad#key", "v"),
+        ("k", long_value.as_str()),
+        ("k", "bad*value"),
+    ] {
+        let err = client
+            .tag_resource()
+            .resource(arn)
+            .tags(key, value)
+            .send()
+            .await
+            .expect_err("invalid tag accepted");
+        assert_eq!(err.code(), Some("ValidationException"), "{key}={value}");
+    }
+    // The reserved `aws:` prefix is InvalidParameterValueException, on
+    // TagResource and UntagResource alike.
+    let err = client
+        .tag_resource()
+        .resource(arn)
+        .tags("aws:owner", "me")
+        .send()
+        .await
+        .expect_err("reserved key accepted");
+    assert_eq!(err.code(), Some("InvalidParameterValueException"));
+    let err = client
+        .untag_resource()
+        .resource(arn)
+        .tag_keys("aws:owner")
+        .send()
+        .await
+        .expect_err("reserved key removal accepted");
+    assert_eq!(err.code(), Some("InvalidParameterValueException"));
+    let err = client
+        .untag_resource()
+        .resource(arn)
+        .tag_keys("k".repeat(129))
+        .send()
+        .await
+        .expect_err("long key removal accepted");
+    assert_eq!(err.code(), Some("ValidationException"));
+
+    // At most 50 tags per resource, counting the ones it already has.
+    let mut req = client.tag_resource().resource(arn);
+    for i in 0..49 {
+        req = req.tags(format!("k{i}"), "v");
+    }
+    req.send().await.unwrap();
+    let err = client
+        .tag_resource()
+        .resource(arn)
+        .tags("x", "1")
+        .tags("y", "2")
+        .send()
+        .await
+        .expect_err("51st tag accepted");
+    assert_eq!(err.code(), Some("InvalidParameterValueException"));
+    client
+        .tag_resource()
+        .resource(arn)
+        .tags("k0", "changed")
+        .tags("x", "1")
+        .send()
+        .await
+        .unwrap();
+    let tags = client.list_tags().resource(arn).send().await.unwrap();
+    assert_eq!(tags.tags().unwrap().len(), 50);
+
+    // CreateFunction checks its Tags the same way and creates nothing.
+    let err = create("rules-bad")
+        .tags("aws:x", "v")
+        .send()
+        .await
+        .expect_err("reserved key on create accepted");
+    assert_eq!(err.code(), Some("InvalidParameterValueException"));
+    assert!(client
+        .get_function()
+        .function_name("rules-bad")
+        .send()
+        .await
+        .is_err());
+
+    // Code signing configs keep their create-time tags and are taggable.
+    let csc = client
+        .create_code_signing_config()
+        .allowed_publishers(
+            aws_sdk_lambda::types::AllowedPublishers::builder()
+                .signing_profile_version_arns(
+                    "arn:aws:signer:us-east-1:123456789012:/signing-profiles/p/abcdefghij",
+                )
+                .build()
+                .unwrap(),
+        )
+        .tags("team", "sec")
+        .send()
+        .await
+        .unwrap();
+    let csc_arn = csc.code_signing_config().unwrap().code_signing_config_arn();
+    client
+        .tag_resource()
+        .resource(csc_arn)
+        .tags("env", "prod")
+        .send()
+        .await
+        .unwrap();
+    let tags = client.list_tags().resource(csc_arn).send().await.unwrap();
+    let tags = tags.tags().unwrap();
+    assert_eq!(tags.get("team").map(String::as_str), Some("sec"));
+    assert_eq!(tags.get("env").map(String::as_str), Some("prod"));
+}
+
 fn make_python_zip_returning(payload: &str) -> Vec<u8> {
     // A second-flavor zip whose handler returns a payload-derived value,
     // so callers can confirm UpdateFunctionCode actually swapped the code

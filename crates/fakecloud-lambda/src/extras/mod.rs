@@ -80,33 +80,47 @@ fn function_name_from_arn(arn: &str) -> Option<String> {
 }
 
 /// What a tagging operation's `Resource` ARN names: a function (tags on
-/// aliases and versions land on the function) or an event source mapping
-/// (`arn:aws:lambda:<region>:<account>:event-source-mapping:<uuid>`).
+/// aliases and versions land on the function), an event source mapping
+/// (`...:event-source-mapping:<uuid>`), a code signing config
+/// (`...:code-signing-config:csc-<id>`) or a capacity provider
+/// (`...:capacity-provider:<name>`), the taggable resources of the model's
+/// `TaggableResource`.
 enum TagTarget {
     Function(String),
     EventSourceMapping(String),
+    CodeSigningConfig(String),
+    CapacityProvider { name: String, arn: String },
 }
 
 fn tag_target(arn: &str) -> Result<TagTarget, AwsServiceError> {
     if let Some(name) = function_name_from_arn(arn) {
         return Ok(TagTarget::Function(name));
     }
-    let uuid = fakecloud_aws::arn::arn_resource(arn, "lambda").and_then(|rest| {
+    let target = fakecloud_aws::arn::arn_resource(arn, "lambda").and_then(|rest| {
         let mut parts = rest.splitn(4, ':');
         let (_region, _account) = (parts.next()?, parts.next()?);
-        (parts.next()? == "event-source-mapping")
-            .then(|| parts.next())
-            .flatten()
-            .filter(|uuid| !uuid.is_empty())
+        let kind = parts.next()?;
+        let id = parts.next().filter(|id| !id.is_empty())?.to_string();
+        match kind {
+            "event-source-mapping" => Some(TagTarget::EventSourceMapping(id)),
+            "code-signing-config" => Some(TagTarget::CodeSigningConfig(id)),
+            "capacity-provider" => Some(TagTarget::CapacityProvider {
+                name: id,
+                arn: arn.to_string(),
+            }),
+            _ => None,
+        }
     });
-    uuid.map(|u| TagTarget::EventSourceMapping(u.to_string()))
-        .ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function or event source mapping: {arn}"),
-            )
-        })
+    target.ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValueException",
+            format!(
+                "Resource ARN is not a Lambda function, event source mapping, code signing \
+                 config or capacity provider: {arn}"
+            ),
+        )
+    })
 }
 
 fn tag_target_not_found(target: &TagTarget) -> AwsServiceError {
@@ -123,6 +137,8 @@ fn tag_target_not_found(target: &TagTarget) -> AwsServiceError {
                 "The resource you requested does not exist. (Service: Lambda, Status Code: 404, Request ID: {uuid})"
             ),
         ),
+        TagTarget::CodeSigningConfig(id) => not_found("CodeSigningConfig", id),
+        TagTarget::CapacityProvider { arn, .. } => crate::capacity::provider_not_found(arn),
     }
 }
 
@@ -137,6 +153,12 @@ fn target_tags_mut<'a>(
             .event_source_mappings
             .get_mut(uuid)
             .map(|m| &mut m.tags),
+        TagTarget::CodeSigningConfig(id) => {
+            state.code_signing_configs.get_mut(id).map(|c| &mut c.tags)
+        }
+        TagTarget::CapacityProvider { name, .. } => {
+            state.capacity_providers.get_mut(name).map(|c| &mut c.tags)
+        }
     }
     .ok_or_else(|| tag_target_not_found(target))
 }
@@ -149,6 +171,10 @@ fn target_tags<'a>(
         TagTarget::Function(name) => state.functions.get(name).map(|f| &f.tags),
         TagTarget::EventSourceMapping(uuid) => {
             state.event_source_mappings.get(uuid).map(|m| &m.tags)
+        }
+        TagTarget::CodeSigningConfig(id) => state.code_signing_configs.get(id).map(|c| &c.tags),
+        TagTarget::CapacityProvider { name, .. } => {
+            state.capacity_providers.get(name).map(|c| &c.tags)
         }
     }
     .ok_or_else(|| tag_target_not_found(target))
@@ -1275,7 +1301,11 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
-        let new_tags: Vec<(String, String)> = body
+        // `Tags` is a required member.
+        if body.get("Tags").is_none_or(Value::is_null) {
+            return Err(null_member("tags"));
+        }
+        let new_tags: std::collections::BTreeMap<String, String> = body
             .get("Tags")
             .and_then(|v| v.as_object())
             .map(|m| {
@@ -1284,15 +1314,19 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
+        // The model constraints are input validation, checked before the
+        // resource is looked up.
+        crate::tagging::validate_tag_shapes(&new_tags)?;
         let target = tag_target(resource_arn)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        // Single source of truth: the function's (or mapping's) `tags`.
+        // Single source of truth: the resource's own `tags`.
         // `GetFunction`, `ListTags`, and `UntagResource` all read here.
         let tags = target_tags_mut(state, &target)?;
-        for (k, v) in new_tags {
-            tags.insert(k, v);
-        }
+        // The reserved prefix, and the per-resource limit on the tags the
+        // resource would end up with.
+        crate::tagging::validate_tags_added(tags, &new_tags)?;
+        tags.extend(new_tags);
         empty()
     }
 
@@ -1334,6 +1368,12 @@ impl LambdaService {
                 }
             }
         }
+        // `TagKeys` is a required member, each a model `TagKey`; keys in
+        // the reserved `aws:` namespace cannot be removed either.
+        if keys.is_empty() {
+            return Err(null_member("tagKeys"));
+        }
+        crate::tagging::validate_tag_keys(&keys)?;
         let target = tag_target(resource_arn)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);

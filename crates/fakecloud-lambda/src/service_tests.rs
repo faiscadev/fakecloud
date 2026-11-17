@@ -2880,6 +2880,310 @@ async fn untag_resource_with_multiple_keys() {
     assert_eq!(func.tags.get("C").map(String::as_str), Some("3"));
 }
 
+async fn tag_call(svc: &LambdaService, arn: &str, tags: Value) -> Result<(), AwsServiceError> {
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &tags.to_string(),
+    );
+    svc.handle(req).await.map(|_| ())
+}
+
+async fn untag_call(svc: &LambdaService, arn: &str, query: &str) -> Result<(), AwsServiceError> {
+    let mut req = make_request(Method::DELETE, &format!("/2017-03-31/tags/{arn}"), "");
+    req.raw_query = query.to_string();
+    svc.handle(req).await.map(|_| ())
+}
+
+#[tokio::test]
+async fn tag_resource_enforces_tag_constraints() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+    let long_key = "k".repeat(129);
+    let long_value = "v".repeat(257);
+    for (tags, code) in [
+        (json!({long_key.as_str(): "v"}), "ValidationException"),
+        (json!({"": "v"}), "ValidationException"),
+        (json!({"bad#key": "v"}), "ValidationException"),
+        (json!({"k": long_value.as_str()}), "ValidationException"),
+        (json!({"k": "bad*value"}), "ValidationException"),
+        (json!({"aws:owner": "me"}), "InvalidParameterValueException"),
+    ] {
+        let err = tag_call(&svc, arn, json!({"Tags": tags}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), code, "{tags}");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+    // `Tags` is required.
+    let err = tag_call(&svc, arn, json!({})).await.unwrap_err();
+    assert_eq!(err.code(), "ValidationException");
+    assert!(err.message().contains("'tags'"));
+    // Model violations are refused before the resource is looked up.
+    let err = tag_call(
+        &svc,
+        "arn:aws:lambda:us-east-1:123456789012:function:nope",
+        json!({"Tags": {"bad#": "v"}}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "ValidationException");
+    // Nothing was written by the refused calls.
+    let accounts = svc.state.read();
+    let state = accounts.regional("123456789012", "us-east-1").unwrap();
+    assert!(state.functions["tag-fn"].tags.is_empty());
+}
+
+#[tokio::test]
+async fn tag_resource_counts_existing_tags_against_the_limit() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+    let first: serde_json::Map<String, Value> =
+        (0..49).map(|i| (format!("k{i}"), json!("v"))).collect();
+    tag_call(&svc, arn, json!({"Tags": first})).await.unwrap();
+    // 49 + 2 new keys exceeds 50.
+    let err = tag_call(&svc, arn, json!({"Tags": {"x": "1", "y": "2"}}))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterValueException");
+    // Overwriting existing keys plus one new key reaches exactly 50.
+    tag_call(&svc, arn, json!({"Tags": {"k0": "changed", "x": "1"}}))
+        .await
+        .unwrap();
+    let accounts = svc.state.read();
+    let state = accounts.regional("123456789012", "us-east-1").unwrap();
+    let tags = &state.functions["tag-fn"].tags;
+    assert_eq!(tags.len(), 50);
+    assert_eq!(tags["k0"], "changed");
+}
+
+#[tokio::test]
+async fn untag_resource_validates_tag_keys() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+    tag_call(&svc, arn, json!({"Tags": {"a": "1"}}))
+        .await
+        .unwrap();
+    let long = format!("tagKeys={}", "k".repeat(129));
+    for (query, code) in [
+        ("", "ValidationException"),
+        (long.as_str(), "ValidationException"),
+        ("tagKeys=bad%23", "ValidationException"),
+        (
+            "tagKeys=a&tagKeys=aws%3Ax",
+            "InvalidParameterValueException",
+        ),
+    ] {
+        let err = untag_call(&svc, arn, query).await.unwrap_err();
+        assert_eq!(err.code(), code, "{query}");
+    }
+    let accounts = svc.state.read();
+    let state = accounts.regional("123456789012", "us-east-1").unwrap();
+    assert_eq!(state.functions["tag-fn"].tags.len(), 1);
+}
+
+#[tokio::test]
+async fn creates_validate_their_tags() {
+    let svc = LambdaService::new(make_state());
+    let function = |tags: Value| {
+        json!({
+            "FunctionName": "tagged",
+            "Runtime": "python3.12",
+            "Role": "arn:aws:iam::123456789012:role/r",
+            "Handler": "index.handler",
+            "Code": {},
+            "Tags": tags,
+        })
+    };
+    let fifty_one: serde_json::Map<String, Value> =
+        (0..51).map(|i| (format!("k{i}"), json!("v"))).collect();
+    for (tags, code) in [
+        (json!({"bad#": "v"}), "ValidationException"),
+        (json!({"aws:x": "v"}), "InvalidParameterValueException"),
+        (Value::Object(fifty_one), "InvalidParameterValueException"),
+    ] {
+        let err = call_with(
+            &svc,
+            Method::POST,
+            "/2015-03-31/functions",
+            &[],
+            function(tags),
+        )
+        .await
+        .err()
+        .expect("invalid tags refused");
+        assert_eq!(err.code(), code);
+    }
+    assert!(svc
+        .state
+        .read()
+        .regional("123456789012", "us-east-1")
+        .is_none_or(|s| !s.functions.contains_key("tagged")));
+
+    seed_function(&svc, "esm-fn").await;
+    let err = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &[],
+        json!({
+            "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+            "FunctionName": "esm-fn",
+            "Tags": {"aws:x": "v"},
+        }),
+    )
+    .await
+    .err()
+    .expect("reserved tag key refused");
+    assert_eq!(err.code(), "InvalidParameterValueException");
+
+    let err = call_with(
+        &svc,
+        Method::POST,
+        "/2020-04-22/code-signing-configs",
+        &[],
+        json!({
+            "AllowedPublishers": {"SigningProfileVersionArns": []},
+            "Tags": {"k": "v".repeat(257)},
+        }),
+    )
+    .await
+    .err()
+    .expect("long tag value refused");
+    assert_eq!(err.code(), "ValidationException");
+}
+
+#[tokio::test]
+async fn code_signing_configs_keep_and_take_tags() {
+    let svc = LambdaService::new(make_state());
+    let created = call_with(
+        &svc,
+        Method::POST,
+        "/2020-04-22/code-signing-configs",
+        &[],
+        json!({
+            "AllowedPublishers": {"SigningProfileVersionArns": []},
+            "Tags": {"team": "sec"},
+        }),
+    )
+    .await
+    .unwrap();
+    let arn = json_of(&created)["CodeSigningConfig"]["CodeSigningConfigArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    async fn list(svc: &LambdaService, arn: &str) -> Value {
+        let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
+        json_of(&svc.handle(req).await.unwrap())["Tags"].clone()
+    }
+    assert_eq!(list(&svc, &arn).await, json!({"team": "sec"}));
+    tag_call(&svc, &arn, json!({"Tags": {"env": "prod"}}))
+        .await
+        .unwrap();
+    untag_call(&svc, &arn, "tagKeys=team").await.unwrap();
+    assert_eq!(list(&svc, &arn).await, json!({"env": "prod"}));
+
+    let missing = "arn:aws:lambda:us-east-1:123456789012:code-signing-config:csc-0123456789abcdef0";
+    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{missing}"), "");
+    let err = svc.handle(req).await.err().expect("missing config listed");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[test]
+fn iam_action_for_tagging_targets_the_tagged_resource() {
+    let svc = LambdaService::new(make_state());
+    for (method, arn, action, resource) in [
+        (
+            Method::POST,
+            "arn:aws:lambda:us-east-1:123456789012:function:f",
+            "TagResource",
+            "arn:aws:lambda:us-east-1:123456789012:function:f",
+        ),
+        (
+            Method::GET,
+            "arn:aws:lambda:us-east-1:123456789012:function:f:prod",
+            "ListTags",
+            "arn:aws:lambda:us-east-1:123456789012:function:f",
+        ),
+        (
+            Method::DELETE,
+            "arn:aws:lambda:us-east-1:123456789012:event-source-mapping:11111111-2222-3333-4444-555555555555",
+            "UntagResource",
+            "arn:aws:lambda:us-east-1:123456789012:event-source-mapping:11111111-2222-3333-4444-555555555555",
+        ),
+        (
+            Method::POST,
+            "arn:aws:lambda:us-east-1:123456789012:code-signing-config:csc-0123456789abcdef0",
+            "TagResource",
+            "arn:aws:lambda:us-east-1:123456789012:code-signing-config:csc-0123456789abcdef0",
+        ),
+    ] {
+        let req = make_request(method, &format!("/2017-03-31/tags/{arn}"), "{}");
+        let iam = svc.iam_action_for(&req).expect("mapped");
+        assert_eq!(iam.action, action);
+        assert_eq!(iam.resource, resource);
+    }
+}
+
+#[test]
+fn iam_actions_for_tag_on_create_include_tag_resource() {
+    let svc = LambdaService::new(make_state());
+    let tag_resource = |req: &AwsRequest| {
+        svc.iam_actions_for(req)
+            .into_iter()
+            .find(|a| a.action == "TagResource")
+            .map(|a| a.resource)
+    };
+    let function = json!({
+        "FunctionName": "tagged",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Tags": {"team": "core"},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &function.to_string());
+    assert_eq!(
+        tag_resource(&req).as_deref(),
+        Some("arn:aws:lambda:us-east-1:123456789012:function:tagged")
+    );
+    // No tags, no tagging permission needed.
+    let untagged = json!({"FunctionName": "plain", "Tags": {}});
+    let req = make_request(Method::POST, "/2015-03-31/functions", &untagged.to_string());
+    assert_eq!(tag_resource(&req), None);
+
+    let esm = json!({"FunctionName": "f", "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q", "Tags": {"a": "1"}});
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &esm.to_string(),
+    );
+    assert_eq!(
+        tag_resource(&req).as_deref(),
+        Some("arn:aws:lambda:us-east-1:123456789012:event-source-mapping:*")
+    );
+    let csc = json!({"AllowedPublishers": {"SigningProfileVersionArns": []}, "Tags": {"a": "1"}});
+    let req = make_request(
+        Method::POST,
+        "/2020-04-22/code-signing-configs",
+        &csc.to_string(),
+    );
+    assert_eq!(
+        tag_resource(&req).as_deref(),
+        Some("arn:aws:lambda:us-east-1:123456789012:code-signing-config:*")
+    );
+    let cp = json!({"CapacityProviderName": "cp1", "Tags": {"a": "1"}});
+    let req = make_request(
+        Method::POST,
+        "/2025-11-30/capacity-providers",
+        &cp.to_string(),
+    );
+    assert_eq!(
+        tag_resource(&req).as_deref(),
+        Some("arn:aws:lambda:us-east-1:123456789012:capacity-provider:cp1")
+    );
+}
+
 #[tokio::test]
 async fn tag_state_unified_no_duplicate_state_tags() {
     // After D3, `LambdaState::tags` no longer exists — tags live only
@@ -5718,6 +6022,7 @@ async fn code_signing_config_labels_are_judged_alike_and_issued_ids_stay_usable(
                 allowed_publishers: Vec::new(),
                 untrusted_artifact_action: "Warn".to_string(),
                 last_modified: chrono::Utc::now(),
+                tags: Default::default(),
             },
         );
     }

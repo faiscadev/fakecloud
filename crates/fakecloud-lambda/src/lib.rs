@@ -11,6 +11,7 @@ pub mod resource_policy;
 pub mod runtime;
 pub(crate) mod service;
 pub(crate) mod state;
+pub mod tagging;
 pub mod vpc;
 pub(crate) mod workflows;
 

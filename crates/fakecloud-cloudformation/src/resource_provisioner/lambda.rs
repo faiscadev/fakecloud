@@ -75,6 +75,8 @@ impl ResourceProvisioner {
         }
 
         let cfg = parse_lambda_function_props(props, &self.region)?;
+        fakecloud_lambda::tagging::validate_tags(&cfg.tags)
+            .map_err(|e| lambda_handler_error(&e))?;
         self.validate_lambda_execution_role(&cfg.role)?;
         let function_arn =
             fakecloud_lambda::function_arn(&self.region, &self.account_id, &function_name);
@@ -325,6 +327,8 @@ impl ResourceProvisioner {
         let props = &resource.properties;
         let function_name = existing.physical_id.clone();
         let cfg = parse_lambda_function_props(props, &self.region)?;
+        fakecloud_lambda::tagging::validate_tags(&cfg.tags)
+            .map_err(|e| lambda_handler_error(&e))?;
         self.validate_lambda_execution_role(&cfg.role)?;
 
         let new_code_zip = if cfg.code_zip.is_some() {
@@ -669,6 +673,8 @@ impl ResourceProvisioner {
     ) -> Result<ProvisionResult, String> {
         let props = coerce_event_source_mapping_scalars(&resource.properties)?;
         let cfg = parse_lambda_event_source_mapping_props(&props)?;
+        let tags = fakecloud_lambda::esm_config::tags(&props);
+        fakecloud_lambda::tagging::validate_tags(&tags).map_err(|e| lambda_handler_error(&e))?;
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
         let esm = state
@@ -694,7 +700,7 @@ impl ResourceProvisioner {
             .and_then(|()| fakecloud_lambda::esm_config::apply_update(esm, &settings))
             .map_err(|e| lambda_handler_error(&e))?;
         // The template's Tags are the mapping's tags.
-        esm.tags = fakecloud_lambda::esm_config::tags(&props);
+        esm.tags = tags;
         esm.batch_size = cfg.batch_size;
         esm.enabled = cfg.enabled;
         esm.state = if cfg.enabled {
@@ -1486,6 +1492,13 @@ impl ResourceProvisioner {
         new_def: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
         let props = &new_def.properties;
+        // Tags are desired state: an absent Tags property clears them.
+        let tags: std::collections::BTreeMap<String, String> =
+            lambda_cfn_tag_map(props.get("Tags"))
+                .into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_string())))
+                .collect();
+        fakecloud_lambda::tagging::validate_tags(&tags).map_err(|e| lambda_handler_error(&e))?;
         let body = serde_json::json!({
             "CapacityProviderScalingConfig": props
                 .get("CapacityProviderScalingConfig")
@@ -1500,11 +1513,6 @@ impl ResourceProvisioner {
             &body,
         )
         .map_err(|e| e.to_string())?;
-        // Tags are desired state: an absent Tags property clears them.
-        let tags = lambda_cfn_tag_map(props.get("Tags"))
-            .into_iter()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_string())))
-            .collect();
         if let Some(stored) = self
             .lambda_state
             .write()
