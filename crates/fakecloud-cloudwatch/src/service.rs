@@ -15,7 +15,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_persistence::SnapshotStore;
 use tokio::sync::Mutex;
 
-use crate::alarm_actions::{AlarmNotification, Ec2AlarmActionHook};
+use crate::alarm_actions::{AlarmActionAuthorizer, AlarmNotification, Ec2AlarmActionHook};
 
 use crate::state::{
     AlarmHistoryItem, AlarmMetricQuery, AlarmMetricStat, AlarmState, CloudWatchSnapshot, Dashboard,
@@ -134,6 +134,11 @@ pub struct CloudWatchService {
     delivery: Option<Arc<DeliveryBus>>,
     /// Performs EC2 instance alarm actions.
     ec2_actions: Option<Arc<dyn Ec2AlarmActionHook>>,
+    /// Checks action targets' resource policies.
+    action_authorizer: Option<Arc<dyn AlarmActionAuthorizer>>,
+    /// Held while queued actions are dispatched, so they are delivered one
+    /// at a time in the order the state changes happened.
+    dispatch_lock: Mutex<()>,
     /// Actions owed by state changes made under the state lock, run by
     /// [`Self::run_pending_actions`] once it is released.
     pending_actions: parking_lot::Mutex<Vec<AlarmNotification>>,
@@ -149,6 +154,8 @@ impl CloudWatchService {
             snapshot_lock: Arc::new(Mutex::new(())),
             delivery: None,
             ec2_actions: None,
+            action_authorizer: None,
+            dispatch_lock: Mutex::new(()),
             pending_actions: parking_lot::Mutex::new(Vec::new()),
             evaluation_dirty: std::sync::atomic::AtomicBool::new(false),
         }
@@ -164,6 +171,13 @@ impl CloudWatchService {
     /// `hook`.
     pub fn with_ec2_actions(mut self, hook: Arc<dyn Ec2AlarmActionHook>) -> Self {
         self.ec2_actions = Some(hook);
+        self
+    }
+
+    /// Check alarm action targets' resource policies (Lambda function
+    /// policies, cross-account SNS topic policies) through `authorizer`.
+    pub fn with_action_authorizer(mut self, authorizer: Arc<dyn AlarmActionAuthorizer>) -> Self {
+        self.action_authorizer = Some(authorizer);
         self
     }
 
@@ -192,49 +206,83 @@ impl CloudWatchService {
 
     /// Run every queued alarm action and record the outcomes in the alarm
     /// history. Returns whether anything ran.
-    async fn run_pending_actions(&self) -> bool {
+    pub(crate) async fn run_pending_actions(&self) -> bool {
+        // One dispatcher at a time, draining under the lock: actions queued
+        // in transition order are delivered in that order.
+        let _dispatching = self.dispatch_lock.lock().await;
         let pending = std::mem::take(&mut *self.pending_actions.lock());
         if pending.is_empty() {
             return false;
         }
+        let targets = crate::alarm_actions::ActionTargets {
+            delivery: self.delivery.as_deref(),
+            ec2: self.ec2_actions.as_deref(),
+            authorizer: self.action_authorizer.as_deref(),
+        };
+        let mut acted = false;
         for n in &pending {
-            let items = crate::alarm_actions::dispatch(
-                n,
-                self.delivery.as_deref(),
-                self.ec2_actions.as_deref(),
-            )
-            .await;
+            // Queued before a reset of the account: the alarm is gone.
+            let current = self.state.read().get(&n.account_id).map(|a| a.epoch);
+            if current != Some(n.epoch) {
+                continue;
+            }
+            let items = crate::alarm_actions::dispatch(n, targets).await;
             if items.is_empty() {
                 continue;
             }
+            acted = true;
             let mut state = self.state.write();
-            let acct = state.get_or_create(&n.account_id);
+            let Some(acct) = state.accounts.get_mut(&n.account_id) else {
+                continue;
+            };
+            if acct.epoch != n.epoch {
+                continue;
+            }
             for item in items {
                 push_alarm_history(acct, &n.region, item);
             }
         }
-        true
+        acted
     }
 
-    /// Evaluate every alarm in every account and region, run the actions the
-    /// state changes owe, and persist the result. The server runs this on a
-    /// timer so alarms change state (and act) as time passes, the way
-    /// CloudWatch evaluates them each period, without anyone describing them.
+    /// Evaluate the alarms whose outcome can have changed with time alone
+    /// (past their next period boundary, or composites with a running
+    /// suppression), run the actions their state changes owe, and persist
+    /// the result. The server runs this on a timer so alarms change state
+    /// (and act) as time passes, the way CloudWatch evaluates them each
+    /// period. The state lock is held per account; accounts without alarms
+    /// cost a map lookup.
     pub async fn evaluate_all_alarms(&self) {
         let now = Utc::now();
-        {
+        let accounts: Vec<String> = self
+            .state
+            .read()
+            .accounts
+            .iter()
+            .filter(|(_, a)| {
+                a.alarms.values().any(|r| !r.is_empty())
+                    || a.composite_alarms.values().any(|r| !r.is_empty())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for account_id in accounts {
             let mut state = self.state.write();
-            for acct in state.accounts.values_mut() {
-                let regions: std::collections::BTreeSet<String> = acct
-                    .alarms
-                    .keys()
-                    .chain(acct.composite_alarms.keys())
-                    .chain(acct.log_alarms.keys())
-                    .cloned()
-                    .collect();
-                for region in regions {
-                    self.queue_evaluation(crate::alarm_eval::evaluate_alarms(acct, &region, now));
-                }
+            let Some(acct) = state.accounts.get_mut(&account_id) else {
+                continue;
+            };
+            let regions: std::collections::BTreeSet<String> = acct
+                .alarms
+                .keys()
+                .chain(acct.composite_alarms.keys())
+                .cloned()
+                .collect();
+            for region in regions {
+                self.queue_evaluation(crate::alarm_eval::evaluate_alarms_in(
+                    acct,
+                    &region,
+                    now,
+                    crate::alarm_eval::Scope::Due,
+                ));
             }
         }
         let acted = self.run_pending_actions().await;
@@ -451,18 +499,14 @@ impl AwsService for CloudWatchService {
                 &req.action,
             )),
         };
-        // A state change can come from data, a forced state or a new
-        // configuration: evaluate the region right away so the alarms (and
-        // composites over them) transition and act without waiting for the
-        // evaluation timer.
+        // A forced state or a new configuration can change states: evaluate
+        // the region right away so the alarms (and composites over them)
+        // transition and act without waiting for the evaluation timer.
+        // (PutMetricData evaluates just the alarms on the series it wrote.)
         if result.is_ok()
             && matches!(
                 req.action.as_str(),
-                "PutMetricData"
-                    | "SetAlarmState"
-                    | "PutMetricAlarm"
-                    | "PutCompositeAlarm"
-                    | "PutLogAlarm"
+                "SetAlarmState" | "PutMetricAlarm" | "PutCompositeAlarm" | "PutLogAlarm"
             )
         {
             self.evaluate_region(&req.account_id, &req.region);
@@ -1166,8 +1210,8 @@ pub(crate) fn resolve_stat(
 /// each distinct dimension combination as its own metric) and, when a unit
 /// filter is set, only datapoints published with that unit.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn collect_metric_buckets(
-    data: &[MetricDatum],
+pub(crate) fn collect_metric_buckets<'a>(
+    data: impl IntoIterator<Item = &'a MetricDatum>,
     metric_name: &str,
     dim_filter: &BTreeMap<String, String>,
     unit_filter: Option<&str>,
@@ -1176,7 +1220,7 @@ pub(crate) fn collect_metric_buckets(
     end_ts: DateTime<Utc>,
 ) -> BTreeMap<DateTime<Utc>, MetricBucket> {
     let mut buckets: BTreeMap<DateTime<Utc>, MetricBucket> = BTreeMap::new();
-    for d in data.iter() {
+    for d in data {
         if d.metric_name != metric_name {
             continue;
         }
@@ -1253,6 +1297,7 @@ impl CloudWatchService {
         let acct = state.get_or_create(&req.account_id);
         let metrics_map = acct.metrics_in_mut(&req.region);
         let bucket = metrics_map.entry(namespace.clone()).or_default();
+        let mut touched: Vec<crate::series_index::SeriesKey> = Vec::new();
 
         for member in members {
             let metric_name = member
@@ -1312,6 +1357,10 @@ impl CloudWatchService {
                 ));
             }
 
+            let key = (metric_name.clone(), dimensions.clone());
+            if !touched.contains(&key) {
+                touched.push(key);
+            }
             bucket.push(MetricDatum {
                 metric_name,
                 dimensions,
@@ -1322,6 +1371,17 @@ impl CloudWatchService {
                 storage_resolution,
             });
         }
+
+        // Evaluate just the alarms on the series this put wrote.
+        self.queue_evaluation(crate::alarm_eval::evaluate_alarms_in(
+            acct,
+            &req.region,
+            Utc::now(),
+            crate::alarm_eval::Scope::Series {
+                namespace: &namespace,
+                series: &touched,
+            },
+        ));
 
         Ok(empty_metadata_response("PutMetricData", &req.request_id))
     }
@@ -1771,6 +1831,11 @@ impl CloudWatchService {
             }
         }
 
+        validate_alarm_actions(
+            [&ok_actions, &alarm_actions, &insufficient_data_actions],
+            &req.region,
+            crate::alarm_actions::AlarmKind::Metric,
+        )?;
         let arn = crate::state::alarm_arn(&req.region, &req.account_id, &alarm_name);
         let now = Utc::now();
 
@@ -1846,6 +1911,8 @@ impl CloudWatchService {
                 .as_ref()
                 .map(|a| a.alarm_exit)
                 .unwrap_or_else(crate::state::AlarmExit::new),
+            manual_hold_until: existing.as_ref().and_then(|a| a.manual_hold_until),
+            next_evaluation_at: None,
         };
         // An evaluation error belongs to the configuration that caused it. A
         // single-metric configuration is re-evaluated right after this put
@@ -2240,8 +2307,13 @@ impl CloudWatchService {
         let mut notification = None;
         let item = if let Some(alarm) = acct.alarms_in_mut(&req.region).get_mut(&alarm_name) {
             // Mark this as a manual override so a later evaluation with no
-            // datapoints keeps it rather than resetting to INSUFFICIENT_DATA.
+            // datapoints keeps it rather than resetting to INSUFFICIENT_DATA,
+            // and hold it for a period: AWS evaluates the alarm normally
+            // again at its next period, not within this request.
             alarm.state_manually_set = true;
+            let hold = now + chrono::Duration::seconds(alarm.period.unwrap_or(60).max(1));
+            alarm.manual_hold_until = Some(hold);
+            alarm.next_evaluation_at = Some(hold);
             let (item, prev) = set(
                 "MetricAlarm",
                 &mut alarm.state_value,
@@ -2302,8 +2374,19 @@ impl CloudWatchService {
             ));
         };
         push_alarm_history(acct, &req.region, item);
+        let epoch = acct.epoch;
+        // Queued under the state lock, so it keeps its place in transition
+        // order.
+        self.queue_notifications(
+            notification
+                .into_iter()
+                .map(|mut n| {
+                    n.epoch = epoch;
+                    n
+                })
+                .collect(),
+        );
         drop(state);
-        self.queue_notifications(notification.into_iter().collect());
 
         Ok(empty_metadata_response("SetAlarmState", &req.request_id))
     }
@@ -2585,6 +2668,19 @@ pub(crate) fn push_alarm_history(
         .entry(item.alarm_name.clone())
         .or_default()
         .push(item);
+}
+
+/// Reject any action ARN that isn't a documented action form for `kind` of
+/// alarm (see [`crate::alarm_actions::validate_action`]).
+pub(crate) fn validate_alarm_actions(
+    lists: [&[String]; 3],
+    region: &str,
+    kind: crate::alarm_actions::AlarmKind,
+) -> Result<(), AwsServiceError> {
+    for arn in lists.into_iter().flatten() {
+        crate::alarm_actions::validate_action(arn, region, kind).map_err(validation_error)?;
+    }
+    Ok(())
 }
 
 /// The `ConfigurationUpdate` history item a Put*Alarm call records: the

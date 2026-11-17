@@ -61,6 +61,11 @@ impl CloudWatchService {
             optional_query_param(req, "ActionsSuppressorExtensionPeriod")
                 .and_then(|s| s.parse().ok());
         let action_configuration = crate::flat_members::action_configuration(req)?;
+        crate::service::validate_alarm_actions(
+            [&ok_actions, &alarm_actions, &insufficient_data_actions],
+            &req.region,
+            crate::alarm_actions::AlarmKind::Composite,
+        )?;
 
         let arn = crate::state::alarm_arn(&req.region, &req.account_id, &alarm_name);
         let now = Utc::now();

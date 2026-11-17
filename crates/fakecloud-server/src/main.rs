@@ -4838,6 +4838,17 @@ async fn main() {
             .with_delivery(delivery_for_cloudwatch_alarms)
             .with_ec2_actions(Arc::new(cloudwatch_alarm_hooks::Ec2AlarmActions::new(
                 sfn_registry_handle.clone(),
+            )))
+            .with_action_authorizer(Arc::new(cloudwatch_alarm_hooks::AlarmActionPolicies::new(
+                fakecloud_core::auth::MultiResourcePolicyProvider::shared(vec![
+                    fakecloud_sns::resource_policy::SnsResourcePolicyProvider::shared(
+                        sns_state.clone(),
+                    ),
+                    fakecloud_lambda::resource_policy::LambdaResourcePolicyProvider::shared(
+                        lambda_state.clone(),
+                    ),
+                ]),
+                fakecloud_iam::policy_evaluator::IamPolicyEvaluatorImpl::shared(iam_state.clone()),
             )));
     if let Some(store) = cloudwatch_snapshot_store {
         cloudwatch_service = cloudwatch_service.with_snapshot_store(store);

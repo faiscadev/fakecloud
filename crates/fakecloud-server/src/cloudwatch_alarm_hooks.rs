@@ -12,9 +12,88 @@ use std::sync::{Arc, OnceLock};
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 
+use fakecloud_cloudwatch::alarm_actions::{ActionGrant, AlarmActionAuthorizer, GrantPrincipal};
 use fakecloud_cloudwatch::{Ec2AlarmActionHook, Ec2InstanceAction};
+use fakecloud_core::auth::{
+    ConditionContext, IamAction, IamPolicyEvaluator, InternalCaller, Principal, PrincipalType,
+    ResourcePolicyProvider,
+};
 use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_core::service::AwsRequest;
+
+/// Evaluates alarm action targets' resource policies (a Lambda function's
+/// policy, an SNS topic's policy) with the same providers and evaluator
+/// request authorization uses.
+pub struct AlarmActionPolicies {
+    provider: Arc<dyn ResourcePolicyProvider>,
+    evaluator: Arc<dyn IamPolicyEvaluator>,
+}
+
+impl AlarmActionPolicies {
+    pub fn new(
+        provider: Arc<dyn ResourcePolicyProvider>,
+        evaluator: Arc<dyn IamPolicyEvaluator>,
+    ) -> Self {
+        Self {
+            provider,
+            evaluator,
+        }
+    }
+}
+
+impl AlarmActionAuthorizer for AlarmActionPolicies {
+    fn allows(&self, grant: &ActionGrant<'_>) -> bool {
+        let Some(policy) = self
+            .provider
+            .resource_policy(grant.service, grant.resource_arn)
+        else {
+            return false;
+        };
+        let (principal, service_keys) = match grant.principal {
+            GrantPrincipal::Service(service) => {
+                let caller = InternalCaller::Service {
+                    service: service.to_string(),
+                    source_arn: grant.source_arn.to_string(),
+                    source_account: grant.source_account.to_string(),
+                };
+                (caller.principal(), caller.condition_keys())
+            }
+            GrantPrincipal::Account(account) => {
+                let partition = fakecloud_aws::arn::partition_of(grant.resource_arn);
+                let mut keys = std::collections::BTreeMap::new();
+                keys.insert("aws:SourceOwner".to_string(), vec![account.to_string()]);
+                keys.insert("aws:SourceAccount".to_string(), vec![account.to_string()]);
+                keys.insert(
+                    "aws:SourceArn".to_string(),
+                    vec![grant.source_arn.to_string()],
+                );
+                (
+                    Principal {
+                        arn: format!("arn:{partition}:iam::{account}:root"),
+                        user_id: account.to_string(),
+                        account_id: account.to_string(),
+                        principal_type: PrincipalType::Root,
+                        source_identity: None,
+                        tags: None,
+                    },
+                    keys,
+                )
+            }
+        };
+        let context = ConditionContext {
+            service_keys,
+            ..Default::default()
+        };
+        let action = IamAction {
+            service: grant.service,
+            action: grant.action,
+            resource: grant.resource_arn.to_string(),
+        };
+        self.evaluator
+            .evaluate_resource_policy_only(&principal, &action, &context, Some(&policy))
+            .is_allow()
+    }
+}
 
 /// Dispatches EC2 alarm actions to the registered EC2 service. The registry
 /// is filled in once every service is registered.

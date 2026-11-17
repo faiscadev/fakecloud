@@ -38,6 +38,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Map, Value};
 
 use crate::alarm_actions::AlarmNotification;
+use crate::series_index::SeriesKey;
 use crate::service::{collect_metric_buckets, resolve_stat};
 use crate::state::{
     ActionsSuppressedBy, AlarmHistoryItem, AlarmState, CloudWatchState, EvaluationState,
@@ -118,6 +119,33 @@ pub(crate) struct Evaluated {
     pub changed: bool,
     /// The actions owed for the state changes, to run outside the lock.
     pub notifications: Vec<AlarmNotification>,
+    /// How many metric alarms were evaluated.
+    pub alarms_evaluated: usize,
+    /// How many stored datapoints those evaluations read.
+    pub datums_inspected: usize,
+}
+
+/// Which alarms an evaluation pass looks at.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Scope<'a> {
+    /// Every alarm in the region (DescribeAlarms, a new configuration, a
+    /// forced state).
+    All,
+    /// Alarms whose outcome can have changed with time alone: those past
+    /// their next period boundary, and composites with a running
+    /// suppression or owed actions (the evaluation timer).
+    Due,
+    /// Alarms on the series a PutMetricData just wrote to `namespace`.
+    Series {
+        namespace: &'a str,
+        series: &'a [SeriesKey],
+    },
+}
+
+/// The first period boundary after `now`.
+fn next_boundary(now: DateTime<Utc>, period: i64) -> Option<DateTime<Utc>> {
+    let secs = now.timestamp();
+    DateTime::<Utc>::from_timestamp(secs - secs.rem_euclid(period) + period, 0)
 }
 
 /// Evaluate every alarm in `region` against the stored metric data at `now`,
@@ -128,22 +156,80 @@ pub(crate) fn evaluate_alarms(
     region: &str,
     now: DateTime<Utc>,
 ) -> Evaluated {
+    evaluate_alarms_in(state, region, now, Scope::All)
+}
+
+/// [`evaluate_alarms`] limited to the alarms `scope` selects.
+pub(crate) fn evaluate_alarms_in(
+    state: &mut CloudWatchState,
+    region: &str,
+    now: DateTime<Utc>,
+    scope: Scope<'_>,
+) -> Evaluated {
     let mut out = Evaluated::default();
     let account_id = state.account_id.clone();
+    let mut metric_transition = false;
     // ---- Metric alarms ----
     let mut history: Vec<AlarmHistoryItem> = Vec::new();
     {
-        // Disjoint field borrows: `metrics` shared, `alarms` mutable.
+        // Disjoint field borrows: `metrics` shared, `series_index` and
+        // `alarms` mutable.
         let data_map = state.metrics.get(region);
+        let index = &mut state.series_index;
         if let Some(alarms) = state.alarms.get_mut(region) {
             for alarm in alarms.values_mut() {
-                let data: Option<&[MetricDatum]> = alarm
+                let selected = match scope {
+                    Scope::All => true,
+                    Scope::Due => alarm.next_evaluation_at.is_none_or(|t| t <= now),
+                    Scope::Series { namespace, series } => {
+                        alarm.namespace.as_deref() == Some(namespace)
+                            && alarm.metric_name.as_ref().is_some_and(|m| {
+                                series.iter().any(|(n, d)| n == m && *d == alarm.dimensions)
+                            })
+                    }
+                };
+                if !selected {
+                    continue;
+                }
+                // A state forced by SetAlarmState holds until its period
+                // ends.
+                if let Some(until) = alarm.manual_hold_until {
+                    if now < until {
+                        alarm.next_evaluation_at = Some(until);
+                        continue;
+                    }
+                    alarm.manual_hold_until = None;
+                    out.changed = true;
+                }
+                alarm.next_evaluation_at = next_boundary(now, alarm.period.unwrap_or(60).max(1));
+                if crate::alarm_eval::not_single_metric(alarm) {
+                    continue;
+                }
+                out.alarms_evaluated += 1;
+                let data: &[MetricDatum] = alarm
                     .namespace
                     .as_ref()
                     .and_then(|ns| data_map.and_then(|m| m.get(ns)))
-                    .map(|v| v.as_slice());
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let mut inspected = 0;
                 let manually_set = alarm.state_manually_set;
-                let Some(ev) = evaluate_metric_alarm(alarm, data, now, manually_set) else {
+                let outcome = evaluate_metric_alarm(
+                    alarm,
+                    |start, end| {
+                        let (Some(ns), Some(name)) = (&alarm.namespace, &alarm.metric_name) else {
+                            return Vec::new();
+                        };
+                        let found =
+                            index.window((region, ns), data, name, &alarm.dimensions, start, end);
+                        inspected = found.len();
+                        found
+                    },
+                    now,
+                    manually_set,
+                );
+                out.datums_inspected += inspected;
+                let Some(ev) = outcome else {
                     continue;
                 };
                 // Once real datapoints govern the alarm, a prior manual
@@ -162,6 +248,9 @@ pub(crate) fn evaluate_alarms(
                 if before != (alarm.state_value, alarm.evaluation_state) {
                     out.changed = true;
                 }
+                if before.0 != alarm.state_value {
+                    metric_transition = true;
+                }
                 out.notifications
                     .extend(crate::alarm_actions::metric_alarm_notification(
                         &account_id,
@@ -177,7 +266,27 @@ pub(crate) fn evaluate_alarms(
     }
 
     // ---- Composite alarms ----
-    evaluate_composite_alarms(state, region, now, &mut out);
+    // Composites follow their children, so a targeted or timed pass only
+    // needs them when a child changed or a suppression is running out.
+    let composites_due = match scope {
+        Scope::All => true,
+        Scope::Series { .. } => metric_transition,
+        Scope::Due => {
+            metric_transition
+                || state.composite_alarms.get(region).is_some_and(|c| {
+                    c.values().any(|a| {
+                        a.actions_suppressed_by.is_some() || a.pending_action_from.is_some()
+                    })
+                })
+        }
+    };
+    if composites_due {
+        evaluate_composite_alarms(state, region, now, &mut out);
+    }
+    let epoch = state.epoch;
+    for n in &mut out.notifications {
+        n.epoch = epoch;
+    }
     out
 }
 
@@ -292,39 +401,59 @@ fn evaluate_composite_alarms(
     let mut states: HashMap<String, AlarmState> =
         members.iter().map(|(n, m)| (n.clone(), m.state)).collect();
 
-    // Manually set composites none of whose children changed since.
-    let mut frozen: HashSet<String> = HashSet::new();
+    // Manually set composites none of whose children changed since, with the
+    // children they reference.
+    let mut frozen: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(c) = state.composite_alarms.get_mut(region) {
         for (name, al) in c.iter_mut() {
             if !al.state_manually_set {
                 continue;
             }
-            let child_changed = parse_alarm_rule(&al.alarm_rule)
+            let refs: Vec<String> = parse_alarm_rule(&al.alarm_rule)
                 .map(|node| {
                     let mut refs = Vec::new();
                     referenced_names(&node, &mut refs);
-                    refs.iter().any(|r| {
-                        members
-                            .get(*r)
-                            .is_some_and(|m| m.transitioned > al.state_updated_timestamp)
-                    })
+                    refs.into_iter().map(str::to_string).collect()
                 })
-                .unwrap_or(false);
+                .unwrap_or_default();
+            let child_changed = refs.iter().any(|r| {
+                members
+                    .get(r)
+                    .is_some_and(|m| m.transitioned > al.state_updated_timestamp)
+            });
             if child_changed {
                 al.state_manually_set = false;
                 out.changed = true;
             } else {
-                frozen.insert(name.clone());
+                frozen.insert(name.clone(), refs);
             }
         }
     }
+    let mut unfrozen: Vec<String> = Vec::new();
 
     // Recompute composite states until stable (bounded by the composite count
     // so a reference cycle can't loop forever).
-    for _ in 0..composite_names.len() {
-        let mut changed = false;
+    for _ in 0..=composite_names.len() {
+        // A child composite that changed earlier in this pass unfreezes its
+        // manually set parent in the same pass.
+        let thawed: Vec<String> = frozen
+            .iter()
+            .filter(|(_, refs)| {
+                refs.iter().any(|r| {
+                    members
+                        .get(r)
+                        .is_some_and(|m| states.get(r).is_some_and(|s| *s != m.state))
+                })
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        let mut changed = !thawed.is_empty();
+        for n in thawed {
+            frozen.remove(&n);
+            unfrozen.push(n);
+        }
         for name in &composite_names {
-            if frozen.contains(name) {
+            if frozen.contains_key(name) {
                 continue;
             }
             let Some(rule) = state
@@ -344,6 +473,15 @@ fn evaluate_composite_alarms(
         }
         if !changed {
             break;
+        }
+    }
+
+    if let Some(c) = state.composite_alarms.get_mut(region) {
+        for n in &unfrozen {
+            if let Some(al) = c.get_mut(n) {
+                al.state_manually_set = false;
+                out.changed = true;
+            }
         }
     }
 
@@ -697,9 +835,11 @@ fn configuration_error(alarm: &MetricAlarm) -> Option<String> {
 /// state came from `SetAlarmState`; when true, a metric with no data under the
 /// default missing-data treatment (or a configuration that can't be evaluated)
 /// keeps its manual state instead of resetting to INSUFFICIENT_DATA.
-pub(crate) fn evaluate_metric_alarm(
+/// `window(start, end)` returns the alarm's metric datapoints with timestamps
+/// in `[start, end)`.
+pub(crate) fn evaluate_metric_alarm<'a>(
     alarm: &MetricAlarm,
-    data: Option<&[MetricDatum]>,
+    window: impl FnOnce(DateTime<Utc>, DateTime<Utc>) -> Vec<&'a MetricDatum>,
     now: DateTime<Utc>,
     manually_set: bool,
 ) -> Option<MetricEvaluation> {
@@ -748,18 +888,15 @@ pub(crate) fn evaluate_metric_alarm(
     let start_ts = DateTime::<Utc>::from_timestamp(window_start, 0)?;
     let end_ts = DateTime::<Utc>::from_timestamp(window_end, 0)?;
 
-    let buckets = match data {
-        Some(d) => collect_metric_buckets(
-            d,
-            metric_name,
-            &alarm.dimensions,
-            alarm.unit.as_deref(),
-            period,
-            start_ts,
-            end_ts,
-        ),
-        None => Default::default(),
-    };
+    let buckets = collect_metric_buckets(
+        window(start_ts, end_ts),
+        metric_name,
+        &alarm.dimensions,
+        alarm.unit.as_deref(),
+        period,
+        start_ts,
+        end_ts,
+    );
 
     // Gather one value per slot (most recent first) plus the breaching flags,
     // and the `evaluatedDatapoints` / `recentDatapoints` of the reason data.
@@ -1144,6 +1281,21 @@ fn normalize_ref(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    /// [`super::evaluate_metric_alarm`] over a plain datapoint list (or none).
+    fn evaluate_metric_alarm(
+        alarm: &MetricAlarm,
+        data: Option<&[MetricDatum]>,
+        now: DateTime<Utc>,
+        manually_set: bool,
+    ) -> Option<MetricEvaluation> {
+        super::evaluate_metric_alarm(
+            alarm,
+            |_, _| data.map(|d| d.iter().collect()).unwrap_or_default(),
+            now,
+            manually_set,
+        )
+    }
+
     fn states(pairs: &[(&str, AlarmState)]) -> HashMap<String, AlarmState> {
         pairs.iter().map(|(n, s)| (n.to_string(), *s)).collect()
     }
@@ -1270,6 +1422,8 @@ mod tests {
             state_transitioned_timestamp: None,
             evaluation_state: None,
             alarm_exit: crate::state::AlarmExit::new(),
+            manual_hold_until: None,
+            next_evaluation_at: None,
         }
     }
 

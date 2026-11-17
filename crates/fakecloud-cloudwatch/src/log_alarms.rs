@@ -110,6 +110,14 @@ impl CloudWatchService {
 
         let warm_up_configuration = crate::flat_members::warm_up_configuration(req)?;
         let action_configuration = crate::flat_members::action_configuration(req)?;
+        let ok_actions = collect_member_values(req, "OKActions");
+        let alarm_actions = collect_member_values(req, "AlarmActions");
+        let insufficient_data_actions = collect_member_values(req, "InsufficientDataActions");
+        crate::service::validate_alarm_actions(
+            [&ok_actions, &alarm_actions, &insufficient_data_actions],
+            &req.region,
+            crate::alarm_actions::AlarmKind::Log,
+        )?;
         let arn = crate::state::alarm_arn(&req.region, &req.account_id, &alarm_name);
         let now = Utc::now();
 
@@ -151,9 +159,9 @@ impl CloudWatchService {
             actions_enabled: optional_query_param(req, "ActionsEnabled")
                 .map(|s| s.eq_ignore_ascii_case("true"))
                 .unwrap_or(true),
-            ok_actions: collect_member_values(req, "OKActions"),
-            alarm_actions: collect_member_values(req, "AlarmActions"),
-            insufficient_data_actions: collect_member_values(req, "InsufficientDataActions"),
+            ok_actions,
+            alarm_actions,
+            insufficient_data_actions,
             // An update keeps the alarm's current state; a new alarm starts
             // unevaluated, exactly as PutCompositeAlarm does.
             state_value: existing

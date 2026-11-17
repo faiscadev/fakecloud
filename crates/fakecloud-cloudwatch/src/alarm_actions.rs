@@ -66,6 +66,40 @@ pub trait Ec2AlarmActionHook: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
+/// Who may perform an alarm action on its target, as the target's resource
+/// policy names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantPrincipal<'a> {
+    /// An AWS service principal (`lambda.alarms.cloudwatch.amazonaws.com`).
+    Service(&'static str),
+    /// An account (its root), for a cross-account target.
+    Account(&'a str),
+}
+
+/// A resource-policy check for an alarm action: may `principal` perform
+/// `service:action` on `resource_arn` for the alarm `source_arn` of
+/// `source_account`?
+#[derive(Debug, Clone, Copy)]
+pub struct ActionGrant<'a> {
+    pub service: &'static str,
+    pub action: &'static str,
+    pub resource_arn: &'a str,
+    pub principal: GrantPrincipal<'a>,
+    pub source_arn: &'a str,
+    pub source_account: &'a str,
+}
+
+/// Evaluates the resource policies of alarm action targets (a Lambda
+/// function's policy, an SNS topic's policy). The server implements it over
+/// the shared resource-policy providers and IAM evaluator.
+pub trait AlarmActionAuthorizer: Send + Sync {
+    fn allows(&self, grant: &ActionGrant<'_>) -> bool;
+}
+
+/// The service principal CloudWatch invokes Lambda alarm actions as; the
+/// function's resource policy must grant it `lambda:InvokeFunction`.
+pub const LAMBDA_ALARMS_PRINCIPAL: &str = "lambda.alarms.cloudwatch.amazonaws.com";
+
 /// The kind of target an action ARN names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActionTarget {
@@ -74,13 +108,76 @@ pub(crate) enum ActionTarget {
     Ec2(Ec2InstanceAction),
     /// Application Auto Scaling policy, performed by the scaling watcher.
     AutoScaling,
+    /// A valid action fakecloud doesn't perform (EC2 Auto Scaling group
+    /// policies, Systems Manager OpsItems, Incident Manager response plans,
+    /// Amazon Q investigations).
+    NotPerformed,
     Unsupported,
+}
+
+/// Which kind of alarm an action belongs to (each accepts different action
+/// types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlarmKind {
+    Metric,
+    Composite,
+    Log,
+}
+
+/// Validate an action ARN as PutMetricAlarm / PutCompositeAlarm /
+/// PutLogAlarm do: it must be one of the documented action forms for that
+/// kind of alarm, and an EC2 action must name the alarm's own region.
+pub(crate) fn validate_action(arn: &str, region: &str, kind: AlarmKind) -> Result<(), String> {
+    let target = classify(arn);
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    let service = parts.get(2).copied().unwrap_or_default();
+    let allowed = match (target, kind) {
+        (ActionTarget::Sns | ActionTarget::Lambda, _) => true,
+        (ActionTarget::Ec2(_) | ActionTarget::AutoScaling, AlarmKind::Metric) => true,
+        (ActionTarget::NotPerformed, AlarmKind::Metric) => true,
+        (ActionTarget::NotPerformed, AlarmKind::Composite) => {
+            matches!(service, "ssm" | "aiops")
+        }
+        (ActionTarget::NotPerformed, AlarmKind::Log) => service == "ssm",
+        _ => false,
+    };
+    if !allowed {
+        return Err(format!("Invalid alarm action {arn}"));
+    }
+    if let ActionTarget::Ec2(_) = target {
+        let action_region = parts.get(3).copied().unwrap_or_default();
+        if action_region != region {
+            return Err(format!(
+                "Invalid region {action_region} specified. Only {region} is supported."
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn classify(arn: &str) -> ActionTarget {
     let parts: Vec<&str> = arn.splitn(6, ':').collect();
-    if parts.len() < 6 || parts[0] != "arn" {
+    if parts.len() < 6 || parts[0] != "arn" || parts[5].is_empty() {
         return ActionTarget::Unsupported;
+    }
+    match parts[2] {
+        // arn:aws:ssm:<region>:<account>:opsitem:<severity>[#CATEGORY=<c>]
+        "ssm" if parts[5].starts_with("opsitem:") => return ActionTarget::NotPerformed,
+        // arn:aws:ssm-incidents::<account>:responseplan/<name>
+        "ssm-incidents" if parts[5].starts_with("responseplan/") => {
+            return ActionTarget::NotPerformed
+        }
+        // arn:aws:aiops:<region>:<account>:investigation-group:<id>
+        "aiops" if parts[5].starts_with("investigation-group:") => {
+            return ActionTarget::NotPerformed
+        }
+        "autoscaling"
+            if parts[5].starts_with("scalingPolicy:")
+                && parts[5].contains(":autoScalingGroupName/") =>
+        {
+            return ActionTarget::NotPerformed
+        }
+        _ => {}
     }
     let ec2 = |op: &str| match op.to_ascii_lowercase().as_str() {
         "stop" => Some(Ec2InstanceAction::Stop),
@@ -94,7 +191,11 @@ pub(crate) fn classify(arn: &str) -> ActionTarget {
         "lambda" if parts[5].starts_with("function:") => ActionTarget::Lambda,
         // Application Auto Scaling policies name their scalable target with
         // `:resource/`; EC2 Auto Scaling group policies aren't run from alarms.
-        "autoscaling" if parts[5].contains(":resource/") => ActionTarget::AutoScaling,
+        "autoscaling"
+            if parts[5].starts_with("scalingPolicy:") && parts[5].contains(":resource/") =>
+        {
+            ActionTarget::AutoScaling
+        }
         // arn:aws:automate:<region>:ec2:<op>
         "automate" if parts[4] == "ec2" => ec2(parts[5])
             .map(ActionTarget::Ec2)
@@ -125,6 +226,11 @@ pub(crate) struct AlarmNotification {
     pub lambda_payload: String,
     /// The alarm's `InstanceId` dimension (target of EC2 actions).
     pub instance_id: Option<String>,
+    /// The [`crate::state::CloudWatchState::epoch`] the state change happened
+    /// in; the notification is dropped if the account was reset since.
+    pub epoch: u64,
+    /// The alarm's ARN (the `aws:SourceArn` its actions are authorized as).
+    pub alarm_arn: String,
 }
 
 fn actions_for(
@@ -440,6 +546,8 @@ pub(crate) fn metric_alarm_notification(
             metric_lambda_configuration(alarm),
         ),
         instance_id: alarm.dimensions.get("InstanceId").cloned(),
+        epoch: 0,
+        alarm_arn: alarm.alarm_arn.clone(),
     })
 }
 
@@ -539,6 +647,8 @@ pub(crate) fn composite_alarm_notification(
             Value::Object(configuration),
         ),
         instance_id: None,
+        epoch: 0,
+        alarm_arn: alarm.alarm_arn.clone(),
     })
 }
 
@@ -622,21 +732,97 @@ pub(crate) fn log_alarm_notification(
             Value::Object(configuration),
         ),
         instance_id: None,
+        epoch: 0,
+        alarm_arn: alarm.alarm_arn.clone(),
     })
 }
 
 /// Run every action of `n` and return the `Action` history items recording
 /// the outcomes.
+/// Where alarm actions go.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ActionTargets<'a> {
+    pub delivery: Option<&'a DeliveryBus>,
+    pub ec2: Option<&'a dyn Ec2AlarmActionHook>,
+    /// Checks targets' resource policies; without it they aren't checked.
+    pub authorizer: Option<&'a dyn AlarmActionAuthorizer>,
+}
+
+/// Whether the resource policy of the action target lets the alarm act on
+/// it. A Lambda function must grant `lambda:InvokeFunction` to
+/// [`LAMBDA_ALARMS_PRINCIPAL`] (same account too); a topic in another account
+/// must let CloudWatch (or the alarm's account) publish to it.
+fn authorize(
+    n: &AlarmNotification,
+    arn: &str,
+    target: ActionTarget,
+    authorizer: Option<&dyn AlarmActionAuthorizer>,
+) -> Result<(), String> {
+    let Some(auth) = authorizer else {
+        return Ok(());
+    };
+    let grant = |service, action, principal| ActionGrant {
+        service,
+        action,
+        resource_arn: arn,
+        principal,
+        source_arn: &n.alarm_arn,
+        source_account: &n.account_id,
+    };
+    match target {
+        ActionTarget::Lambda => {
+            if auth.allows(&grant(
+                "lambda",
+                "InvokeFunction",
+                GrantPrincipal::Service(LAMBDA_ALARMS_PRINCIPAL),
+            )) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "CloudWatch Alarms is not authorized to invoke {arn}: the function's resource \
+                     policy must grant lambda:InvokeFunction to {LAMBDA_ALARMS_PRINCIPAL}"
+                ))
+            }
+        }
+        ActionTarget::Sns => {
+            let topic_account = fakecloud_aws::arn::account_of(arn).unwrap_or_default();
+            if topic_account == n.account_id
+                || auth.allows(&grant(
+                    "sns",
+                    "Publish",
+                    GrantPrincipal::Service("cloudwatch.amazonaws.com"),
+                ))
+                || auth.allows(&grant(
+                    "sns",
+                    "Publish",
+                    GrantPrincipal::Account(&n.account_id),
+                ))
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "CloudWatch Alarms is not authorized to publish to {arn}: the topic policy \
+                     doesn't allow it"
+                ))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 pub(crate) async fn dispatch(
     n: &AlarmNotification,
-    delivery: Option<&DeliveryBus>,
-    ec2: Option<&dyn Ec2AlarmActionHook>,
+    targets: ActionTargets<'_>,
 ) -> Vec<AlarmHistoryItem> {
+    let ActionTargets { delivery, ec2, .. } = targets;
     let mut items = Vec::new();
     for arn in &n.actions {
         let mut data = Map::new();
-        let outcome: Result<(), String> = match classify(arn) {
-            ActionTarget::Sns => match delivery {
+        let target = classify(arn);
+        let allowed = authorize(n, arn, target, targets.authorizer);
+        let outcome: Result<(), String> = match (target, allowed) {
+            (_, Err(e)) => Err(e),
+            (ActionTarget::Sns, _) => match delivery {
                 Some(bus) => bus
                     .try_publish_to_sns(arn, &n.sns_message, Some(&n.subject))
                     .map(|_| {
@@ -645,20 +831,23 @@ pub(crate) async fn dispatch(
                     }),
                 None => Err("SNS delivery is not available".to_string()),
             },
-            ActionTarget::Lambda => {
+            (ActionTarget::Lambda, _) => {
                 match delivery.and_then(|bus| bus.invoke_lambda_async(arn, &n.lambda_payload)) {
                     Some(r) => r,
                     None => Err("Lambda delivery is not available".to_string()),
                 }
             }
-            ActionTarget::Ec2(action) => match (&n.instance_id, ec2) {
+            (ActionTarget::Ec2(action), _) => match (&n.instance_id, ec2) {
                 (None, _) => Err("The alarm has no InstanceId dimension".to_string()),
                 (Some(_), None) => Err("EC2 is not available".to_string()),
                 (Some(id), Some(hook)) => hook.perform(&n.account_id, &n.region, id, action).await,
             },
             // The scaling watcher acts on the alarm state itself.
-            ActionTarget::AutoScaling => continue,
-            ActionTarget::Unsupported => Err(format!("Unsupported alarm action {arn}")),
+            (ActionTarget::AutoScaling, _) => continue,
+            (ActionTarget::NotPerformed, _) => {
+                Err(format!("fakecloud does not perform the alarm action {arn}"))
+            }
+            (ActionTarget::Unsupported, _) => Err(format!("Unsupported alarm action {arn}")),
         };
         if let Err(e) = &outcome {
             tracing::warn!(alarm = %n.alarm_name, action = %arn, error = %e, "alarm action failed");
@@ -725,7 +914,11 @@ mod tests {
         );
         assert_eq!(
             classify("arn:aws:autoscaling:us-east-1:123456789012:scalingPolicy:x:autoScalingGroupName/g:policyName/p"),
-            ActionTarget::Unsupported
+            ActionTarget::NotPerformed
+        );
+        assert_eq!(
+            classify("arn:aws:ssm:us-east-1:123456789012:opsitem:3#CATEGORY=Security"),
+            ActionTarget::NotPerformed
         );
         assert_eq!(
             classify("arn:aws:automate:us-east-1:ec2:explode"),

@@ -102,6 +102,20 @@ pub struct CloudWatchState {
     #[serde(default)]
     pub resource_metrics_configurations:
         BTreeMap<String, BTreeMap<String, ResourceMetricsConfiguration>>,
+    /// Time-ordered index over `metrics` for alarm evaluation (a cache).
+    #[serde(skip)]
+    pub(crate) series_index: crate::series_index::SeriesIndex,
+    /// Identifies this incarnation of the account's state: a reset or a
+    /// snapshot load makes a new one, so actions queued against the old
+    /// state are dropped instead of dispatched.
+    #[serde(skip, default = "next_epoch")]
+    pub(crate) epoch: u64,
+}
+
+/// A process-unique [`CloudWatchState::epoch`].
+pub(crate) fn next_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One `OTelEnrichmentMetricSelector`: a namespace plus optional metric names
@@ -159,6 +173,7 @@ impl CloudWatchState {
     pub fn new(account_id: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
+            epoch: next_epoch(),
             ..Default::default()
         }
     }
@@ -381,6 +396,15 @@ pub struct MetricAlarm {
     /// extension period counts from).
     #[serde(default)]
     pub alarm_exit: AlarmExit,
+    /// A state forced by `SetAlarmState` holds until this time (one period
+    /// later), when the alarm is evaluated normally again.
+    #[serde(default)]
+    pub manual_hold_until: Option<DateTime<Utc>>,
+    /// The next period boundary, when time passing alone can change the
+    /// evaluation outcome. The evaluation timer skips the alarm until then.
+    /// Not persisted: after a restart every alarm is evaluated once.
+    #[serde(skip)]
+    pub next_evaluation_at: Option<DateTime<Utc>>,
 }
 
 /// When an alarm last left the ALARM state. `tracked` is false on alarms
