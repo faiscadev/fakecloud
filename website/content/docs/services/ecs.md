@@ -76,8 +76,9 @@ The runtime translates the following task-definition fields straight into `docke
 - `pseudoTerminal=true` -> `--tty`
 - `privileged=true` -> `--privileged`
 - task-definition `pidMode=host` / `ipcMode=host` -> `--pid host` / `--ipc host` (`hostPID` / `hostIPC` on Kubernetes)
+- On Kubernetes, `privileged`, `hostPID` and `hostIPC` are refused by Pod Security levels below `privileged`; such a task stops with `TaskFailedToStart` and the admission error as its reason
 - `systemControls[]` -> `--sysctl <namespace>=<value>`
-- `logConfiguration.logDriver=json-file` -> `--log-driver json-file` (plus its `options` as `--log-opt` on Docker); on Docker a container naming another driver runs with the `local` driver, so fakecloud still reads its output (for `awslogs` forwarding) but it writes no json-file log
+- `logConfiguration.logDriver`, while a daemon with a log driver volume is active in the task's cluster and the engine server is Docker Engine: `json-file` -> `--log-driver json-file` plus its `options` as `--log-opt`; any other driver -> the `local` driver (rotating at 1 GiB x 100 files), so fakecloud still reads the container's output for `awslogs` forwarding but it writes no json-file log. Otherwise (no such daemon, or Podman, including a Docker CLI on Podman's compat socket) the container keeps the engine's default logging
 - `stopTimeout` -> `--stop-timeout` (also bounds the SIGTERM→SIGKILL grace inside force-stop)
 - `volumeConfigurations[]` (per-task EBS attachments) -> volume per task with size, encryption, and FS type recorded on the task's `attachments[]` and bind-mounted at the declared `mountPoint`
 

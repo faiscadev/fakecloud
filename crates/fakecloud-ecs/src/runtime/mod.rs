@@ -347,7 +347,8 @@ pub(crate) struct ContainerPlan {
     /// `pidMode`/`ipcMode` `shared`, or a task definition's `host`.
     pub(crate) host_namespaces: HostNamespaces,
     /// The container definition's `logConfiguration`, which decides whether
-    /// the container's output lands in a daemon's log driver volume.
+    /// the container's output lands in a daemon's log driver volume. Set only
+    /// while such a daemon is active in the task's cluster.
     pub(crate) log_configuration: Option<LogConfiguration>,
     /// Engine-specific `--log-driver`/`--log-opt` flags for
     /// `log_configuration`, filled in by the Docker/Podman launch path once
@@ -374,57 +375,98 @@ pub(crate) struct LogConfiguration {
 /// The only driver a daemon log driver volume supports.
 pub(crate) const JSON_FILE_LOG_DRIVER: &str = "json-file";
 
+/// Rotation for the `local` driver: generous enough that fakecloud, which
+/// reads a container's whole output with `docker logs` once it exits (to
+/// forward awslogs), loses nothing a task realistically writes. The `local`
+/// defaults (20 MiB x 5) would drop early output of a chatty task; the
+/// json-file default it replaces never rotates at all.
+const LOCAL_LOG_MAX_SIZE: &str = "1g";
+const LOCAL_LOG_MAX_FILE: &str = "100";
+
 /// The `--log-driver`/`--log-opt` flags that make a container's log files
 /// land in (or stay out of) the engine's json-file log directory, which is
 /// what a daemon's `logDriverVolumeConfiguration` volume mounts.
 ///
-/// - `json-file`: the container runs with the json-file driver (and, on
-///   Docker, its options), so its `<id>/<id>-json.log` is in the volume.
-/// - another driver on Docker: the `local` driver, so `docker logs` (which
-///   fakecloud reads to emulate awslogs and friends) keeps working but no
-///   json-file log is written, as on ECS where containers using a different
-///   driver don't write to the volume.
+/// `log` is the container's `logConfiguration`, set on the plan only while a
+/// daemon with a log driver volume is active in the task's cluster; with no
+/// such daemon, and on any engine server that isn't Docker Engine (Podman,
+/// including a Docker CLI on Podman's compat socket, has no `local` driver
+/// and no separate json-file format), no flags are emitted and the container
+/// logs exactly as it otherwise would.
+///
+/// - `json-file`: the json-file driver and its options, so the container's
+///   `<id>/<id>-json.log` is in the volume.
+/// - another driver: the `local` driver, so `docker logs` (which fakecloud
+///   reads to emulate awslogs and friends) keeps working but no json-file log
+///   is written, as on ECS where containers using a different driver don't
+///   write to the volume.
 /// - no `logConfiguration`: the engine default, which on ECS (and on a
 ///   default Docker install) is json-file.
-///
-/// Podman has no separate json-file format (`json-file` is an alias for its
-/// `k8s-file` driver, and it has no `local` driver), so only the driver name
-/// is passed there.
-pub(crate) fn log_driver_argv(log: Option<&LogConfiguration>, podman: bool) -> Vec<String> {
-    let Some(log) = log else {
+pub(crate) fn log_driver_argv(log: Option<&LogConfiguration>, docker_server: bool) -> Vec<String> {
+    let Some(log) = log.filter(|_| docker_server) else {
         return Vec::new();
     };
-    let mut argv = Vec::new();
+    let mut argv = vec!["--log-driver".to_string()];
     if log.driver == JSON_FILE_LOG_DRIVER {
-        argv.push("--log-driver".to_string());
         argv.push(JSON_FILE_LOG_DRIVER.to_string());
-        if !podman {
-            for (k, v) in &log.options {
-                argv.push("--log-opt".to_string());
-                argv.push(format!("{k}={v}"));
-            }
+        for (k, v) in &log.options {
+            argv.push("--log-opt".to_string());
+            argv.push(format!("{k}={v}"));
         }
-    } else if !podman {
-        argv.push("--log-driver".to_string());
+    } else {
         argv.push("local".to_string());
+        argv.push("--log-opt".to_string());
+        argv.push(format!("max-size={LOCAL_LOG_MAX_SIZE}"));
+        argv.push("--log-opt".to_string());
+        argv.push(format!("max-file={LOCAL_LOG_MAX_FILE}"));
     }
     argv
 }
 
-/// The per-container log directory from the engine's `info` answer:
-/// Docker's `{{.DockerRootDir}}` -> `<root>/containers`, Podman's
-/// `{{.Store.GraphRoot}}|{{.Store.GraphDriverName}}` ->
-/// `<root>/<driver>-containers`.
-pub(crate) fn engine_log_dir(info: &str, podman: bool) -> Option<String> {
-    let info = info.trim();
-    if podman {
-        let (root, driver) = info.split_once('|')?;
-        let (root, driver) = (root.trim().trim_end_matches('/'), driver.trim());
-        (!root.is_empty() && !driver.is_empty()).then(|| format!("{root}/{driver}-containers"))
+/// The engine `info` template [`engine_log_dir`] parses: Podman's own CLI
+/// exposes its store, Docker's CLI (on Docker Engine or on Podman's compat
+/// socket, which reports its graph root as `DockerRootDir`) the Docker fields.
+pub(crate) fn engine_log_dir_format(native_podman_cli: bool) -> &'static str {
+    if native_podman_cli {
+        "{{.Store.GraphRoot}}|{{.Store.GraphDriverName}}"
     } else {
-        let root = info.trim_end_matches('/');
-        (!root.is_empty()).then(|| format!("{root}/containers"))
+        "{{.DockerRootDir}}|{{.Driver}}"
     }
+}
+
+/// The per-container log directory from the engine's `root|driver` `info`
+/// answer: Docker Engine's `<root>/containers` (one `<id>/<id>-json.log`
+/// directory per container), Podman's `<root>/<driver>-containers`.
+pub(crate) fn engine_log_dir(info: &str, docker_server: bool) -> Option<String> {
+    let (root, driver) = info.trim().split_once('|')?;
+    let (root, driver) = (root.trim().trim_end_matches('/'), driver.trim());
+    if root.is_empty() {
+        return None;
+    }
+    if docker_server {
+        Some(format!("{root}/containers"))
+    } else {
+        (!driver.is_empty()).then(|| format!("{root}/{driver}-containers"))
+    }
+}
+
+/// Whether a daemon whose task definition has a json-file log driver volume
+/// is active in `cluster_name`: only then does a container's log driver
+/// decide what that daemon can read, so only then are log driver flags set.
+fn log_driver_daemon_active(s: &crate::state::EcsState, cluster_name: &str) -> bool {
+    s.daemons.values().any(|d| {
+        d.cluster_name == cluster_name
+            && d.status == "ACTIVE"
+            && s.daemon_task_definitions
+                .values()
+                .flat_map(|revs| revs.values())
+                .find(|td| td.task_definition_arn == d.daemon_task_definition_arn)
+                .is_some_and(|td| {
+                    td.volumes
+                        .iter()
+                        .any(|v| log_driver_volume_driver(v) == Some(JSON_FILE_LOG_DRIVER))
+                })
+    })
 }
 
 /// The definition a task launches from. Daemon task definitions live in
@@ -763,6 +805,7 @@ fn build_container_plans(
         .as_ref()
         .map(|l| l.host_namespaces)
         .unwrap_or_default();
+    let log_driver_daemon = log_driver_daemon_active(s, &task.cluster_name);
     // Index `volumes[]` by name so each container's `mountPoints[]` can
     // resolve its volume in O(1). Real ECS rejects mountPoints that
     // reference an undeclared volume at register time; we don't yet, so
@@ -883,6 +926,7 @@ fn build_container_plans(
         }
         let log_configuration = def
             .as_ref()
+            .filter(|_| log_driver_daemon)
             .and_then(|d| d.get("logConfiguration"))
             .and_then(parse_log_configuration);
         let stop_timeout = def.as_ref().and_then(|d| {
@@ -4114,6 +4158,8 @@ mod tests {
         };
         let ids = crate::service::spawn_daemon_tasks(acct, "us-east-1", &daemon, "", "EC2");
         assert_eq!(ids.len(), 1);
+        acct.daemons
+            .insert(EcsState::daemon_key("default", "d1"), daemon);
         (Arc::new(RwLock::new(accounts)), ids[0].clone())
     }
 
@@ -4150,7 +4196,9 @@ mod tests {
             "environment": [{"name": "MODE", "value": "daemon"}],
             "privileged": true,
             "pseudoTerminal": true,
-            "systemControls": [{"namespace": "kernel.shmmax", "value": "1024"}],
+            // A network-namespace sysctl: IPC-namespace ones aren't supported
+            // with the host IPC namespace `ipcMode: shared` joins.
+            "systemControls": [{"namespace": "net.core.somaxconn", "value": "1024"}],
             "mountPoints": [
                 {"sourceVolume": "host-data", "containerPath": "/data"},
                 {"sourceVolume": "logs", "containerPath": "/logs", "readOnly": true}
@@ -4181,7 +4229,7 @@ mod tests {
         assert_eq!(
             lp.sysctls,
             vec![Sysctl {
-                name: "kernel.shmmax".into(),
+                name: "net.core.somaxconn".into(),
                 value: "1024".into()
             }]
         );
@@ -4202,7 +4250,10 @@ mod tests {
         assert!(joined.contains("--pid host"), "{joined}");
         assert!(joined.contains("--ipc host"), "{joined}");
         assert!(joined.contains("--privileged"), "{joined}");
-        assert!(joined.contains("--sysctl kernel.shmmax=1024"), "{joined}");
+        assert!(
+            joined.contains("--sysctl net.core.somaxconn=1024"),
+            "{joined}"
+        );
         assert!(joined.contains("--tty"), "{joined}");
         assert!(
             joined.contains("-v /tmp/fakecloud-daemon-unit:/data "),
@@ -4255,6 +4306,66 @@ mod tests {
         assert_eq!(plans[0].network_mode.as_deref(), Some("bridge"));
     }
 
+    /// Adds a regular task in `default` whose container logs with `awslogs`.
+    fn add_awslogs_task(state: &SharedEcsState) {
+        let mut accounts = state.write();
+        let acct = accounts.get_mut("000000000000").unwrap();
+        let td = acct
+            .task_definitions
+            .get_mut("agent")
+            .unwrap()
+            .get_mut(&1)
+            .unwrap();
+        td.container_definitions[0]["logConfiguration"] =
+            serde_json::json!({"logDriver": "awslogs", "options": {"awslogs-group": "/ecs/a"}});
+        let mut task = make_task("regular");
+        task.family = "agent".into();
+        task.task_definition_arn =
+            "arn:aws:ecs:us-east-1:000000000000:task-definition/agent:1".into();
+        let mut container = acct.tasks.values().next().unwrap().containers[0].clone();
+        container.name = "agent".into();
+        task.containers = vec![container];
+        acct.tasks.insert("regular".into(), task);
+    }
+
+    #[test]
+    fn log_configuration_is_honored_only_while_a_log_driver_daemon_is_active() {
+        let agent = || vec![serde_json::json!({"name": "agent", "image": "busybox"})];
+        let log_volume = serde_json::json!({
+            "name": "logs", "logDriverVolumeConfiguration": {"driver": "json-file"}
+        });
+
+        // A daemon without a log driver volume: logging left alone.
+        let (state, _) = daemon_task_state(daemon_task_definition(agent(), Vec::new()));
+        add_awslogs_task(&state);
+        let plans = build_container_plans(&state, "000000000000", "regular", 4566).unwrap();
+        assert_eq!(plans[0].log_configuration, None);
+
+        // An active log driver daemon in the cluster: honored.
+        let (state, _) =
+            daemon_task_state(daemon_task_definition(agent(), vec![log_volume.clone()]));
+        add_awslogs_task(&state);
+        let plans = build_container_plans(&state, "000000000000", "regular", 4566).unwrap();
+        assert_eq!(
+            plans[0]
+                .log_configuration
+                .as_ref()
+                .map(|l| l.driver.as_str()),
+            Some("awslogs")
+        );
+
+        // The same daemon in another cluster: left alone.
+        {
+            let mut accounts = state.write();
+            let acct = accounts.get_mut("000000000000").unwrap();
+            for d in acct.daemons.values_mut() {
+                d.cluster_name = "other".into();
+            }
+        }
+        let plans = build_container_plans(&state, "000000000000", "regular", 4566).unwrap();
+        assert_eq!(plans[0].log_configuration, None);
+    }
+
     #[test]
     fn daemon_task_definition_arns_are_recognised() {
         assert!(is_daemon_task_definition_arn(
@@ -4280,22 +4391,29 @@ mod tests {
             options: vec![("awslogs-group".into(), "/ecs/app".into())],
         };
         assert_eq!(
-            log_driver_argv(Some(&json_file), false),
+            log_driver_argv(Some(&json_file), true),
             vec!["--log-driver", "json-file", "--log-opt", "max-size=10m"]
         );
+        // `local` keeps enough output for fakecloud's read at exit.
         assert_eq!(
-            log_driver_argv(Some(&json_file), true),
-            vec!["--log-driver", "json-file"]
+            log_driver_argv(Some(&awslogs), true),
+            vec![
+                "--log-driver",
+                "local",
+                "--log-opt",
+                "max-size=1g",
+                "--log-opt",
+                "max-file=100"
+            ]
         );
-        assert_eq!(
-            log_driver_argv(Some(&awslogs), false),
-            vec!["--log-driver", "local"]
-        );
-        assert!(log_driver_argv(Some(&awslogs), true).is_empty());
-        assert!(log_driver_argv(None, false).is_empty());
+        // Not Docker Engine (Podman, or a Docker CLI on its compat socket):
+        // logging is left alone.
+        assert!(log_driver_argv(Some(&json_file), false).is_empty());
+        assert!(log_driver_argv(Some(&awslogs), false).is_empty());
+        assert!(log_driver_argv(None, true).is_empty());
 
         let mut plan = tests_support::minimal_plan();
-        plan.log_argv = log_driver_argv(Some(&json_file), false);
+        plan.log_argv = log_driver_argv(Some(&json_file), true);
         let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", OWN_NET, "img");
         let image_at = argv.iter().position(|a| a == "img").unwrap();
         let driver_at = argv.iter().position(|a| a == "--log-driver").unwrap();
@@ -4306,16 +4424,26 @@ mod tests {
     #[test]
     fn engine_log_dir_comes_from_the_engines_storage_root() {
         assert_eq!(
-            engine_log_dir("/var/lib/docker\n", false).as_deref(),
+            engine_log_dir("/var/lib/docker|overlay2\n", true).as_deref(),
             Some("/var/lib/docker/containers")
         );
+        // Podman, through its own CLI or a Docker CLI on its compat socket.
         assert_eq!(
-            engine_log_dir("/home/u/.local/share/containers/storage|overlay\n", true).as_deref(),
+            engine_log_dir("/home/u/.local/share/containers/storage|overlay\n", false).as_deref(),
             Some("/home/u/.local/share/containers/storage/overlay-containers")
         );
-        assert_eq!(engine_log_dir("", false), None);
-        assert_eq!(engine_log_dir("/var/lib/containers/storage|", true), None);
-        assert_eq!(engine_log_dir("/var/lib/containers/storage", true), None);
+        assert_eq!(engine_log_dir("", true), None);
+        assert_eq!(engine_log_dir("|overlay", true), None);
+        assert_eq!(engine_log_dir("/var/lib/containers/storage|", false), None);
+        assert_eq!(engine_log_dir("/var/lib/containers/storage", false), None);
+        assert_eq!(
+            engine_log_dir_format(true),
+            "{{.Store.GraphRoot}}|{{.Store.GraphDriverName}}"
+        );
+        assert_eq!(
+            engine_log_dir_format(false),
+            "{{.DockerRootDir}}|{{.Driver}}"
+        );
     }
 
     #[test]

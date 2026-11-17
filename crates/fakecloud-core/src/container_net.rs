@@ -449,6 +449,67 @@ fn podman_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     PODMAN_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Process-global memo of [`is_docker_server`] answers, keyed by CLI.
+static DOCKER_SERVER_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, bool>>,
+> = std::sync::OnceLock::new();
+
+/// True when the engine *server* behind `cli` is Docker Engine, asked of the
+/// server itself (`version --format '{{json .Server}}'`), not of the client.
+/// A Docker CLI pointed at Podman's Docker-compatible socket (Podman Desktop's
+/// `DOCKER_HOST`) prints `Docker version ...` from `--version` but its server
+/// reports the `Podman Engine` component, so [`is_podman`] reads it as Docker
+/// while this reads it as not Docker. Use it before relying on a Docker-only
+/// server feature (a log driver Podman lacks, say).
+///
+/// Bounded by [`CLI_PROBE_TIMEOUT`]. A definitive answer is memoized per CLI;
+/// a failed or timed-out probe answers `false` (assume no Docker-only
+/// features) without caching, so a daemon that comes up later is asked again.
+/// Blocking: from async code use [`is_docker_server_async`].
+pub fn is_docker_server(cli: &str) -> bool {
+    let cache =
+        DOCKER_SERVER_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&cached) = cache.lock().unwrap().get(cli) {
+        return cached;
+    }
+    if name_indicates_podman(cli) {
+        cache.lock().unwrap().insert(cli.to_string(), false);
+        return false;
+    }
+    let Some(answer) = bounded_output(cli, &["version", "--format", "{{json .Server}}"])
+        .and_then(|out| classify_server_version_output(&out))
+    else {
+        return false;
+    };
+    let docker = answer == ContainerEngine::Docker;
+    cache.lock().unwrap().insert(cli.to_string(), docker);
+    docker
+}
+
+/// [`is_docker_server`] for async callers (the probe runs on the blocking
+/// pool).
+pub async fn is_docker_server_async(cli: &str) -> bool {
+    let owned = cli.to_string();
+    tokio::task::spawn_blocking(move || is_docker_server(&owned))
+        .await
+        .unwrap_or(false)
+}
+
+/// Classify `<cli> version --format '{{json .Server}}'`: Podman's compat API
+/// names its component `Podman Engine`; Docker Engine names `Engine` with a
+/// `Docker Engine - ...` / `Docker Desktop ...` platform. `None` when the
+/// server didn't answer (`null`, empty) or names neither.
+pub fn classify_server_version_output(stdout: &str) -> Option<ContainerEngine> {
+    let lower = stdout.to_ascii_lowercase();
+    if lower.contains("podman") || lower.contains("buildah") {
+        Some(ContainerEngine::Podman)
+    } else if lower.contains("\"engine\"") || lower.contains("docker") {
+        Some(ContainerEngine::Docker)
+    } else {
+        None
+    }
+}
+
 /// True when `cli` drives podman -- including podman installed *as* `docker`.
 ///
 /// The file name alone can't answer that: the `podman-docker` package
@@ -1013,6 +1074,25 @@ mod tests {
             Some(ContainerEngine::Docker)
         );
         assert_eq!(classify_info_output("{}"), None);
+    }
+
+    #[test]
+    fn server_version_classifies_the_engine_server_not_the_client() {
+        // Docker CLI against Podman's compat socket: the server is Podman.
+        assert_eq!(
+            classify_server_version_output(
+                r#"{"Platform":{"Name":""},"Components":[{"Name":"Podman Engine","Version":"5.2.3"}],"Version":"5.2.3","ApiVersion":"1.41"}"#
+            ),
+            Some(ContainerEngine::Podman)
+        );
+        assert_eq!(
+            classify_server_version_output(
+                r#"{"Platform":{"Name":"Docker Engine - Community"},"Components":[{"Name":"Engine","Version":"27.3.1"}],"Version":"27.3.1"}"#
+            ),
+            Some(ContainerEngine::Docker)
+        );
+        assert_eq!(classify_server_version_output("null\n"), None);
+        assert_eq!(classify_server_version_output(""), None);
     }
 
     #[cfg(unix)]

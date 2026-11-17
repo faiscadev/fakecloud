@@ -526,6 +526,18 @@ impl EcsRuntime {
         let mut fallback_reason: Option<String> = None;
         if creds_init.is_some() {
             match &create {
+                // A task that itself asks for privileged / hostPID / hostIPC
+                // is refused by the same Pod Security levels that refuse
+                // NET_ADMIN, so a relaunch without the credentials
+                // initContainer would be refused too: fail with admission's
+                // own reason instead of blaming the credentials route.
+                Err(e) if requests_host_access(&resolved) => {
+                    mark_pull_stopped(state, account_id, task_id);
+                    backend.pods.write().remove(task_id);
+                    return Err(RuntimeError::ContainerStart(format!(
+                        "create task pod: {e}"
+                    )));
+                }
                 // Admission refused the Pod (typically NET_ADMIN under a
                 // restrictive Pod Security level).
                 Err(e) => fallback_reason = Some(format!("task pod refused: {e}")),
@@ -907,6 +919,17 @@ fn container_exit_codes(pod: &Pod, map: &[ContainerMapEntry]) -> HashMap<String,
             )
         })
         .collect()
+}
+
+/// Whether the task itself asks for host access a Pod Security level below
+/// `privileged` refuses: a privileged container, or the host PID / IPC
+/// namespace.
+fn requests_host_access(resolved: &[(ContainerPlan, Vec<(String, String)>)]) -> bool {
+    resolved.iter().any(|(p, _)| {
+        p.host_namespaces.pid
+            || p.host_namespaces.ipc
+            || p.linux_parameters.as_ref().is_some_and(|lp| lp.privileged)
+    })
 }
 
 /// Build the Pod for a task. Returns the Pod and the container-name map.
@@ -1403,6 +1426,26 @@ mod tests {
         let (pod, _) = build(&[(a, vec![]), (b, vec![])]);
         let vols = pod.spec.unwrap().volumes.unwrap();
         assert_eq!(vols.len(), 1, "same source should share one volume");
+    }
+
+    #[test]
+    fn host_access_is_privileged_or_a_host_namespace() {
+        assert!(!requests_host_access(&[(plan("app", true), vec![])]));
+        let mut pid = plan("agent", true);
+        pid.host_namespaces.pid = true;
+        assert!(requests_host_access(&[
+            (plan("app", true), vec![]),
+            (pid, vec![])
+        ]));
+        let mut ipc = plan("agent", true);
+        ipc.host_namespaces.ipc = true;
+        assert!(requests_host_access(&[(ipc, vec![])]));
+        let mut privileged = plan("agent", true);
+        privileged.linux_parameters = Some(crate::runtime::LinuxParameters {
+            privileged: true,
+            ..Default::default()
+        });
+        assert!(requests_host_access(&[(privileged, vec![])]));
     }
 
     #[test]

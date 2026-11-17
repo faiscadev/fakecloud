@@ -9,16 +9,24 @@ impl EcsRuntime {
         &self,
         mut plans: Vec<ContainerPlan>,
     ) -> Result<Vec<ContainerPlan>, RuntimeError> {
-        let podman = fakecloud_core::container_net::is_podman_async(&self.cli).await;
+        // Ask the engine only when this task has something that depends on it.
+        let needs_engine = plans.iter().any(|p| {
+            p.log_configuration.is_some()
+                || p.volume_mounts.iter().any(|vm| vm.log_driver.is_some())
+        });
+        if !needs_engine {
+            return Ok(plans);
+        }
+        let docker_server = fakecloud_core::container_net::is_docker_server_async(&self.cli).await;
         let mut log_dir: Option<String> = None;
         for plan in &mut plans {
-            plan.log_argv = log_driver_argv(plan.log_configuration.as_ref(), podman);
+            plan.log_argv = log_driver_argv(plan.log_configuration.as_ref(), docker_server);
             for vm in &mut plan.volume_mounts {
                 if vm.log_driver.is_none() {
                     continue;
                 }
                 if log_dir.is_none() {
-                    log_dir = Some(self.json_file_log_dir(podman).await?);
+                    log_dir = Some(self.json_file_log_dir(docker_server).await?);
                 }
                 vm.source = log_dir.clone().unwrap_or_default();
             }
@@ -32,18 +40,16 @@ impl EcsRuntime {
     /// `<GraphRoot>/<driver>-containers`. The engine resolves the path on
     /// its own host, so it is right when fakecloud itself runs in a
     /// container, or the engine in a VM.
-    async fn json_file_log_dir(&self, podman: bool) -> Result<String, RuntimeError> {
-        let format = if podman {
-            "{{.Store.GraphRoot}}|{{.Store.GraphDriverName}}"
-        } else {
-            "{{.DockerRootDir}}"
-        };
+    async fn json_file_log_dir(&self, docker_server: bool) -> Result<String, RuntimeError> {
+        let native_podman =
+            !docker_server && fakecloud_core::container_net::is_podman_async(&self.cli).await;
+        let format = engine_log_dir_format(native_podman);
         let out = self
             .cli_output(["info", "--format", format], CLI_CALL_TIMEOUT)
             .await
             .map_err(RuntimeError::ContainerStart)?;
         let dir = if out.status.success() {
-            engine_log_dir(&String::from_utf8_lossy(&out.stdout), podman)
+            engine_log_dir(&String::from_utf8_lossy(&out.stdout), docker_server)
         } else {
             None
         };

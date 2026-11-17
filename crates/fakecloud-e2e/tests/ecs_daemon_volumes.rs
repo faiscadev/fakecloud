@@ -293,6 +293,29 @@ async fn ecs_daemon_log_driver_volume_holds_json_file_logs_of_other_tasks() {
             .command(format!("echo {token}; sleep 300"))
             .build()
     };
+    // The daemon comes first: a container's log driver only matters (and is
+    // only set) while a log driver daemon is active in its cluster.
+    // Exit 0: the json-file container's `<id>/<id>-json.log` holds its
+    // output and, a few seconds later, still no json-file log holds the
+    // other container's output (both echo at start). Exit 3: no json-file
+    // log with the token; 4: the other driver's output leaked into one.
+    let script = format!(
+        "found=; for i in $(seq 1 90); do \
+           for f in /logs/*/*-json.log; do \
+             [ -f \"$f\" ] || continue; d=$(basename \"$(dirname \"$f\")\"); \
+             [ \"$f\" = \"/logs/$d/$d-json.log\" ] && grep -q {json_token} \"$f\" && found=1; \
+           done; \
+           [ -n \"$found\" ] && break; sleep 1; \
+         done; \
+         [ -n \"$found\" ] || exit 3; \
+         sleep 5; \
+         cat /logs/*/*-json.log | grep -q {other_token} && exit 4; \
+         exit 0"
+    );
+    let td_arn = register_log_reader_daemon_task_definition(&server, "log-reader", &script).await;
+    create_daemon(&ecs, cluster, "log-reader", &td_arn).await;
+    let task_arn = daemon_task_arn(&ecs, cluster, "log-reader").await;
+
     ecs.register_task_definition()
         .family("logging-workload")
         .container_definitions(workload("json", LogDriver::JsonFile, &json_token))
@@ -311,27 +334,7 @@ async fn ecs_daemon_log_driver_volume_holds_json_file_logs_of_other_tasks() {
         .task_arn()
         .unwrap()
         .to_string();
-    wait_status(&ecs, cluster, &workload_arn, "RUNNING").await;
 
-    // Exit 0: the json-file container's `<id>/<id>-json.log` holds its
-    // output and no json-file log holds the other container's output.
-    // Exit 3: no json-file log with the token; 4: the other driver's output
-    // leaked into a json-file log.
-    let script = format!(
-        "found=; for i in $(seq 1 60); do \
-           for f in /logs/*/*-json.log; do \
-             [ -f \"$f\" ] || continue; d=$(basename \"$(dirname \"$f\")\"); \
-             [ \"$f\" = \"/logs/$d/$d-json.log\" ] && grep -q {json_token} \"$f\" && found=1; \
-           done; \
-           [ -n \"$found\" ] && break; sleep 1; \
-         done; \
-         [ -n \"$found\" ] || exit 3; \
-         cat /logs/*/*-json.log | grep -q {other_token} && exit 4; \
-         exit 0"
-    );
-    let td_arn = register_log_reader_daemon_task_definition(&server, "log-reader", &script).await;
-    create_daemon(&ecs, cluster, "log-reader", &td_arn).await;
-    let task_arn = daemon_task_arn(&ecs, cluster, "log-reader").await;
     let task = wait_status(&ecs, cluster, &task_arn, "STOPPED").await;
     let exit = task.containers()[0].exit_code();
 
