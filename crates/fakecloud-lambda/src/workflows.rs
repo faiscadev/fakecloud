@@ -79,6 +79,16 @@ pub fn create_capacity_provider_in(
         .ok_or_else(|| validation("PermissionsConfig is required"))?
         .clone();
 
+    let tags = body["Tags"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::tagging::validate_tags(&tags)?;
+
     let arn = arn_for_capacity_provider(region, account, &name);
 
     let mut accts = state.write();
@@ -90,15 +100,6 @@ pub fn create_capacity_provider_in(
             format!("Capacity provider {name} already exists"),
         ));
     }
-
-    let tags = body["Tags"]
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
 
     let cp = CapacityProvider {
         name: name.clone(),

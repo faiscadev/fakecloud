@@ -3586,6 +3586,131 @@ async fn lambda_create_function_requires_pass_role_on_the_role() {
         .expect("CreateFunction with iam:PassRole to lambda is allowed");
 }
 
+/// Lambda's tagging operations are authorized against the resource their
+/// ARN names, so a policy scoped to one function does not let a caller tag
+/// another; and a create that carries `Tags` also needs `lambda:TagResource`
+/// (a dependent action of CreateFunction in the Service Authorization
+/// Reference).
+#[tokio::test]
+async fn lambda_tagging_is_scoped_to_the_tagged_resource_and_checked_on_create() {
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    let lambda_boot = aws_sdk_lambda::Client::new(&boot);
+    let role = IamClient::new(&boot)
+        .create_role()
+        .role_name("tag-exec")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap()
+        .role()
+        .unwrap()
+        .arn()
+        .to_string();
+    let create = |client: &aws_sdk_lambda::Client, name: &str| {
+        client
+            .create_function()
+            .function_name(name)
+            .runtime(aws_sdk_lambda::types::Runtime::Python312)
+            .role(&role)
+            .handler("index.handler")
+            .code(
+                aws_sdk_lambda::types::FunctionCode::builder()
+                    .zip_file(aws_sdk_lambda::primitives::Blob::new(
+                        make_empty_python_zip(),
+                    ))
+                    .build(),
+            )
+    };
+    for name in ["mine", "theirs"] {
+        create(&lambda_boot, name).send().await.unwrap();
+    }
+    let mine = "arn:aws:lambda:us-east-1:123456789012:function:mine";
+    let theirs = "arn:aws:lambda:us-east-1:123456789012:function:theirs";
+
+    let (akid, secret) = bootstrap_user(&server, "tagger").await;
+    attach_inline_policy(
+        &server,
+        "tagger",
+        "tag-mine",
+        &format!(
+            r#"{{"Version":"2012-10-17","Statement":[
+                {{"Effect":"Allow","Action":["lambda:TagResource","lambda:UntagResource","lambda:ListTags"],"Resource":"{mine}"}},
+                {{"Effect":"Allow","Action":["lambda:CreateFunction","iam:PassRole"],"Resource":"*"}}
+            ]}}"#
+        ),
+    )
+    .await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let lambda = aws_sdk_lambda::Client::new(&cfg);
+
+    lambda
+        .tag_resource()
+        .resource(mine)
+        .tags("team", "core")
+        .send()
+        .await
+        .expect("TagResource on the allowed function");
+    lambda
+        .list_tags()
+        .resource(mine)
+        .send()
+        .await
+        .expect("ListTags on the allowed function");
+    lambda
+        .untag_resource()
+        .resource(mine)
+        .tag_keys("team")
+        .send()
+        .await
+        .expect("UntagResource on the allowed function");
+    let err = lambda
+        .tag_resource()
+        .resource(theirs)
+        .tags("team", "core")
+        .send()
+        .await
+        .expect_err("TagResource on another function must be denied");
+    assert!(format!("{err:?}").contains("AccessDenied"), "{err:?}");
+    lambda
+        .list_tags()
+        .resource(theirs)
+        .send()
+        .await
+        .expect_err("ListTags on another function must be denied");
+
+    // An untagged create needs only lambda:CreateFunction (+ PassRole).
+    create(&lambda, "plain")
+        .send()
+        .await
+        .expect("untagged CreateFunction allowed");
+    // A tagged one also needs lambda:TagResource on the new function.
+    let err = create(&lambda, "tagged")
+        .tags("team", "core")
+        .send()
+        .await
+        .expect_err("tagged CreateFunction without lambda:TagResource must be denied");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("AccessDenied") && msg.contains("lambda:TagResource"),
+        "{msg}"
+    );
+    attach_inline_policy(
+        &server,
+        "tagger",
+        "tag-on-create",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"lambda:TagResource","Resource":"arn:aws:lambda:us-east-1:123456789012:function:tagged"}]}"#,
+    )
+    .await;
+    create(&lambda, "tagged")
+        .tags("team", "core")
+        .send()
+        .await
+        .expect("tagged CreateFunction with lambda:TagResource allowed");
+}
+
 fn make_empty_python_zip() -> Vec<u8> {
     use std::io::Write;
     let buf = Vec::new();

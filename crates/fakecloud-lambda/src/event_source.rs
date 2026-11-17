@@ -160,6 +160,7 @@ pub fn validate_create(
     lookup: Option<&dyn EventSourceLookup>,
 ) -> Result<Vec<String>, AwsServiceError> {
     validate_settings(body)?;
+    crate::tagging::validate_tags(&crate::esm_config::tags(body))?;
     match body["EventSourceArn"].as_str() {
         Some(event_source_arn) => {
             crate::extras::check_len("EventSourceArn", event_source_arn, 0, 10000)?;

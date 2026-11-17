@@ -174,6 +174,56 @@ fn lambda_image_config_reserved_concurrency_and_tags_follow_the_template() {
 }
 
 #[test]
+fn lambda_resources_refuse_tags_lambda_refuses() {
+    let prov = make_provisioner();
+    let tagged = |tags: serde_json::Value| {
+        let mut props = function_props(json!({}));
+        props["Tags"] = tags;
+        props
+    };
+    let err = prov
+        .create_resource(&make_resource(
+            "AWS::Lambda::Function",
+            "Reserved",
+            tagged(json!([{"Key": "aws:owner", "Value": "me"}])),
+        ))
+        .unwrap_err();
+    assert!(err.contains("aws: prefix is reserved"), "{err}");
+    assert!(err.contains("HandlerErrorCode: InvalidRequest"), "{err}");
+
+    let f = create(
+        &prov,
+        "AWS::Lambda::Function",
+        "F",
+        function_props(json!({})),
+    );
+    let err = prov
+        .update_resource(
+            &f,
+            &make_resource(
+                "AWS::Lambda::Function",
+                "F",
+                tagged(json!([{"Key": "bad#key", "Value": "v"}])),
+            ),
+        )
+        .unwrap_err();
+    assert!(err.contains("Map keys must satisfy constraint"), "{err}");
+
+    let err = prov
+        .create_resource(&make_resource(
+            "AWS::Lambda::EventSourceMapping",
+            "Esm",
+            json!({
+                "FunctionName": "fn-a",
+                "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+                "Tags": [{"Key": "k", "Value": "v".repeat(257)}]
+            }),
+        ))
+        .unwrap_err();
+    assert!(err.contains("Map value must satisfy constraint"), "{err}");
+}
+
+#[test]
 fn lambda_event_invoke_config_is_stored_for_the_qualifier() {
     let prov = make_provisioner();
     create(

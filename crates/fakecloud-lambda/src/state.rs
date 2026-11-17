@@ -487,6 +487,10 @@ pub struct CodeSigningConfig {
     pub allowed_publishers: Vec<String>,
     pub untrusted_artifact_action: String,
     pub last_modified: DateTime<Utc>,
+    /// `CreateCodeSigningConfig`'s `Tags`, then `TagResource` /
+    /// `UntagResource` on the config's ARN.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
