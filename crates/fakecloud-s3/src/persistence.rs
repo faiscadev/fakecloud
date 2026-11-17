@@ -598,7 +598,7 @@ mod tests {
         let mut bucket = S3Bucket::new("eu-b", "eu-west-1", "owner");
         bucket.legacy_eu_location = true;
         let snap = BucketSnapshot {
-            meta: bucket_meta_snapshot("default-account", &bucket),
+            meta: bucket_meta_snapshot("123456789012", &bucket),
             ..Default::default()
         };
         let restored = s3_bucket_from_snapshot("eu-b", snap, "us-east-1").unwrap();
@@ -653,7 +653,7 @@ mod tests {
             subresources.insert(file.to_string(), text.unwrap());
         }
         let snap = BucketSnapshot {
-            meta: bucket_meta_snapshot("default-account", &fresh),
+            meta: bucket_meta_snapshot("123456789012", &fresh),
             subresources,
             ..Default::default()
         };
@@ -737,7 +737,7 @@ permission = "READ"
     #[test]
     fn bucket_meta_snapshot_copies_fields() {
         let b = S3Bucket::new("my-bucket", "eu-west-1", "owner");
-        let meta = bucket_meta_snapshot("default-account", &b);
+        let meta = bucket_meta_snapshot("123456789012", &b);
         assert_eq!(meta.name, "my-bucket");
         assert_eq!(meta.region, "eu-west-1");
         assert_eq!(meta.acl_owner_id, "owner");

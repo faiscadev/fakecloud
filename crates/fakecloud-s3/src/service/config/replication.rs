@@ -31,7 +31,12 @@ impl S3Service {
         let normalized = normalize_replication_xml(&body_str);
         b.replication_config = Some(normalized.clone());
         self.store
-            .put_bucket_subresource(account_id, bucket, BucketSubresource::Replication, &normalized)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::Replication,
+                &normalized,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }

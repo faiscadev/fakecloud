@@ -8763,7 +8763,11 @@ impl RecordingStore {
 }
 
 impl fakecloud_persistence::S3Store for RecordingStore {
-    fn load(&self) -> fakecloud_persistence::StoreResult<std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>> {
+    fn load(
+        &self,
+    ) -> fakecloud_persistence::StoreResult<
+        std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>,
+    > {
         self.inner.load()
     }
     fn put_bucket_meta(
@@ -8783,13 +8787,24 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         payload: &str,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("put_bucket_subresource:{bucket}:{kind:?}"));
-        self.inner.put_bucket_subresource(account_id, bucket, kind, payload)
+        self.inner
+            .put_bucket_subresource(account_id, bucket, kind, payload)
     }
-    fn delete_bucket_subresource(&self, account_id: &str, bucket: &str, kind: fakecloud_persistence::BucketSubresource) -> fakecloud_persistence::StoreResult<()> {
+    fn delete_bucket_subresource(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        kind: fakecloud_persistence::BucketSubresource,
+    ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_bucket_subresource:{bucket}:{kind:?}"));
-        self.inner.delete_bucket_subresource(account_id, bucket, kind)
+        self.inner
+            .delete_bucket_subresource(account_id, bucket, kind)
     }
-    fn delete_bucket(&self, account_id: &str, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+    fn delete_bucket(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_bucket:{bucket}"));
         self.inner.delete_bucket(account_id, bucket)
     }
@@ -8808,7 +8823,8 @@ impl fakecloud_persistence::S3Store for RecordingStore {
                 "disk full".to_string(),
             ));
         }
-        self.inner.put_object(account_id, bucket, key, version, body, meta)
+        self.inner
+            .put_object(account_id, bucket, key, version, body, meta)
     }
     fn replace_object_body(
         &self,
@@ -8837,7 +8853,8 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         meta: &fakecloud_persistence::ObjectMeta,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("put_object_meta:{bucket}/{key}"));
-        self.inner.put_object_meta(account_id, bucket, key, version, meta)
+        self.inner
+            .put_object_meta(account_id, bucket, key, version, meta)
     }
     fn put_annotation(
         &self,
@@ -8861,9 +8878,16 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         name: &str,
     ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_annotation:{bucket}/{key}/{name}"));
-        self.inner.delete_annotation(account_id, bucket, key, version, name)
+        self.inner
+            .delete_annotation(account_id, bucket, key, version, name)
     }
-    fn delete_object(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> fakecloud_persistence::StoreResult<()> {
+    fn delete_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+    ) -> fakecloud_persistence::StoreResult<()> {
         self.record(format!("delete_object:{bucket}/{key}"));
         self.inner.delete_object(account_id, bucket, key, version)
     }
@@ -8892,10 +8916,22 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         etag: &str,
         checksum: Option<fakecloud_persistence::PartChecksum<'_>>,
     ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
-        self.inner
-            .mpu_put_part(account_id, bucket, upload_id, part_number, body, etag, checksum)
+        self.inner.mpu_put_part(
+            account_id,
+            bucket,
+            upload_id,
+            part_number,
+            body,
+            etag,
+            checksum,
+        )
     }
-    fn mpu_abort(&self, account_id: &str, bucket: &str, upload_id: &str) -> fakecloud_persistence::StoreResult<()> {
+    fn mpu_abort(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        upload_id: &str,
+    ) -> fakecloud_persistence::StoreResult<()> {
         self.inner.mpu_abort(account_id, bucket, upload_id)
     }
     fn mpu_complete(
@@ -14800,4 +14836,116 @@ fn object_tag_limits_follow_the_recordings() {
             ("x".to_string(), String::new())
         ]
     );
+}
+
+// -- Bucket names are global across the per-account disk layout --
+
+fn make_disk_service_with_store(
+    dir: &std::path::Path,
+) -> (S3Service, Arc<fakecloud_persistence::s3::DiskS3Store>) {
+    let state: SharedS3State = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let store = Arc::new(fakecloud_persistence::s3::DiskS3Store::new(
+        dir.to_path_buf(),
+        Arc::new(fakecloud_persistence::cache::BodyCache::new(0)),
+    ));
+    let svc = S3Service::with_store(state, Arc::new(DeliveryBus::new()), store.clone());
+    (svc, store)
+}
+
+fn leave_bucket_files(store: &fakecloud_persistence::s3::DiskS3Store, account: &str, bucket: &str) {
+    use fakecloud_persistence::S3Store as _;
+    store
+        .put_bucket_meta(
+            account,
+            bucket,
+            &fakecloud_persistence::BucketMeta {
+                name: bucket.to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn create_bucket_clears_a_leftover_of_the_name_under_another_account() {
+    use fakecloud_persistence::S3Store as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, store) = make_disk_service_with_store(tmp.path());
+    // Files a create or delete in another account stopped partway through.
+    leave_bucket_files(&store, "222222222222", "shared-name");
+
+    let req = make_request(Method::PUT, "/shared-name", &[], b"");
+    svc.create_bucket("123456789012", &req, "shared-name")
+        .unwrap();
+
+    assert!(!store.bucket_state_exists("222222222222", "shared-name"));
+    assert!(store.bucket_state_exists("123456789012", "shared-name"));
+    let loaded = store.load().unwrap();
+    assert!(loaded["123456789012"].buckets.contains_key("shared-name"));
+    assert!(!loaded
+        .get("222222222222")
+        .is_some_and(|s| s.buckets.contains_key("shared-name")));
+}
+
+#[test]
+fn create_bucket_is_refused_over_another_accounts_unreadable_bucket() {
+    use fakecloud_persistence::S3Store as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, store) = make_disk_service_with_store(tmp.path());
+    leave_bucket_files(&store, "222222222222", "unreadable");
+    store.mark_bucket_load_refused("222222222222", "unreadable");
+
+    let req = make_request(Method::PUT, "/unreadable", &[], b"");
+    let Err(err) = svc.create_bucket("123456789012", &req, "unreadable") else {
+        panic!("the create must be refused");
+    };
+    assert_eq!(err.code(), "BucketAlreadyExists");
+    assert!(store.bucket_state_exists("222222222222", "unreadable"));
+    assert!(!store.bucket_state_exists("123456789012", "unreadable"));
+}
+
+#[test]
+fn create_bucket_ignores_a_refusal_whose_directory_was_removed() {
+    use fakecloud_persistence::S3Store as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, store) = make_disk_service_with_store(tmp.path());
+    leave_bucket_files(&store, "222222222222", "freed");
+    store.mark_bucket_load_refused("222222222222", "freed");
+    // The operator removes the unreadable directory without restarting.
+    std::fs::remove_dir_all(tmp.path().join("accounts/222222222222/buckets/freed")).unwrap();
+
+    let req = make_request(Method::PUT, "/freed", &[], b"");
+    svc.create_bucket("123456789012", &req, "freed").unwrap();
+    assert!(store.bucket_state_exists("123456789012", "freed"));
+}
+
+#[test]
+fn a_name_stored_under_two_accounts_is_freed_once_every_copy_is_removed() {
+    use fakecloud_persistence::S3Store as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, store) = make_disk_service_with_store(tmp.path());
+    leave_bucket_files(&store, "123456789012", "dup");
+    leave_bucket_files(&store, "222222222222", "dup");
+    let loaded = store.load().unwrap();
+    assert!(loaded.values().all(|s| !s.buckets.contains_key("dup")));
+
+    let req = make_request(Method::PUT, "/dup", &[], b"");
+    // Refused while any copy is there, including after all but one is
+    // removed (the remaining copy loads on the next start).
+    let Err(err) = svc.create_bucket("123456789012", &req, "dup") else {
+        panic!("refused while both copies are stored");
+    };
+    assert_eq!(err.code(), "BucketAlreadyExists");
+    std::fs::remove_dir_all(tmp.path().join("accounts/222222222222/buckets/dup")).unwrap();
+    let Err(err) = svc.create_bucket("123456789012", &req, "dup") else {
+        panic!("the remaining copy is not discarded by a create");
+    };
+    assert_eq!(err.code(), "BucketAlreadyExists");
+    assert!(store.bucket_state_exists("123456789012", "dup"));
+
+    std::fs::remove_dir_all(tmp.path().join("accounts/123456789012/buckets/dup")).unwrap();
+    svc.create_bucket("123456789012", &req, "dup").unwrap();
+    assert!(store.load_refused_accounts("dup").is_empty());
 }

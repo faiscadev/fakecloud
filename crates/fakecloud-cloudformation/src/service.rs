@@ -7660,7 +7660,7 @@ pub(crate) mod tests {
         // The bucket was written through to the S3 store, not just the in-memory map.
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
         assert!(
-            loaded.buckets.contains_key("cfn-bucket"),
+            loaded["123456789012"].buckets.contains_key("cfn-bucket"),
             "CFN bucket should be persisted to the S3 store"
         );
     }
@@ -7693,7 +7693,9 @@ pub(crate) mod tests {
         // reappear after a restart.
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
         assert!(
-            !loaded.buckets.contains_key("cfn-bucket"),
+            !loaded
+                .get("123456789012")
+                .is_some_and(|account| account.buckets.contains_key("cfn-bucket")),
             "CFN-deleted bucket should be removed from the S3 store"
         );
     }
@@ -7964,7 +7966,7 @@ pub(crate) mod tests {
             "update should persist the services it touched"
         );
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
-        assert!(loaded.buckets.contains_key("cfn-bucket"));
+        assert!(loaded["123456789012"].buckets.contains_key("cfn-bucket"));
     }
 
     #[tokio::test]
@@ -8129,7 +8131,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
-        let policy = loaded.buckets["pol-bucket"]
+        let policy = loaded["123456789012"].buckets["pol-bucket"]
             .subresources
             .get("policy.toml")
             .cloned()
@@ -8151,7 +8153,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
-        let policy = loaded.buckets["pol-bucket"]
+        let policy = loaded["123456789012"].buckets["pol-bucket"]
             .subresources
             .get("policy.toml")
             .cloned()
@@ -8169,7 +8171,9 @@ pub(crate) mod tests {
             .unwrap();
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
         assert!(
-            !loaded.buckets.contains_key("pol-bucket"),
+            !loaded
+                .get("123456789012")
+                .is_some_and(|account| account.buckets.contains_key("pol-bucket")),
             "CFN-deleted bucket and policy should be gone from the store"
         );
     }

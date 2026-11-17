@@ -463,7 +463,14 @@ fn put_delivered_object_guarded<G>(
             effects.as_deref(),
             obj,
             |store, obj, meta| {
-                store.put_object(account_id, bucket, &obj.key, meta.version_id.as_deref(), source, meta)
+                store.put_object(
+                    account_id,
+                    bucket,
+                    &obj.key,
+                    meta.version_id.as_deref(),
+                    source,
+                    meta,
+                )
             },
         )
         .map_err(|e| format!("failed to persist object {key} to bucket {bucket}: {e}"))?
@@ -622,7 +629,7 @@ mod tests {
         );
         drop(accounts);
         let reloaded_map = disk_store(&tmp).load().unwrap();
-        let reloaded = reloaded_map.get("default-account").unwrap();
+        let reloaded = reloaded_map.get(ACCOUNT).unwrap();
         let object = &reloaded.buckets["logs-bucket"].objects["events.gz"];
         assert_eq!(object.meta.content_encoding.as_deref(), Some("gzip"));
         assert_eq!(object.meta.content_type, "application/octet-stream");
@@ -677,9 +684,11 @@ mod tests {
         assert!(state.read().get(ACCOUNT).unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
-        assert!(disk.load().unwrap().get("default-account").unwrap().buckets["logs-bucket"]
-            .objects
-            .is_empty());
+        assert!(
+            disk.load().unwrap().get(ACCOUNT).unwrap().buckets["logs-bucket"]
+                .objects
+                .is_empty()
+        );
         let accounts = state.read();
         for name in ["logs-bucket", "replica-bucket"] {
             let bucket = &accounts.get(ACCOUNT).unwrap().buckets[name];
@@ -734,7 +743,8 @@ mod tests {
             staged = Some(staged_path(&disk));
             // Staging succeeds; the actual disk commit cannot create its object directory.
             std::fs::write(
-                tmp.path().join("s3/buckets/logs-bucket/objects"),
+                tmp.path()
+                    .join("s3/accounts/123456789012/buckets/logs-bucket/objects"),
                 b"blocked",
             )
             .unwrap();
@@ -745,10 +755,16 @@ mod tests {
         assert!(state.read().get(ACCOUNT).unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
-        std::fs::remove_file(tmp.path().join("s3/buckets/logs-bucket/objects")).unwrap();
-        assert!(disk.load().unwrap().get("default-account").unwrap().buckets["logs-bucket"]
-            .objects
-            .is_empty());
+        std::fs::remove_file(
+            tmp.path()
+                .join("s3/accounts/123456789012/buckets/logs-bucket/objects"),
+        )
+        .unwrap();
+        assert!(
+            disk.load().unwrap().get(ACCOUNT).unwrap().buckets["logs-bucket"]
+                .objects
+                .is_empty()
+        );
     }
 
     #[test]
@@ -764,9 +780,11 @@ mod tests {
         });
         assert!(result.unwrap_err().contains("not found"));
         assert!(!staged.unwrap().exists());
-        assert!(disk.load().unwrap().get("default-account").unwrap().buckets["logs-bucket"]
-            .objects
-            .is_empty());
+        assert!(
+            disk.load().unwrap().get(ACCOUNT).unwrap().buckets["logs-bucket"]
+                .objects
+                .is_empty()
+        );
     }
 
     #[test]
@@ -841,7 +859,7 @@ mod tests {
         drop(accounts);
 
         let loaded_map = disk.load().unwrap();
-        let loaded = loaded_map.get("default-account").unwrap();
+        let loaded = loaded_map.get(ACCOUNT).unwrap();
         let object = &loaded.buckets["logs-bucket"].objects["events.gz"];
         assert_eq!(object.meta.content_type, "application/octet-stream");
         assert_eq!(object.meta.content_encoding.as_deref(), Some("gzip"));
@@ -1357,7 +1375,12 @@ mod tests {
         let live = bucket(&state);
 
         let reloaded = disk.load().unwrap();
-        let snap = reloaded.get("default-account").unwrap().buckets.get("logs-bucket").unwrap();
+        let snap = reloaded
+            .get(ACCOUNT)
+            .unwrap()
+            .buckets
+            .get("logs-bucket")
+            .unwrap();
         let mut ids: Vec<Option<String>> = snap.object_versions["k"]
             .iter()
             .map(|o| o.meta.version_id.clone())
@@ -1395,7 +1418,9 @@ mod tests {
     impl S3Store for FailingStore {
         fn load(
             &self,
-        ) -> fakecloud_persistence::StoreResult<std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>> {
+        ) -> fakecloud_persistence::StoreResult<
+            std::collections::BTreeMap<String, fakecloud_persistence::S3StateSnapshot>,
+        > {
             self.inner.load()
         }
         fn put_bucket_meta(
@@ -1413,7 +1438,8 @@ mod tests {
             kind: fakecloud_persistence::BucketSubresource,
             payload: &str,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.put_bucket_subresource(account_id, bucket, kind, payload)
+            self.inner
+                .put_bucket_subresource(account_id, bucket, kind, payload)
         }
         fn delete_bucket_subresource(
             &self,
@@ -1421,9 +1447,14 @@ mod tests {
             bucket: &str,
             kind: fakecloud_persistence::BucketSubresource,
         ) -> fakecloud_persistence::StoreResult<()> {
-            self.inner.delete_bucket_subresource(account_id, bucket, kind)
+            self.inner
+                .delete_bucket_subresource(account_id, bucket, kind)
         }
-        fn delete_bucket(&self, account_id: &str, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+        fn delete_bucket(
+            &self,
+            account_id: &str,
+            bucket: &str,
+        ) -> fakecloud_persistence::StoreResult<()> {
             self.inner.delete_bucket(account_id, bucket)
         }
         fn put_object(
@@ -1438,7 +1469,8 @@ mod tests {
             if self.only_bucket.is_none_or(|b| b == bucket) {
                 return Err(disk_full());
             }
-            self.inner.put_object(account_id, bucket, key, version, body, meta)
+            self.inner
+                .put_object(account_id, bucket, key, version, body, meta)
         }
         fn replace_object_body(
             &self,
@@ -1466,7 +1498,8 @@ mod tests {
             if self.fail_meta {
                 return Err(disk_full());
             }
-            self.inner.put_object_meta(account_id, bucket, key, version, meta)
+            self.inner
+                .put_object_meta(account_id, bucket, key, version, meta)
         }
         fn delete_object(
             &self,
@@ -1502,8 +1535,15 @@ mod tests {
             etag: &str,
             checksum: Option<fakecloud_persistence::PartChecksum<'_>>,
         ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
-            self.inner
-                .mpu_put_part(account_id, bucket, upload_id, part_number, body, etag, checksum)
+            self.inner.mpu_put_part(
+                account_id,
+                bucket,
+                upload_id,
+                part_number,
+                body,
+                etag,
+                checksum,
+            )
         }
         fn mpu_abort(
             &self,

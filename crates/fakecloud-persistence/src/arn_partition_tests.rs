@@ -596,6 +596,39 @@ fn s3_object_keys_metadata_and_tags_are_kept_verbatim() {
     assert_eq!(read(&meta), meta_text);
 }
 
+#[test]
+fn s3_object_keys_are_kept_verbatim_in_the_per_account_layout() {
+    let tmp = legacy_dir();
+    let dir = tmp.path();
+    let bucket = dir.join("s3/accounts/123456789012/buckets/b");
+    let object = bucket.join("objects/escaped-key/null.toml");
+    write(
+        &object,
+        "key = \"exports/arn:aws:iam::1:role/x.json\"\n\
+         sse_kms_key_id = \"arn:aws:kms:cn-north-1:1:key/k\"\n",
+    );
+    // A bucket named `objects` in the flat layout is a bucket, not an object
+    // tree, whatever else the store holds.
+    let flat_policy = dir.join("s3/buckets/objects/policy.toml");
+    write(&flat_policy, "arn:aws:iam::1:role/x");
+    let policy = bucket.join("policy.toml");
+    write(&policy, "arn:aws:iam::1:role/x");
+
+    migrate_data_dir(dir, "cn-north-1").unwrap();
+
+    let object: toml::Table = read(&object).parse().unwrap();
+    assert_eq!(
+        object["key"].as_str(),
+        Some("exports/arn:aws:iam::1:role/x.json")
+    );
+    assert_eq!(
+        object["sse_kms_key_id"].as_str(),
+        Some("arn:aws-cn:kms:cn-north-1:1:key/k")
+    );
+    assert_eq!(read(&policy), "arn:aws-cn:iam::1:role/x");
+    assert_eq!(read(&flat_policy), "arn:aws-cn:iam::1:role/x");
+}
+
 #[cfg(unix)]
 #[test]
 fn unreadable_and_filesystem_artifact_directories_do_not_stop_startup() {

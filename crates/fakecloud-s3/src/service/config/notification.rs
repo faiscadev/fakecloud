@@ -36,7 +36,12 @@ impl S3Service {
             .put_bucket_meta(account_id, bucket, &meta)
             .map_err(crate::service::persistence_error)?;
         self.store
-            .put_bucket_subresource(account_id, bucket, BucketSubresource::Notification, &normalized)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::Notification,
+                &normalized,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }

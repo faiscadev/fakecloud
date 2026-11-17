@@ -795,7 +795,8 @@ fn mark_source_replication_status(
     // The source write already succeeded; a status that cannot be persisted
     // is logged (memory keeps it) rather than failing that write.
     if let (Some(meta), Some(store)) = (meta, store) {
-        if let Err(e) = store.put_object_meta(source_account, source_bucket, key, version_id, &meta) {
+        if let Err(e) = store.put_object_meta(source_account, source_bucket, key, version_id, &meta)
+        {
             tracing::warn!(
                 source_bucket,
                 key,

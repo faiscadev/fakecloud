@@ -287,7 +287,13 @@ impl S3Service {
         // An object without an id and one with the id `null` share the same
         // sidecar slot, so the snapshot's own id addresses it either way.
         self.store
-            .put_object_meta(account_id, bucket, key, tagged.version_id.as_deref(), &tagged)
+            .put_object_meta(
+                account_id,
+                bucket,
+                key,
+                tagged.version_id.as_deref(),
+                &tagged,
+            )
             .map_err(super::persistence_error)?;
 
         Ok(AwsResponse {

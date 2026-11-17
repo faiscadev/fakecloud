@@ -55,7 +55,12 @@ impl S3Service {
         };
         b.encryption_config = Some(normalized.clone());
         self.store
-            .put_bucket_subresource(account_id, bucket, BucketSubresource::Encryption, &normalized)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::Encryption,
+                &normalized,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }

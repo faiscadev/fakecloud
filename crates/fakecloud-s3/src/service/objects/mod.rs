@@ -138,7 +138,14 @@ pub(crate) fn commit_object_version(
     body: BodySource,
 ) -> fakecloud_persistence::StoreResult<Option<String>> {
     commit_object_version_with(account_id, b, bucket, store, obj, |store, obj, meta| {
-        store.put_object(account_id, bucket, &obj.key, meta.version_id.as_deref(), body, meta)
+        store.put_object(
+            account_id,
+            bucket,
+            &obj.key,
+            meta.version_id.as_deref(),
+            body,
+            meta,
+        )
     })
 }
 

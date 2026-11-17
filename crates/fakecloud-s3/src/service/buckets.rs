@@ -324,47 +324,6 @@ impl S3Service {
         );
 
         let mut accts = self.state.write();
-        // A bucket the loader could not read is absent from memory, so its name
-        // looks free -- but its objects are on disk and recoverable by repairing
-        // the one bad file, and this create is about to clear the directory.
-        // Refuse instead, and say how to get the name back. Both ways out are in
-        // the data path, where an operator with an unreadable store already is:
-        // repair the one bad file and restart, or remove the directory, which
-        // frees the name immediately (the check below is on the data still being
-        // there, not on the refusal alone). There is deliberately no API verb
-        // that discards it -- DeleteBucket cannot check emptiness here, since the
-        // objects are exactly what could not be read, nor ownership, since the
-        // metadata carrying it is what failed.
-        // `bucket_state_exists` as well as the refusal: the refusal is recorded
-        // at load, so an operator who took the second way out below -- removing
-        // the directory, without restarting -- would otherwise find the name
-        // refused for the rest of the process lifetime, with an error telling
-        // them to repair something that is gone.
-        if self.store.bucket_load_refused(account_id, bucket)
-            && self.store.bucket_state_exists(account_id, bucket)
-            && !accts
-                .iter()
-                .any(|(_, acct)| acct.buckets.contains_key(bucket))
-        {
-            tracing::warn!(
-                target: "fakecloud::s3",
-                bucket = %bucket,
-                "CreateBucket refused: the store holds data for this bucket that could not be \
-                 read at load",
-            );
-            return Err(AwsServiceError::aws_error_with_fields(
-                StatusCode::CONFLICT,
-                "BucketAlreadyExists",
-                format!(
-                    "The requested bucket name is not available: {bucket} holds persisted data \
-                     that could not be read at load -- an unreadable object, one of the bucket's \
-                     own files (tags.toml, acl.toml, inventory.toml), or a delete that stopped \
-                     partway. The server logged which file it was. Repair it in the data path and \
-                     restart to get the bucket back, or remove the directory to free the name."
-                ),
-                vec![("BucketName".to_string(), bucket.to_string())],
-            ));
-        }
         // Check global uniqueness across all accounts before creating
         for (other_account_id, acct_state) in accts.iter() {
             if acct_state.buckets.contains_key(bucket) {
@@ -403,6 +362,51 @@ impl S3Service {
                 StatusCode::CONFLICT,
                 "BucketAlreadyOwnedByYou",
                 "Your previous request to create the named bucket succeeded and you already own it.",
+                vec![("BucketName".to_string(), bucket.to_string())],
+            ));
+        }
+        // A bucket the loader could not read is absent from memory, so its name
+        // looks free -- but its objects are on disk and recoverable by repairing
+        // the one bad file, and this create is about to clear the directory.
+        // Refuse instead, and say how to get the name back. Both ways out are in
+        // the data path, where an operator with an unreadable store already is:
+        // repair the one bad file and restart, or remove the directory, which
+        // frees the name immediately (the check below is on the data still being
+        // there, not on the refusal alone). There is deliberately no API verb
+        // that discards it -- DeleteBucket cannot check emptiness here, since the
+        // objects are exactly what could not be read, nor ownership, since the
+        // metadata carrying it is what failed.
+        //
+        // After the name checks above, so the name is in no account's memory.
+        // The refusals are held in memory and looked up under every account
+        // (names are global); only a refused account's directory is then
+        // stat'ed: the refusal is recorded at load, so an operator who took the
+        // second way out -- removing the directory, without restarting -- would
+        // otherwise find the name refused for the rest of the process lifetime,
+        // with an error telling them to repair something that is gone.
+        if self
+            .store
+            .load_refused_accounts(bucket)
+            .iter()
+            .any(|owner| self.store.bucket_state_exists(owner, bucket))
+        {
+            tracing::warn!(
+                target: "fakecloud::s3",
+                bucket = %bucket,
+                "CreateBucket refused: the store holds data for this bucket that could not be \
+                 read at load",
+            );
+            return Err(AwsServiceError::aws_error_with_fields(
+                StatusCode::CONFLICT,
+                "BucketAlreadyExists",
+                format!(
+                    "The requested bucket name is not available: {bucket} holds persisted data \
+                     that could not be read at load -- an unreadable object, one of the bucket's \
+                     own files (tags.toml, acl.toml, inventory.toml), a delete that stopped \
+                     partway, or copies of the bucket under more than one account. The server \
+                     logged which it was. Repair it in the data path and restart to get the \
+                     bucket back, or remove the directory to free the name."
+                ),
                 vec![("BucketName".to_string(), bucket.to_string())],
             ));
         }
@@ -532,15 +536,19 @@ impl S3Service {
         // whose data the loader REFUSED is turned away earlier, before anything
         // is written, so merely-unreadable data is never what a create clears.
         //
-        // Gated on there being a directory at all, which is the case for every
-        // ordinary create. The clear is a recursive remove and this runs under
-        // the global S3 write lock, so an unconditional call would put a
+        // Gated on there being a directory at all, which is not the case for
+        // an ordinary create. The clear is a recursive remove and this runs
+        // under the global S3 write lock, so an unconditional call would put a
         // stat-and-walk of a possibly huge tree in front of every other S3
-        // request on the one create-after-reset that needs it -- and a bare
-        // `stat` in front of all the rest.
-        if self.store.bucket_state_exists(account_id, bucket) {
+        // request on the one create-after-reset that needs it.
+        //
+        // Under every account holding the name, not only the caller's: names
+        // are global, so a leftover under another account would otherwise load
+        // beside this bucket after a restart. Listed only now, when the create
+        // is going ahead: it reads the store under the global S3 write lock.
+        for owner in &self.store.bucket_state_accounts(bucket) {
             self.store
-                .delete_bucket(account_id, bucket)
+                .delete_bucket(owner, bucket)
                 .map_err(super::persistence_error)?;
         }
         // This name now belongs to a bucket that loads, so whatever the last load
@@ -555,9 +563,11 @@ impl S3Service {
         // directory holding nothing but that failed attempt's `meta.toml`. Only
         // reached once the refusal is known not to apply, so dropping it here
         // cannot discard a live one.
-        if self.store.bucket_load_refused(account_id, bucket) {
+        // Under every account it was refused in: the name is global, and none
+        // of those directories is there any more (or the create was refused).
+        for owner in self.store.load_refused_accounts(bucket) {
             self.store
-                .clear_bucket_load_refusal(account_id, bucket)
+                .clear_bucket_load_refusal(&owner, bucket)
                 .map_err(super::persistence_error)?;
         }
         self.store
@@ -570,7 +580,12 @@ impl S3Service {
             BucketSubresource::Tags,
             tags_payload.as_deref(),
         )?;
-        self.put_bucket_subresource_if_set(account_id, bucket, BucketSubresource::Acl, acl_payload.as_deref())?;
+        self.put_bucket_subresource_if_set(
+            account_id,
+            bucket,
+            BucketSubresource::Acl,
+            acl_payload.as_deref(),
+        )?;
         self.put_bucket_subresource_if_set(
             account_id,
             bucket,

@@ -1815,7 +1815,9 @@ mod tests {
                         assert!(error.message().contains(field), "{}", error.message());
                     }
                 }
-                assert!(disk.load().unwrap().buckets["admission"].objects.is_empty());
+                assert!(disk.load().unwrap()["123456789012"].buckets["admission"]
+                    .objects
+                    .is_empty());
             }
         }
     }
@@ -2678,7 +2680,9 @@ mod tests {
                     .message()
                     .contains("HttpEndpointDestinationConfiguration"));
             }
-            assert!(disk.load().unwrap().buckets["admission"].objects.is_empty());
+            assert!(disk.load().unwrap()["123456789012"].buckets["admission"]
+                .objects
+                .is_empty());
         }
     }
 
@@ -4276,6 +4280,7 @@ mod tests {
         let cache = std::sync::Arc::new(BodyCache::new(1024 * 1024));
         let disk = std::sync::Arc::new(DiskS3Store::new(tmp.path().join("s3"), cache));
         disk.put_bucket_meta(
+            "123456789012",
             bucket,
             &BucketMeta {
                 name: bucket.to_string(),
@@ -4373,7 +4378,7 @@ mod tests {
         let key = object.key.clone();
         drop(s3);
 
-        let loaded = disk.load().unwrap();
+        let loaded = disk.load().unwrap().remove("123456789012").unwrap();
         let persisted = &loaded.buckets["fh-snappy"].objects[&key];
         assert_eq!(
             persisted.meta.checksum_value.as_deref(),
@@ -4429,7 +4434,7 @@ mod tests {
         let key = object.key.clone();
         drop(s3);
 
-        let loaded = disk.load().unwrap();
+        let loaded = disk.load().unwrap().remove("123456789012").unwrap();
         let persisted = &loaded.buckets["fh-gzip"].objects[&key];
         assert_eq!(persisted.meta.content_type, "application/octet-stream");
         assert_eq!(persisted.meta.content_encoding.as_deref(), Some("gzip"));
@@ -4457,7 +4462,8 @@ mod tests {
             } else {
                 // Staging can succeed, but the final object directory cannot be created.
                 std::fs::write(
-                    tmp.path().join("s3/buckets/fh-fallback/objects"),
+                    tmp.path()
+                        .join("s3/accounts/123456789012/buckets/fh-fallback/objects"),
                     b"blocks commit",
                 )
                 .unwrap();
@@ -4488,9 +4494,13 @@ mod tests {
             // The deliberately corrupt objects root makes load skip the bucket;
             // remove only the blocker before checking durable publication.
             if !fail_staging {
-                std::fs::remove_file(tmp.path().join("s3/buckets/fh-fallback/objects")).unwrap();
+                std::fs::remove_file(
+                    tmp.path()
+                        .join("s3/accounts/123456789012/buckets/fh-fallback/objects"),
+                )
+                .unwrap();
             }
-            assert!(disk.load().unwrap().buckets["fh-fallback"]
+            assert!(disk.load().unwrap()["123456789012"].buckets["fh-fallback"]
                 .objects
                 .is_empty());
         }
@@ -4565,7 +4575,9 @@ mod tests {
         assert!(s3.get(S3_ACCOUNT).unwrap().buckets["fh-bucket"]
             .objects
             .is_empty());
-        assert!(disk.load().unwrap().buckets["fh-bucket"].objects.is_empty());
+        assert!(disk.load().unwrap()["123456789012"].buckets["fh-bucket"]
+            .objects
+            .is_empty());
     }
 
     #[test]
@@ -4715,7 +4727,12 @@ mod tests {
         let objects = &s3.get(S3_ACCOUNT).unwrap().buckets["fh-bucket"].objects;
         assert_eq!(objects.len(), 1, "DirectPut hook still delivers");
         assert_eq!(objects.values().next().unwrap().size, 1);
-        assert_eq!(disk.load().unwrap().buckets["fh-bucket"].objects.len(), 1);
+        assert_eq!(
+            disk.load().unwrap()["123456789012"].buckets["fh-bucket"]
+                .objects
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -4829,7 +4846,12 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(disk.load().unwrap().buckets["fh-bucket"].objects.len(), 1);
+        assert_eq!(
+            disk.load().unwrap()["123456789012"].buckets["fh-bucket"]
+                .objects
+                .len(),
+            1
+        );
         assert_eq!(
             s3.get(S3_ACCOUNT).unwrap().buckets["fh-bucket"]
                 .objects
@@ -5343,7 +5365,7 @@ mod tests {
         drop(s3);
 
         // Reloading the store from disk (as boot does) must surface the object.
-        let reloaded = disk.load().unwrap();
+        let reloaded = disk.load().unwrap().remove("123456789012").unwrap();
         let rbucket = reloaded
             .buckets
             .get("fh-bucket")

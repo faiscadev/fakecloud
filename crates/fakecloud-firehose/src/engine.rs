@@ -3782,6 +3782,7 @@ mod tests {
         );
         for name in ["bucket", "changed-bucket"] {
             disk.put_bucket_meta(
+                ACCOUNT,
                 name,
                 &BucketMeta {
                     name: name.into(),
@@ -3871,7 +3872,7 @@ mod tests {
             .objects
             .clone();
         assert_eq!(objects.len(), 2);
-        let loaded = disk.load().unwrap();
+        let loaded = disk.load().unwrap().remove(ACCOUNT).unwrap();
         assert_eq!(loaded.buckets["bucket"].objects.len(), 2);
         let mut bodies: Vec<_> = objects
             .keys()
@@ -3910,7 +3911,7 @@ mod tests {
                 let bucket = &state.get(ACCOUNT).unwrap().buckets["bucket"];
                 assert_eq!(bucket.objects.len(), 1);
                 let key = bucket.objects.keys().next().unwrap();
-                let loaded = disk.load().unwrap();
+                let loaded = disk.load().unwrap().remove(ACCOUNT).unwrap();
                 let object = &loaded.buckets["bucket"].objects[key];
                 assert_eq!(
                     disk.open_object_body(&object.body).unwrap(),
@@ -3923,14 +3924,19 @@ mod tests {
             f.engine.set_s3_store(replacement.clone());
             f.enqueue(vec![Bytes::from_static(b"second")]);
             f.turn().await;
-            let loaded = replacement.load().unwrap();
+            let loaded = replacement.load().unwrap().remove(ACCOUNT).unwrap();
             assert_eq!(loaded.buckets["bucket"].objects.len(), 1);
             let object = loaded.buckets["bucket"].objects.values().next().unwrap();
             assert_eq!(
                 replacement.open_object_body(&object.body).unwrap(),
                 Bytes::from_static(b"second")
             );
-            assert_eq!(disk.load().unwrap().buckets["bucket"].objects.len(), 1);
+            assert_eq!(
+                disk.load().unwrap()[ACCOUNT].buckets["bucket"]
+                    .objects
+                    .len(),
+                1
+            );
             assert_eq!(f.engine.shutdown().await, DrainReport::default());
         }
     }
@@ -3960,7 +3966,7 @@ mod tests {
             assert!(s3.read().get(ACCOUNT).unwrap().buckets["bucket"]
                 .objects
                 .contains_key(&key));
-            let loaded = store.load().unwrap();
+            let loaded = store.load().unwrap().remove(ACCOUNT).unwrap();
             assert_eq!(
                 store
                     .open_object_body(&loaded.buckets["bucket"].objects[&key].body)
@@ -4005,7 +4011,12 @@ mod tests {
                     .len(),
                 1
             );
-            assert_eq!(store.load().unwrap().buckets["bucket"].objects.len(), 1);
+            assert_eq!(
+                store.load().unwrap()[ACCOUNT].buckets["bucket"]
+                    .objects
+                    .len(),
+                1
+            );
         }
     }
 
@@ -4039,7 +4050,9 @@ mod tests {
         assert!(s3.read().get(ACCOUNT).unwrap().buckets["bucket"]
             .objects
             .is_empty());
-        assert!(store.load().unwrap().buckets["bucket"].objects.is_empty());
+        assert!(store.load().unwrap()[ACCOUNT].buckets["bucket"]
+            .objects
+            .is_empty());
     }
 
     // Only the staging boundary is controlled. Durable commits/loads use the
@@ -4057,20 +4070,20 @@ mod tests {
 
     impl S3Store for StagingStore {
         forward_store! {
-            load() -> StoreResult<fakecloud_persistence::s3::S3State>;
-            put_bucket_meta(bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
-            put_bucket_subresource(bucket: &str, kind: BucketSubresource, payload: &str) -> StoreResult<()>;
-            delete_bucket_subresource(bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
-            delete_bucket(bucket: &str) -> StoreResult<()>;
-            put_object_meta(bucket: &str, key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<()>;
-            delete_object(bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
+            load() -> StoreResult<std::collections::BTreeMap<String, fakecloud_persistence::s3::S3State>>;
+            put_bucket_meta(account_id: &str, bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
+            put_bucket_subresource(account_id: &str, bucket: &str, kind: BucketSubresource, payload: &str) -> StoreResult<()>;
+            delete_bucket_subresource(account_id: &str, bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
+            delete_bucket(account_id: &str, bucket: &str) -> StoreResult<()>;
+            put_object_meta(account_id: &str, bucket: &str, key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<()>;
+            delete_object(account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
             open_object_body(body: &BodyRef) -> StoreResult<Bytes>;
-            put_object(bucket: &str, key: &str, version: Option<&str>, body: BodySource, meta: &ObjectMeta) -> StoreResult<BodyRef>;
-            replace_object_body(bucket: &str, key: &str, version: Option<&str>, body: BodySource, meta: &ObjectMeta) -> StoreResult<BodyRef>;
-            mpu_create(bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
-            mpu_put_part(bucket: &str, upload_id: &str, part_number: u32, body: BodySource, etag: &str, checksum: Option<fakecloud_persistence::PartChecksum<'_>>) -> StoreResult<BodyRef>;
-            mpu_abort(bucket: &str, upload_id: &str) -> StoreResult<()>;
-            mpu_complete(bucket: &str, upload_id: &str, final_key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<BodyRef>;
+            put_object(account_id: &str, bucket: &str, key: &str, version: Option<&str>, body: BodySource, meta: &ObjectMeta) -> StoreResult<BodyRef>;
+            replace_object_body(account_id: &str, bucket: &str, key: &str, version: Option<&str>, body: BodySource, meta: &ObjectMeta) -> StoreResult<BodyRef>;
+            mpu_create(account_id: &str, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
+            mpu_put_part(account_id: &str, bucket: &str, upload_id: &str, part_number: u32, body: BodySource, etag: &str, checksum: Option<fakecloud_persistence::PartChecksum<'_>>) -> StoreResult<BodyRef>;
+            mpu_abort(account_id: &str, bucket: &str, upload_id: &str) -> StoreResult<()>;
+            mpu_complete(account_id: &str, bucket: &str, upload_id: &str, final_key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<BodyRef>;
         }
 
         fn spool_dir(&self) -> Option<PathBuf> {
@@ -4173,7 +4186,9 @@ mod tests {
             assert!(s3.read().get(ACCOUNT).unwrap().buckets["bucket"]
                 .objects
                 .is_empty());
-            assert!(store.load().unwrap().buckets["bucket"].objects.is_empty());
+            assert!(store.load().unwrap()[ACCOUNT].buckets["bucket"]
+                .objects
+                .is_empty());
             assert_eq!(
                 std::fs::read_dir(store.disk.spool_dir().unwrap())
                     .unwrap()
@@ -4207,7 +4222,7 @@ mod tests {
             assert_eq!(objects.len(), 1);
             let key = objects.keys().next().unwrap();
             assert!(key.starts_with("2026/10/12/23/events-1-"));
-            let loaded = store.load().unwrap();
+            let loaded = store.load().unwrap().remove(ACCOUNT).unwrap();
             assert!(loaded.buckets["changed-bucket"].objects.is_empty());
             assert_eq!(
                 store

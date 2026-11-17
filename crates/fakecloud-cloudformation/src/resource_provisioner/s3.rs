@@ -97,7 +97,12 @@ impl ResourceProvisioner {
             .buckets
             .get_mut(bucket_name)
             .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
-        fakecloud_s3::apply_cfn_bucket_properties(bucket, &resource.properties, &self.s3_store, &self.account_id)?;
+        fakecloud_s3::apply_cfn_bucket_properties(
+            bucket,
+            &resource.properties,
+            &self.s3_store,
+            &self.account_id,
+        )?;
         Ok(bucket_attributes(bucket_name, &bucket.region))
     }
 
@@ -140,7 +145,12 @@ impl ResourceProvisioner {
         bucket.policy = Some(policy.clone());
         // Persist the policy subresource to disk, as PutBucketPolicy does.
         self.s3_store
-            .put_bucket_subresource(&self.account_id, &bucket_name, BucketSubresource::Policy, &policy)
+            .put_bucket_subresource(
+                &self.account_id,
+                &bucket_name,
+                BucketSubresource::Policy,
+                &policy,
+            )
             .map_err(|e| format!("failed to persist bucket policy for {bucket_name}: {e}"))?;
         Ok(ProvisionResult::new(format!("{bucket_name}-policy")))
     }
@@ -177,7 +187,12 @@ impl ResourceProvisioner {
         }
         bucket.policy = Some(policy.clone());
         self.s3_store
-            .put_bucket_subresource(&self.account_id, &bucket_name, BucketSubresource::Policy, &policy)
+            .put_bucket_subresource(
+                &self.account_id,
+                &bucket_name,
+                BucketSubresource::Policy,
+                &policy,
+            )
             .map_err(|e| format!("failed to persist bucket policy for {bucket_name}: {e}"))?;
         Ok(ProvisionResult::new(format!("{bucket_name}-policy")))
     }

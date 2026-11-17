@@ -296,7 +296,10 @@ impl S3Service {
                     .map_err(crate::service::persistence_error)?;
             }
             self.store
-                .put_object(account_id, bucket, key,
+                .put_object(
+                    account_id,
+                    bucket,
+                    key,
                     Some(dm_id.as_str()),
                     BodySource::Bytes(Bytes::new()),
                     &marker_meta,
@@ -569,7 +572,10 @@ impl S3Service {
                         b.objects.remove(key);
                     }
                 }
-                if let Err(e) = self.store.delete_object(account_id, bucket, key, Some(vid.as_str())) {
+                if let Err(e) =
+                    self.store
+                        .delete_object(account_id, bucket, key, Some(vid.as_str()))
+                {
                     persist_error = Some(crate::service::persistence_error(e));
                     break;
                 }
@@ -626,10 +632,13 @@ impl S3Service {
                         // See delete_object: the sidecar needs the "null"
                         // version id or the loader drops this version.
                         let preserved_meta = object_meta_snapshot(&preserved);
-                        if let Err(e) =
-                            self.store
-                                .put_object_meta(account_id, bucket, key, Some("null"), &preserved_meta)
-                        {
+                        if let Err(e) = self.store.put_object_meta(
+                            account_id,
+                            bucket,
+                            key,
+                            Some("null"),
+                            &preserved_meta,
+                        ) {
                             persist_error = Some(crate::service::persistence_error(e));
                             break;
                         }

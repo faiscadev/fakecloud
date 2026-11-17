@@ -506,7 +506,12 @@ impl S3Service {
             b.metadata_configuration = Some(body_str.clone());
         }
         self.store
-            .put_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration, &body_str)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::MetadataConfiguration,
+                &body_str,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -607,7 +612,11 @@ impl S3Service {
             b.metadata_table_configuration = None;
         }
         self.store
-            .delete_bucket_subresource(account_id, bucket, BucketSubresource::MetadataTableConfiguration)
+            .delete_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::MetadataTableConfiguration,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
@@ -637,7 +646,12 @@ impl S3Service {
         // path does, so the inventory-table block survives a restart instead
         // of living only in RAM.
         self.store
-            .put_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration, &combined)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::MetadataConfiguration,
+                &combined,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -665,7 +679,12 @@ impl S3Service {
         // Persist the updated composite configuration (see the inventory-table
         // sibling above) so the journal-table block survives a restart.
         self.store
-            .put_bucket_subresource(account_id, bucket, BucketSubresource::MetadataConfiguration, &combined)
+            .put_bucket_subresource(
+                account_id,
+                bucket,
+                BucketSubresource::MetadataConfiguration,
+                &combined,
+            )
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }

@@ -58,9 +58,10 @@ pub struct BucketMeta {
     pub creation_date: DateTime<Utc>,
     #[serde(default)]
     pub region: String,
-    /// Account ID that owns this bucket. Persisted since the disk path structure
-    /// includes account scoping to support multi-account namespaces where different
-    /// accounts can have buckets with the same name.
+    /// Account that owns this bucket. The store keeps a bucket under its
+    /// account's directory, which is what the load goes by; this copy is what
+    /// lets a bucket moved out of that layout find its account again. Empty
+    /// in metadata written before buckets were stored per account.
     #[serde(default)]
     pub account_id: String,
     #[serde(default)]
@@ -478,12 +479,13 @@ pub fn remove_detached(path: &Path) -> std::io::Result<()> {
 }
 
 pub trait S3Store: Send + Sync {
-    /// Load all S3 state organized by account. Returns a map of account_id → S3State.
-    /// In persistent mode, loads one entry per account directory on disk.
-    /// In memory mode, returns an empty map.
+    /// Load the stored buckets of every account, keyed by account ID. Every
+    /// other method takes the account that owns the bucket it names, which is
+    /// where the bucket's files live.
     fn load(&self) -> StoreResult<std::collections::BTreeMap<String, S3State>>;
 
-    fn put_bucket_meta(&self, account_id: &str, bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
+    fn put_bucket_meta(&self, account_id: &str, bucket: &str, meta: &BucketMeta)
+        -> StoreResult<()>;
     fn put_bucket_subresource(
         &self,
         account_id: &str,
@@ -491,7 +493,12 @@ pub trait S3Store: Send + Sync {
         kind: BucketSubresource,
         payload: &str,
     ) -> StoreResult<()>;
-    fn delete_bucket_subresource(&self, account_id: &str, bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
+    fn delete_bucket_subresource(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        kind: BucketSubresource,
+    ) -> StoreResult<()>;
     fn delete_bucket(&self, account_id: &str, bucket: &str) -> StoreResult<()>;
 
     /// Move `bucket`'s files out of the store in one atomic rename and return
@@ -513,6 +520,13 @@ pub trait S3Store: Send + Sync {
         false
     }
 
+    /// Every account holding files for `bucket` in the store, whether or not
+    /// they loaded. Bucket names are global, so a create has to clear (or be
+    /// refused over) leftovers under any account, not only its own.
+    fn bucket_state_accounts(&self, _bucket: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether this bucket was REFUSED at load: data still on disk and
     /// recoverable by repairing the one bad file.
     ///
@@ -526,6 +540,13 @@ pub trait S3Store: Send + Sync {
     /// loader could not read this" with "this is simply not in memory".
     fn bucket_load_refused(&self, _account_id: &str, _bucket: &str) -> bool {
         false
+    }
+
+    /// The accounts under which `bucket` was refused at load (see
+    /// [`S3Store::bucket_load_refused`]). Answered from what the load
+    /// recorded, without reading the store.
+    fn load_refused_accounts(&self, _bucket: &str) -> Vec<String> {
+        Vec::new()
     }
 
     /// Record that `bucket` could not be loaded, for a reason found ABOVE the
@@ -577,7 +598,13 @@ pub trait S3Store: Send + Sync {
         version: Option<&str>,
         meta: &ObjectMeta,
     ) -> StoreResult<()>;
-    fn delete_object(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
+    fn delete_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+    ) -> StoreResult<()>;
     fn open_object_body(&self, body: &BodyRef) -> StoreResult<Bytes>;
 
     /// Persist one annotation of an object version (creating or replacing
@@ -608,12 +635,19 @@ pub trait S3Store: Send + Sync {
         Ok(())
     }
 
-    fn mpu_create(&self, account_id: &str, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
+    fn mpu_create(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        upload_id: &str,
+        init: &MpuInit,
+    ) -> StoreResult<()>;
     /// Persist a multipart-upload part body. Returns the [`BodyRef`] the
     /// service should keep in its in-memory part map: `BodyRef::Disk`
     /// for disk-backed stores (so subsequent reads stream from the
     /// `.bin` file instead of holding the part in RAM), or
     /// `BodyRef::Memory` for memory-mode stores.
+    #[allow(clippy::too_many_arguments)]
     fn mpu_put_part(
         &self,
         account_id: &str,
@@ -664,7 +698,12 @@ impl S3Store for MemoryS3Store {
         Ok(std::collections::BTreeMap::new())
     }
 
-    fn put_bucket_meta(&self, _account_id: &str, _bucket: &str, _meta: &BucketMeta) -> StoreResult<()> {
+    fn put_bucket_meta(
+        &self,
+        _account_id: &str,
+        _bucket: &str,
+        _meta: &BucketMeta,
+    ) -> StoreResult<()> {
         Ok(())
     }
     fn put_bucket_subresource(
@@ -721,7 +760,13 @@ impl S3Store for MemoryS3Store {
     ) -> StoreResult<()> {
         Ok(())
     }
-    fn delete_object(&self, _account_id: &str, _bucket: &str, _key: &str, _version: Option<&str>) -> StoreResult<()> {
+    fn delete_object(
+        &self,
+        _account_id: &str,
+        _bucket: &str,
+        _key: &str,
+        _version: Option<&str>,
+    ) -> StoreResult<()> {
         Ok(())
     }
     fn open_object_body(&self, body: &BodyRef) -> StoreResult<Bytes> {
@@ -733,7 +778,13 @@ impl S3Store for MemoryS3Store {
         }
     }
 
-    fn mpu_create(&self, _account_id: &str, _bucket: &str, _upload_id: &str, _init: &MpuInit) -> StoreResult<()> {
+    fn mpu_create(
+        &self,
+        _account_id: &str,
+        _bucket: &str,
+        _upload_id: &str,
+        _init: &MpuInit,
+    ) -> StoreResult<()> {
         Ok(())
     }
     fn mpu_put_part(
@@ -769,9 +820,52 @@ impl S3Store for MemoryS3Store {
 pub struct DiskS3Store {
     root: PathBuf,
     cache: std::sync::Arc<crate::cache::BodyCache>,
-    /// Escaped directory names `load` could not read, so a caller can tell
-    /// recoverable data apart from state the operator already discarded.
-    load_refused: parking_lot::RwLock<std::collections::HashSet<String>>,
+    /// The account (`--account-id`) that owns buckets of the pre-account
+    /// flat layout whose own metadata does not name another one.
+    default_account: Option<String>,
+    /// `(account, escaped bucket directory name)` pairs `load` could not
+    /// read, so a caller can tell recoverable data apart from state the
+    /// operator already discarded.
+    load_refused: parking_lot::RwLock<std::collections::HashSet<(String, String)>>,
+}
+
+/// The name of an account's directory under `accounts/`. Account IDs come
+/// from requests and credentials, so they are escaped like any other path
+/// segment; a 12-digit ID is its own directory name.
+fn account_dir_name(account_id: &str) -> String {
+    crate::key_escape::escape_key_segment(account_id)
+}
+
+/// The account an `accounts/` directory holds, or `None` for a name
+/// [`account_dir_name`] cannot have produced reversibly (the `@` sentinels
+/// for empty, dot and over-long IDs).
+fn account_from_dir_name(name: &str) -> Option<String> {
+    if name.starts_with('@') {
+        return None;
+    }
+    let decoded = percent_encoding::percent_decode_str(name)
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    (account_dir_name(&decoded) == name).then_some(decoded)
+}
+
+/// Refuse an account ID whose directory name [`account_from_dir_name`]
+/// cannot read back (empty, `.`, `..`, or too long to escape reversibly):
+/// what is written under it would be skipped by every later load.
+fn check_storable_account(account_id: &str) -> StoreResult<()> {
+    if account_from_dir_name(&account_dir_name(account_id)).as_deref() == Some(account_id) {
+        Ok(())
+    } else {
+        Err(io_other(format!(
+            "account ID {account_id:?} cannot be stored: it has no reversible directory name"
+        )))
+    }
+}
+
+/// A 12-digit AWS account ID.
+fn is_account_id(s: &str) -> bool {
+    s.len() == 12 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 impl DiskS3Store {
@@ -779,12 +873,192 @@ impl DiskS3Store {
         Self {
             root,
             cache,
+            default_account: None,
             load_refused: parking_lot::RwLock::new(std::collections::HashSet::new()),
         }
     }
 
+    /// Name the server's default account (`--account-id`). [`S3Store::load`]
+    /// moves buckets of the flat pre-account layout (`buckets/<bucket>/`)
+    /// into the account that created them, which is this one unless the
+    /// bucket's metadata names another; without it such a layout fails the
+    /// load instead of guessing an owner.
+    pub fn with_default_account(mut self, account_id: impl Into<String>) -> Self {
+        self.default_account = Some(account_id.into());
+        self
+    }
+
     fn accounts_dir(&self) -> PathBuf {
         self.root.join("accounts")
+    }
+
+    /// The flat layout every bucket lived in before buckets were stored per
+    /// account.
+    fn legacy_buckets_dir(&self) -> PathBuf {
+        self.root.join("buckets")
+    }
+
+    fn refusal_key(account_id: &str, bucket: &str) -> (String, String) {
+        (
+            account_id.to_string(),
+            crate::key_escape::escape_key_segment(bucket),
+        )
+    }
+
+    /// The account a bucket of the flat layout belongs to: the one its
+    /// metadata records (`account_id`, or failing that the creating account
+    /// `acl_owner_id` holds), else the default account. Unreadable metadata
+    /// also falls back to the default account; the load then refuses the
+    /// bucket there exactly as it would have in the flat layout.
+    fn legacy_bucket_owner(bdir: &Path, default_account: &str) -> String {
+        let meta = std::fs::read_to_string(bdir.join("meta.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<BucketMeta>(&text).ok());
+        let Some(meta) = meta else {
+            return default_account.to_string();
+        };
+        if !meta.account_id.is_empty() {
+            return meta.account_id;
+        }
+        if is_account_id(&meta.acl_owner_id) {
+            return meta.acl_owner_id;
+        }
+        default_account.to_string()
+    }
+
+    /// Bucket names are global, so a name stored under more than one account
+    /// (left by a create or delete that stopped partway) has no owner the
+    /// store can pick. None of the copies is loaded and the name is refused in
+    /// each account, like any other bucket the load could not read: removing
+    /// all but one directory and restarting loads the remaining copy (a
+    /// running server never loads a bucket), removing all of them frees the
+    /// name immediately.
+    fn refuse_names_held_by_several_accounts(&self, states: &mut BTreeMap<String, S3State>) {
+        let mut holders: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (account, state) in states.iter() {
+            for name in state.buckets.keys() {
+                holders
+                    .entry(name.clone())
+                    .or_default()
+                    .push(account.clone());
+            }
+        }
+        for (name, accounts) in holders.into_iter().filter(|(_, a)| a.len() > 1) {
+            tracing::error!(
+                bucket = %name,
+                accounts = ?accounts,
+                "skipping S3 bucket stored under several accounts; its name is refused until \
+                 all but one of the accounts' directories for it are removed and the server \
+                 restarted (the remaining copy then loads), or every one of them is removed, \
+                 which frees the name at once"
+            );
+            for account in accounts {
+                if let Some(state) = states.get_mut(&account) {
+                    state.buckets.remove(&name);
+                }
+                self.load_refused
+                    .write()
+                    .insert(Self::refusal_key(&account, &name));
+            }
+        }
+    }
+
+    /// Where [`Self::migrate_legacy_layout`] sets aside a bucket of the flat
+    /// layout whose account already holds a bucket of the same name. Outside
+    /// every path the loader, [`S3Store::bucket_state_accounts`] or a
+    /// migration reads, so the copy can never come back on its own -- not
+    /// over a bucket created or deleted later -- and nothing deletes it.
+    fn legacy_conflicts_dir(&self) -> PathBuf {
+        self.root.join("legacy-conflicts")
+    }
+
+    /// Move each bucket of the flat pre-account layout into its account's
+    /// directory. One rename per bucket, so a crash partway leaves every
+    /// bucket in exactly one of the two places and the next load carries on
+    /// where this one stopped. The directory is listed in full before
+    /// anything is moved (a listing that is renamed out of while it is read
+    /// may skip entries), and only an empty one is removed: legacy data is
+    /// never deleted.
+    ///
+    /// A bucket whose destination already exists is moved to
+    /// [`Self::legacy_conflicts_dir`] and reported. Leaving it in the flat
+    /// layout would migrate it in on some later start, once the account's
+    /// own copy were deleted (resurrecting a bucket the user deleted) or
+    /// while another account held the name (getting both refused).
+    fn migrate_legacy_layout(&self) -> StoreResult<()> {
+        let legacy = self.legacy_buckets_dir();
+        let listing = match std::fs::read_dir(&legacy) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut buckets = Vec::new();
+        for entry in listing {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                buckets.push((entry.path(), entry.file_name()));
+            }
+        }
+        if !buckets.is_empty() {
+            let default_account = self.default_account.as_deref().ok_or_else(|| {
+                io_other(format!(
+                    "{} holds buckets of the pre-account layout, but no default account was \
+                     configured to migrate them to",
+                    legacy.display()
+                ))
+            })?;
+            for (bdir, dir_name) in buckets {
+                let owner = Self::legacy_bucket_owner(&bdir, default_account);
+                let owner_dir = account_dir_name(&owner);
+                if account_from_dir_name(&owner_dir).as_deref() != Some(owner.as_str()) {
+                    // Metadata naming an account no directory can hold.
+                    return Err(io_other(format!(
+                        "{} names account {owner:?}, which cannot be stored",
+                        bdir.display()
+                    )));
+                }
+                let dest_parent = self.accounts_dir().join(&owner_dir).join("buckets");
+                let dest = dest_parent.join(&dir_name);
+                if dest.exists() {
+                    let conflicts = self.legacy_conflicts_dir();
+                    std::fs::create_dir_all(&conflicts)?;
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos());
+                    let mut aside = std::ffi::OsString::from(format!("{owner_dir}_"));
+                    aside.push(&dir_name);
+                    aside.push(format!("-{nanos}"));
+                    let aside = conflicts.join(aside);
+                    std::fs::rename(&bdir, &aside)?;
+                    tracing::error!(
+                        bucket = %dest.display(),
+                        account = %owner,
+                        set_aside = %aside.display(),
+                        "S3 bucket of the pre-account layout not migrated: the account already \
+                         holds a bucket of this name. The old copy was moved aside, outside the \
+                         store, and is not loaded; move it into place by hand to restore it"
+                    );
+                    continue;
+                }
+                std::fs::create_dir_all(&dest_parent)?;
+                std::fs::rename(&bdir, &dest)?;
+                tracing::info!(
+                    bucket = %dest.display(),
+                    account = %owner,
+                    "migrated S3 bucket of the pre-account layout"
+                );
+            }
+        }
+        // Not recursive: whatever is still in there (stray files) is left.
+        if let Err(e) = std::fs::remove_dir(&legacy) {
+            tracing::warn!(
+                path = %legacy.display(),
+                error = %e,
+                "the pre-account S3 layout directory still holds files that are not buckets; \
+                 left in place"
+            );
+        }
+        Ok(())
     }
 
     /// Where [`S3Store::detach_bucket`] moves buckets awaiting removal. A
@@ -796,7 +1070,7 @@ impl DiskS3Store {
 
     fn bucket_dir(&self, account_id: &str, bucket: &str) -> PathBuf {
         self.accounts_dir()
-            .join(account_id)
+            .join(account_dir_name(account_id))
             .join("buckets")
             .join(crate::key_escape::escape_key_segment(bucket))
     }
@@ -980,8 +1254,17 @@ impl DiskS3Store {
     /// Where an object version's annotations live: one `<id>.toml` record and
     /// `<id>.bin` payload per annotation, `<id>` the SHA-256 of the name (a
     /// name can be 512 bytes, too long for a file name once escaped).
-    fn annotation_dir(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> PathBuf {
-        Self::annotation_dir_in(&self.object_dir(account_id, bucket, key), &Self::version_tag(version))
+    fn annotation_dir(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+    ) -> PathBuf {
+        Self::annotation_dir_in(
+            &self.object_dir(account_id, bucket, key),
+            &Self::version_tag(version),
+        )
     }
 
     fn annotation_dir_in(key_dir: &std::path::Path, version_tag: &str) -> PathBuf {
@@ -1090,12 +1373,24 @@ impl DiskS3Store {
         self.mpu_dir(account_id, bucket, upload_id).join("parts")
     }
 
-    fn mpu_part_bin(&self, account_id: &str, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
+    fn mpu_part_bin(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+    ) -> PathBuf {
         self.mpu_parts_dir(account_id, bucket, upload_id)
             .join(format!("{}.bin", part_number))
     }
 
-    fn mpu_part_toml(&self, account_id: &str, bucket: &str, upload_id: &str, part_number: u32) -> PathBuf {
+    fn mpu_part_toml(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+    ) -> PathBuf {
         self.mpu_parts_dir(account_id, bucket, upload_id)
             .join(format!("{}.toml", part_number))
     }
@@ -1129,68 +1424,39 @@ impl S3Store for DiskS3Store {
         // Buckets detached by a reset the previous process did not finish
         // deleting.
         let _ = std::fs::remove_dir_all(self.trash_dir());
+        self.migrate_legacy_layout()?;
         let mut all_states: BTreeMap<String, S3State> = BTreeMap::new();
         let accounts_dir = self.accounts_dir();
-
-        // Handle migration: if accounts/ doesn't exist but buckets/ does,
-        // rename buckets/ to accounts/<primary-account>/buckets/
-        if !accounts_dir.exists() {
-            let old_buckets_dir = self.root.join("buckets");
-            if old_buckets_dir.exists() {
-                // This is a migration case. Since we don't have the account_id passed to load(),
-                // we'll load old buckets to a default account and require the service layer to
-                // run migration to move them to the correct account if needed.
-                // Use the CLI account ID environment variable or fakecloud's default account ID.
-                let primary_account = std::env::var("AWS_ACCOUNT_ID")
-                    .unwrap_or_else(|_| "123456789012".to_string());
-
-                tracing::warn!(
-                    "S3 store migration: found legacy buckets/ directory; migrating to accounts/{}/buckets structure",
-                    primary_account
-                );
-
-                let accounts_path = self.accounts_dir();
-                std::fs::create_dir_all(&accounts_path)?;
-                let account_buckets_dir = accounts_path.join(&primary_account).join("buckets");
-                std::fs::create_dir_all(account_buckets_dir.parent().unwrap())?;
-
-                // Move old buckets to new structure: s3/buckets/* -> s3/accounts/<account>/buckets/*
-                match std::fs::rename(&old_buckets_dir, &account_buckets_dir) {
-                    Ok(_) => {
-                        tracing::info!(
-                            "S3 store migration: successfully migrated legacy buckets to account {}",
-                            primary_account
-                        );
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        // Already migrated; fall through to load it
-                        tracing::debug!("S3 store migration: destination already exists");
-                    }
-                    Err(e) => return Err(StoreError::from(e)),
-                }
-            } else {
-                return Ok(all_states);
-            }
-        }
-
-        // Load each account's buckets
-        for account_entry in std::fs::read_dir(&accounts_dir)? {
+        let account_entries = match std::fs::read_dir(&accounts_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(all_states),
+            Err(e) => return Err(e.into()),
+        };
+        for account_entry in account_entries {
             let account_entry = account_entry?;
             if !account_entry.file_type()?.is_dir() {
                 continue;
             }
             let account_path = account_entry.path();
-            let Some(account_id) = account_path.file_name().and_then(|n| n.to_str()) else {
+            let Some(account_id) = account_entry
+                .file_name()
+                .to_str()
+                .and_then(account_from_dir_name)
+            else {
+                tracing::warn!(
+                    path = %account_path.display(),
+                    "skipping S3 account directory whose name is not an escaped account ID"
+                );
                 continue;
             };
-            let account_id = account_id.to_string();
 
-            let mut state = S3State::default();
-            state.account_id = account_id.clone();
+            let mut state = S3State {
+                account_id: account_id.clone(),
+                ..Default::default()
+            };
 
             let buckets_dir = account_path.join("buckets");
             if !buckets_dir.exists() {
-                all_states.insert(account_id, state);
                 continue;
             }
 
@@ -1205,252 +1471,259 @@ impl S3Store for DiskS3Store {
                 // truncated file used to make every bucket inaccessible (bug-audit
                 // 2026-06-20, 4.3).
                 let loaded: StoreResult<Option<BucketSnapshot>> = (|| {
-                let meta_path = bdir.join("meta.toml");
-                if !meta_path.exists() {
-                    return Ok(None);
-                }
-                let meta_text = std::fs::read_to_string(&meta_path)?;
-                let mut meta: BucketMeta =
-                    toml::from_str(&meta_text).map_err(|e| StoreError::Serde(e.to_string()))?;
-                let mut snap = BucketSnapshot {
-                    meta: meta.clone(),
-                    objects: BTreeMap::new(),
-                    object_versions: BTreeMap::new(),
-                    subresources: BTreeMap::new(),
-                    multipart_uploads: BTreeMap::new(),
-                };
-
-                for kind in ALL_SUBRESOURCES {
-                    let fname = Self::subresource_filename(*kind);
-                    let path = bdir.join(fname);
-                    if path.exists() {
-                        let text = std::fs::read_to_string(&path)?;
-                        if *kind == BucketSubresource::Versioning && snap.meta.versioning.is_none()
-                        {
-                            let stripped = text.trim();
-                            if !stripped.is_empty() {
-                                snap.meta.versioning = Some(stripped.to_string());
-                                meta.versioning = snap.meta.versioning.clone();
-                            }
-                        }
-                        snap.subresources.insert(fname.to_string(), text);
+                    let meta_path = bdir.join("meta.toml");
+                    if !meta_path.exists() {
+                        return Ok(None);
                     }
-                }
+                    let meta_text = std::fs::read_to_string(&meta_path)?;
+                    let mut meta: BucketMeta =
+                        toml::from_str(&meta_text).map_err(|e| StoreError::Serde(e.to_string()))?;
+                    let mut snap = BucketSnapshot {
+                        meta: meta.clone(),
+                        objects: BTreeMap::new(),
+                        object_versions: BTreeMap::new(),
+                        subresources: BTreeMap::new(),
+                        multipart_uploads: BTreeMap::new(),
+                    };
 
-                let objects_root = bdir.join("objects");
-                if objects_root.exists() {
-                    for okey_entry in std::fs::read_dir(&objects_root)? {
-                        let okey_entry = okey_entry?;
-                        if !okey_entry.file_type()?.is_dir() {
-                            continue;
-                        }
-                        let key_dir = okey_entry.path();
-                        let mut versioned: Vec<LoadedObject> = Vec::new();
-                        let mut key_name: Option<String> = None;
-                        // Listed up front: loading annotations can rewrite a
-                        // sidecar in this directory, and a directory changed
-                        // mid-listing may list an entry twice.
-                        let version_entries: Vec<std::fs::DirEntry> =
-                            std::fs::read_dir(&key_dir)?.collect::<Result<_, _>>()?;
-                        // Body files the sidecars name, for clearing what a
-                        // replace interrupted or could not remove.
-                        let mut referenced: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        let mut superseded_defaults: Vec<PathBuf> = Vec::new();
-                        for version_entry in &version_entries {
-                            let path = version_entry.path();
-                            let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
-                                continue;
-                            };
-                            if !fname.ends_with(".toml") {
-                                continue;
-                            }
-                            let version_tag = &fname[..fname.len() - 5];
-                            let toml_text = std::fs::read_to_string(&path)?;
-                            let mut obj_meta: ObjectMeta = toml::from_str(&toml_text)
-                                .map_err(|e| StoreError::Serde(e.to_string()))?;
-                            Self::load_annotations(&key_dir, version_tag, &path, &mut obj_meta)?;
-                            let bin_path = Self::body_path_in(&key_dir, version_tag, &obj_meta);
-                            if let Some(name) = bin_path.file_name().and_then(|n| n.to_str()) {
-                                if Self::generation_body_tag(name).is_some() {
-                                    referenced.insert(name.to_string());
-                                    // The sidecar names a generation file:
-                                    // the default one is no longer this
-                                    // version's body.
-                                    superseded_defaults
-                                        .push(key_dir.join(format!("{version_tag}.bin")));
+                    for kind in ALL_SUBRESOURCES {
+                        let fname = Self::subresource_filename(*kind);
+                        let path = bdir.join(fname);
+                        if path.exists() {
+                            let text = std::fs::read_to_string(&path)?;
+                            if *kind == BucketSubresource::Versioning
+                                && snap.meta.versioning.is_none()
+                            {
+                                let stripped = text.trim();
+                                if !stripped.is_empty() {
+                                    snap.meta.versioning = Some(stripped.to_string());
+                                    meta.versioning = snap.meta.versioning.clone();
                                 }
                             }
-                            let (body, size) = if obj_meta.is_delete_marker {
-                                (BodyRef::Memory(Bytes::new()), 0u64)
-                            } else if bin_path.exists() {
-                                let sz = std::fs::metadata(&bin_path)?.len();
-                                (
-                                    BodyRef::Disk {
-                                        bucket: meta.name.clone(),
-                                        key: obj_meta.key.clone(),
-                                        version: if version_tag == "null" {
-                                            None
-                                        } else {
-                                            Some(version_tag.to_string())
-                                        },
-                                        path: bin_path,
-                                        size: sz,
-                                    },
-                                    sz,
-                                )
-                            } else {
-                                // Fail loud: the sidecar says this object has a
-                                // body but the .bin file is missing. Returning
-                                // silently would hand the caller a truncated
-                                // object and hide data loss.
-                                return Err(StoreError::Other(format!(
-                                    "missing body file: {}",
-                                    bin_path.display()
-                                )));
-                            };
-                            let _ = size;
-                            key_name.get_or_insert_with(|| obj_meta.key.clone());
-                            if version_tag == "null" && obj_meta.version_id.is_none() {
-                                snap.objects.insert(
-                                    obj_meta.key.clone(),
-                                    LoadedObject {
-                                        meta: obj_meta,
-                                        body,
-                                    },
-                                );
-                            } else {
-                                versioned.push(LoadedObject {
-                                    meta: obj_meta,
-                                    body,
-                                });
-                            }
-                        }
-                        // A generation body no sidecar names was written by a
-                        // replace that did not reach its sidecar rename, or
-                        // was superseded by one that did; a default body
-                        // whose sidecar names a generation file was replaced.
-                        // Default files of any other version are never
-                        // touched.
-                        for entry in &version_entries {
-                            let path = entry.path();
-                            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                                continue;
-                            };
-                            if Self::generation_body_tag(name).is_some()
-                                && !referenced.contains(name)
-                            {
-                                Self::remove_stale_body(&path);
-                            } else if (crate::atomic::is_temp_file_name(name)
-                                || name.ends_with(".bin.tmp"))
-                                && path.is_file()
-                            {
-                                // A write that never reached its rename (a
-                                // multipart completion's concatenated body
-                                // was `<body>.bin.tmp` before it took a
-                                // unique temp name).
-                                Self::remove_stale_body(&path);
-                            } else if name.ends_with(".annotations") && path.is_dir() {
-                                Self::remove_temp_files_in(&path);
-                            }
-                        }
-                        for default in &superseded_defaults {
-                            Self::remove_stale_body(default);
-                        }
-                        if !versioned.is_empty() {
-                            versioned.sort_by_key(|v| v.meta.last_modified);
-                            if let Some(key) = key_name {
-                                // Reconcile snap.objects with the newest version:
-                                // a trailing delete marker hides any prior null or
-                                // live version (remove it); otherwise overwrite
-                                // with the newest live version, even if a
-                                // pre-versioning null.toml had already been
-                                // inserted during the non-versioned scan.
-                                match versioned.last() {
-                                    Some(newest) if newest.meta.is_delete_marker => {
-                                        snap.objects.remove(&key);
-                                    }
-                                    Some(newest) => {
-                                        snap.objects.insert(key.clone(), newest.clone());
-                                    }
-                                    None => {}
-                                }
-                                snap.object_versions.insert(key, versioned);
-                            }
+                            snap.subresources.insert(fname.to_string(), text);
                         }
                     }
-                }
 
-                let mpu_root = bdir.join("mpu");
-                if mpu_root.exists() {
-                    for upload_entry in std::fs::read_dir(&mpu_root)? {
-                        let upload_entry = upload_entry?;
-                        if !upload_entry.file_type()?.is_dir() {
-                            continue;
-                        }
-                        let upload_dir = upload_entry.path();
-                        let init_path = upload_dir.join("init.toml");
-                        if !init_path.exists() {
-                            continue;
-                        }
-                        let init_text = std::fs::read_to_string(&init_path)?;
-                        let init: MpuInit = toml::from_str(&init_text)
-                            .map_err(|e| StoreError::Serde(e.to_string()))?;
-                        let mut loaded_parts: BTreeMap<u32, LoadedPart> = BTreeMap::new();
-                        let parts_dir = upload_dir.join("parts");
-                        if parts_dir.exists() {
-                            for part_entry in std::fs::read_dir(&parts_dir)? {
-                                let part_entry = part_entry?;
-                                let path = part_entry.path();
+                    let objects_root = bdir.join("objects");
+                    if objects_root.exists() {
+                        for okey_entry in std::fs::read_dir(&objects_root)? {
+                            let okey_entry = okey_entry?;
+                            if !okey_entry.file_type()?.is_dir() {
+                                continue;
+                            }
+                            let key_dir = okey_entry.path();
+                            let mut versioned: Vec<LoadedObject> = Vec::new();
+                            let mut key_name: Option<String> = None;
+                            // Listed up front: loading annotations can rewrite a
+                            // sidecar in this directory, and a directory changed
+                            // mid-listing may list an entry twice.
+                            let version_entries: Vec<std::fs::DirEntry> =
+                                std::fs::read_dir(&key_dir)?.collect::<Result<_, _>>()?;
+                            // Body files the sidecars name, for clearing what a
+                            // replace interrupted or could not remove.
+                            let mut referenced: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
+                            let mut superseded_defaults: Vec<PathBuf> = Vec::new();
+                            for version_entry in &version_entries {
+                                let path = version_entry.path();
                                 let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
                                     continue;
                                 };
                                 if !fname.ends_with(".toml") {
                                     continue;
                                 }
-                                let stem = &fname[..fname.len() - 5];
-                                let Ok(part_number) = stem.parse::<u32>() else {
-                                    continue;
-                                };
+                                let version_tag = &fname[..fname.len() - 5];
                                 let toml_text = std::fs::read_to_string(&path)?;
-                                let part_meta: UploadPartMeta = toml::from_str(&toml_text)
+                                let mut obj_meta: ObjectMeta = toml::from_str(&toml_text)
                                     .map_err(|e| StoreError::Serde(e.to_string()))?;
-                                let bin_path = parts_dir.join(format!("{}.bin", part_number));
-                                if !bin_path.exists() {
+                                Self::load_annotations(
+                                    &key_dir,
+                                    version_tag,
+                                    &path,
+                                    &mut obj_meta,
+                                )?;
+                                let bin_path = Self::body_path_in(&key_dir, version_tag, &obj_meta);
+                                if let Some(name) = bin_path.file_name().and_then(|n| n.to_str()) {
+                                    if Self::generation_body_tag(name).is_some() {
+                                        referenced.insert(name.to_string());
+                                        // The sidecar names a generation file:
+                                        // the default one is no longer this
+                                        // version's body.
+                                        superseded_defaults
+                                            .push(key_dir.join(format!("{version_tag}.bin")));
+                                    }
+                                }
+                                let (body, size) = if obj_meta.is_delete_marker {
+                                    (BodyRef::Memory(Bytes::new()), 0u64)
+                                } else if bin_path.exists() {
+                                    let sz = std::fs::metadata(&bin_path)?.len();
+                                    (
+                                        BodyRef::Disk {
+                                            bucket: meta.name.clone(),
+                                            key: obj_meta.key.clone(),
+                                            version: if version_tag == "null" {
+                                                None
+                                            } else {
+                                                Some(version_tag.to_string())
+                                            },
+                                            path: bin_path,
+                                            size: sz,
+                                        },
+                                        sz,
+                                    )
+                                } else {
+                                    // Fail loud: the sidecar says this object has a
+                                    // body but the .bin file is missing. Returning
+                                    // silently would hand the caller a truncated
+                                    // object and hide data loss.
                                     return Err(StoreError::Other(format!(
-                                        "missing multipart part body file: {}",
+                                        "missing body file: {}",
                                         bin_path.display()
                                     )));
-                                }
-                                let sz = std::fs::metadata(&bin_path)?.len();
-                                let body = BodyRef::Disk {
-                                    bucket: meta.name.clone(),
-                                    key: format!("__mpu__/{}", init.upload_id),
-                                    version: Some(format!("part-{}", part_number)),
-                                    path: bin_path,
-                                    size: sz,
                                 };
-                                loaded_parts.insert(
-                                    part_number,
-                                    LoadedPart {
-                                        meta: part_meta,
+                                let _ = size;
+                                key_name.get_or_insert_with(|| obj_meta.key.clone());
+                                if version_tag == "null" && obj_meta.version_id.is_none() {
+                                    snap.objects.insert(
+                                        obj_meta.key.clone(),
+                                        LoadedObject {
+                                            meta: obj_meta,
+                                            body,
+                                        },
+                                    );
+                                } else {
+                                    versioned.push(LoadedObject {
+                                        meta: obj_meta,
                                         body,
-                                    },
-                                );
+                                    });
+                                }
+                            }
+                            // A generation body no sidecar names was written by a
+                            // replace that did not reach its sidecar rename, or
+                            // was superseded by one that did; a default body
+                            // whose sidecar names a generation file was replaced.
+                            // Default files of any other version are never
+                            // touched.
+                            for entry in &version_entries {
+                                let path = entry.path();
+                                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                                    continue;
+                                };
+                                if Self::generation_body_tag(name).is_some()
+                                    && !referenced.contains(name)
+                                {
+                                    Self::remove_stale_body(&path);
+                                } else if (crate::atomic::is_temp_file_name(name)
+                                    || name.ends_with(".bin.tmp"))
+                                    && path.is_file()
+                                {
+                                    // A write that never reached its rename (a
+                                    // multipart completion's concatenated body
+                                    // was `<body>.bin.tmp` before it took a
+                                    // unique temp name).
+                                    Self::remove_stale_body(&path);
+                                } else if name.ends_with(".annotations") && path.is_dir() {
+                                    Self::remove_temp_files_in(&path);
+                                }
+                            }
+                            for default in &superseded_defaults {
+                                Self::remove_stale_body(default);
+                            }
+                            if !versioned.is_empty() {
+                                versioned.sort_by_key(|v| v.meta.last_modified);
+                                if let Some(key) = key_name {
+                                    // Reconcile snap.objects with the newest version:
+                                    // a trailing delete marker hides any prior null or
+                                    // live version (remove it); otherwise overwrite
+                                    // with the newest live version, even if a
+                                    // pre-versioning null.toml had already been
+                                    // inserted during the non-versioned scan.
+                                    match versioned.last() {
+                                        Some(newest) if newest.meta.is_delete_marker => {
+                                            snap.objects.remove(&key);
+                                        }
+                                        Some(newest) => {
+                                            snap.objects.insert(key.clone(), newest.clone());
+                                        }
+                                        None => {}
+                                    }
+                                    snap.object_versions.insert(key, versioned);
+                                }
                             }
                         }
-                        snap.multipart_uploads.insert(
-                            init.upload_id.clone(),
-                            LoadedMpu {
-                                init,
-                                parts: loaded_parts,
-                            },
-                        );
                     }
-                }
 
-                Ok(Some(snap))
-            })();
+                    let mpu_root = bdir.join("mpu");
+                    if mpu_root.exists() {
+                        for upload_entry in std::fs::read_dir(&mpu_root)? {
+                            let upload_entry = upload_entry?;
+                            if !upload_entry.file_type()?.is_dir() {
+                                continue;
+                            }
+                            let upload_dir = upload_entry.path();
+                            let init_path = upload_dir.join("init.toml");
+                            if !init_path.exists() {
+                                continue;
+                            }
+                            let init_text = std::fs::read_to_string(&init_path)?;
+                            let init: MpuInit = toml::from_str(&init_text)
+                                .map_err(|e| StoreError::Serde(e.to_string()))?;
+                            let mut loaded_parts: BTreeMap<u32, LoadedPart> = BTreeMap::new();
+                            let parts_dir = upload_dir.join("parts");
+                            if parts_dir.exists() {
+                                for part_entry in std::fs::read_dir(&parts_dir)? {
+                                    let part_entry = part_entry?;
+                                    let path = part_entry.path();
+                                    let Some(fname) = path.file_name().and_then(|s| s.to_str())
+                                    else {
+                                        continue;
+                                    };
+                                    if !fname.ends_with(".toml") {
+                                        continue;
+                                    }
+                                    let stem = &fname[..fname.len() - 5];
+                                    let Ok(part_number) = stem.parse::<u32>() else {
+                                        continue;
+                                    };
+                                    let toml_text = std::fs::read_to_string(&path)?;
+                                    let part_meta: UploadPartMeta = toml::from_str(&toml_text)
+                                        .map_err(|e| StoreError::Serde(e.to_string()))?;
+                                    let bin_path = parts_dir.join(format!("{}.bin", part_number));
+                                    if !bin_path.exists() {
+                                        return Err(StoreError::Other(format!(
+                                            "missing multipart part body file: {}",
+                                            bin_path.display()
+                                        )));
+                                    }
+                                    let sz = std::fs::metadata(&bin_path)?.len();
+                                    let body = BodyRef::Disk {
+                                        bucket: meta.name.clone(),
+                                        key: format!("__mpu__/{}", init.upload_id),
+                                        version: Some(format!("part-{}", part_number)),
+                                        path: bin_path,
+                                        size: sz,
+                                    };
+                                    loaded_parts.insert(
+                                        part_number,
+                                        LoadedPart {
+                                            meta: part_meta,
+                                            body,
+                                        },
+                                    );
+                                }
+                            }
+                            snap.multipart_uploads.insert(
+                                init.upload_id.clone(),
+                                LoadedMpu {
+                                    init,
+                                    parts: loaded_parts,
+                                },
+                            );
+                        }
+                    }
+
+                    Ok(Some(snap))
+                })();
                 match loaded {
                     Ok(Some(snap)) => {
                         state.buckets.insert(snap.meta.name.clone(), snap);
@@ -1459,11 +1732,11 @@ impl S3Store for DiskS3Store {
                     Err(e) => {
                         // Remembered so a later CreateBucket knows this directory
                         // holds recoverable data rather than state the operator
-                        // discarded. Use a composite key of account_id::bucket_name.
+                        // discarded.
                         if let Some(dir_name) = bdir.file_name().and_then(|n| n.to_str()) {
                             self.load_refused
                                 .write()
-                                .insert(format!("{}::{}", &account_id, dir_name));
+                                .insert((account_id.clone(), dir_name.to_string()));
                         }
                         tracing::warn!(
                             account = %account_id,
@@ -1478,10 +1751,17 @@ impl S3Store for DiskS3Store {
             }
             all_states.insert(account_id, state);
         }
+        self.refuse_names_held_by_several_accounts(&mut all_states);
         Ok(all_states)
     }
 
-    fn put_bucket_meta(&self, account_id: &str, bucket: &str, meta: &BucketMeta) -> StoreResult<()> {
+    fn put_bucket_meta(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        meta: &BucketMeta,
+    ) -> StoreResult<()> {
+        check_storable_account(account_id)?;
         let dir = self.bucket_dir(account_id, bucket);
         std::fs::create_dir_all(&dir)?;
         crate::atomic::write_atomic_toml(&dir.join("meta.toml"), meta)?;
@@ -1495,6 +1775,7 @@ impl S3Store for DiskS3Store {
         kind: BucketSubresource,
         payload: &str,
     ) -> StoreResult<()> {
+        check_storable_account(account_id)?;
         let dir = self.bucket_dir(account_id, bucket);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(Self::subresource_filename(kind));
@@ -1502,7 +1783,12 @@ impl S3Store for DiskS3Store {
         Ok(())
     }
 
-    fn delete_bucket_subresource(&self, account_id: &str, bucket: &str, kind: BucketSubresource) -> StoreResult<()> {
+    fn delete_bucket_subresource(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        kind: BucketSubresource,
+    ) -> StoreResult<()> {
         let path = self
             .bucket_dir(account_id, bucket)
             .join(Self::subresource_filename(kind));
@@ -1517,31 +1803,51 @@ impl S3Store for DiskS3Store {
         self.bucket_dir(account_id, bucket).exists()
     }
 
+    fn bucket_state_accounts(&self, bucket: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.accounts_dir()) else {
+            return Vec::new();
+        };
+        let escaped = crate::key_escape::escape_key_segment(bucket);
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let account = entry.file_name().to_str().and_then(account_from_dir_name)?;
+                entry
+                    .path()
+                    .join("buckets")
+                    .join(&escaped)
+                    .exists()
+                    .then_some(account)
+            })
+            .collect()
+    }
+
     fn bucket_load_refused(&self, account_id: &str, bucket: &str) -> bool {
-        let composite_key = format!(
-            "{}::{}",
-            account_id,
-            crate::key_escape::escape_key_segment(bucket)
-        );
-        self.load_refused.read().contains(&composite_key)
+        self.load_refused
+            .read()
+            .contains(&Self::refusal_key(account_id, bucket))
+    }
+
+    fn load_refused_accounts(&self, bucket: &str) -> Vec<String> {
+        let escaped = crate::key_escape::escape_key_segment(bucket);
+        self.load_refused
+            .read()
+            .iter()
+            .filter(|(_, name)| *name == escaped)
+            .map(|(account, _)| account.clone())
+            .collect()
     }
 
     fn mark_bucket_load_refused(&self, account_id: &str, bucket: &str) {
-        let composite_key = format!(
-            "{}::{}",
-            account_id,
-            crate::key_escape::escape_key_segment(bucket)
-        );
-        self.load_refused.write().insert(composite_key);
+        self.load_refused
+            .write()
+            .insert(Self::refusal_key(account_id, bucket));
     }
 
     fn clear_bucket_load_refusal(&self, account_id: &str, bucket: &str) -> StoreResult<()> {
-        let composite_key = format!(
-            "{}::{}",
-            account_id,
-            crate::key_escape::escape_key_segment(bucket)
-        );
-        self.load_refused.write().remove(&composite_key);
+        self.load_refused
+            .write()
+            .remove(&Self::refusal_key(account_id, bucket));
         Ok(())
     }
 
@@ -1556,7 +1862,7 @@ impl S3Store for DiskS3Store {
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let target = trash.join(format!(
             "{}_{}-{}-{nanos}-{seq}",
-            account_id,
+            account_dir_name(account_id),
             crate::key_escape::escape_key_segment(bucket),
             std::process::id()
         ));
@@ -1565,12 +1871,9 @@ impl S3Store for DiskS3Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(StoreError::from(e)),
         }
-        let composite_key = format!(
-            "{}::{}",
-            account_id,
-            crate::key_escape::escape_key_segment(bucket)
-        );
-        self.load_refused.write().remove(&composite_key);
+        self.load_refused
+            .write()
+            .remove(&Self::refusal_key(account_id, bucket));
         Ok(Some(target))
     }
 
@@ -1585,12 +1888,9 @@ impl S3Store for DiskS3Store {
         // returns Err and the caller reports 500, so dropping the refusal here
         // would leave the next CreateBucket free to discard the remains.
         if outcome.is_ok() {
-            let composite_key = format!(
-                "{}::{}",
-                account_id,
-                crate::key_escape::escape_key_segment(bucket)
-            );
-            self.load_refused.write().remove(&composite_key);
+            self.load_refused
+                .write()
+                .remove(&Self::refusal_key(account_id, bucket));
         }
         outcome
     }
@@ -1604,6 +1904,7 @@ impl S3Store for DiskS3Store {
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
+        check_storable_account(account_id)?;
         let (dir, bin_path, toml_path) = self.object_paths(account_id, bucket, key, version);
         std::fs::create_dir_all(&dir)?;
         // A new object in this slot starts without annotations; the replaced
@@ -1636,6 +1937,7 @@ impl S3Store for DiskS3Store {
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
+        check_storable_account(account_id)?;
         let (dir, default_bin, toml_path) = self.object_paths(account_id, bucket, key, version);
         std::fs::create_dir_all(&dir)?;
         let tag = Self::version_tag(version);
@@ -1668,6 +1970,7 @@ impl S3Store for DiskS3Store {
         version: Option<&str>,
         meta: &ObjectMeta,
     ) -> StoreResult<()> {
+        check_storable_account(account_id)?;
         let (dir, _bin, toml_path) = self.object_paths(account_id, bucket, key, version);
         std::fs::create_dir_all(&dir)?;
         // A metadata update does not move the body: the sidecar keeps naming
@@ -1678,7 +1981,13 @@ impl S3Store for DiskS3Store {
         Ok(())
     }
 
-    fn delete_object(&self, account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()> {
+    fn delete_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+    ) -> StoreResult<()> {
         let (dir, default_bin, toml_path) = self.object_paths(account_id, bucket, key, version);
         // The body is whichever file the sidecar names; a default file left
         // beside a generation one goes too.
@@ -1741,7 +2050,12 @@ impl S3Store for DiskS3Store {
         record: &AnnotationRecord,
         payload: &[u8],
     ) -> StoreResult<()> {
-        Self::write_annotation(&self.annotation_dir(account_id, bucket, key, version), record, payload)
+        check_storable_account(account_id)?;
+        Self::write_annotation(
+            &self.annotation_dir(account_id, bucket, key, version),
+            record,
+            payload,
+        )
     }
 
     fn delete_annotation(
@@ -1788,10 +2102,19 @@ impl S3Store for DiskS3Store {
         }
     }
 
-    fn mpu_create(&self, account_id: &str, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()> {
+    fn mpu_create(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        upload_id: &str,
+        init: &MpuInit,
+    ) -> StoreResult<()> {
+        check_storable_account(account_id)?;
         let parts_dir = self.mpu_parts_dir(account_id, bucket, upload_id);
         std::fs::create_dir_all(&parts_dir)?;
-        let init_path = self.mpu_dir(account_id, bucket, upload_id).join("init.toml");
+        let init_path = self
+            .mpu_dir(account_id, bucket, upload_id)
+            .join("init.toml");
         crate::atomic::write_atomic_toml(&init_path, init)?;
         Ok(())
     }
@@ -1806,6 +2129,7 @@ impl S3Store for DiskS3Store {
         etag: &str,
         checksum: Option<PartChecksum<'_>>,
     ) -> StoreResult<BodyRef> {
+        check_storable_account(account_id)?;
         let parts_dir = self.mpu_parts_dir(account_id, bucket, upload_id);
         std::fs::create_dir_all(&parts_dir)?;
         let bin_path = self.mpu_part_bin(account_id, bucket, upload_id, part_number);
@@ -1896,6 +2220,7 @@ impl S3Store for DiskS3Store {
         version: Option<&str>,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
+        check_storable_account(account_id)?;
         let parts_dir = self.mpu_parts_dir(account_id, bucket, upload_id);
         if !parts_dir.exists() {
             return Err(io_other(format!(
@@ -2054,7 +2379,10 @@ mod disk_tests {
             ..Default::default()
         };
         store.put_bucket_meta(account_id, "b", &meta).unwrap();
-        let detached = store.detach_bucket(account_id, "b").unwrap().expect("moved");
+        let detached = store
+            .detach_bucket(account_id, "b")
+            .unwrap()
+            .expect("moved");
         assert!(!store.bucket_state_exists(account_id, "b"));
         assert!(detached.exists());
         // Recreated under the same name before the removal runs.
@@ -2073,8 +2401,10 @@ mod disk_tests {
         let tmp = TempDir::new().unwrap();
         let store = new_store(&tmp);
         let account_id = "test-account";
-        let mut meta = BucketMeta::default();
-        meta.account_id = account_id.to_string();
+        let meta = BucketMeta {
+            account_id: account_id.to_string(),
+            ..Default::default()
+        };
         store.put_bucket_meta(account_id, "b", &meta).unwrap();
         let detached = store.detach_bucket(account_id, "b").unwrap().unwrap();
         let states = store.load().unwrap();
@@ -2267,7 +2597,14 @@ mod disk_tests {
         let data = Bytes::from_static(b"hello world");
         let meta = sample_meta("k1", data.len() as u64);
         let body_ref = store
-            .put_object(account_id, "b", "k1", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(
+                account_id,
+                "b",
+                "k1",
+                None,
+                BodySource::Bytes(data.clone()),
+                &meta,
+            )
             .unwrap();
         match &body_ref {
             BodyRef::Disk {
@@ -2312,7 +2649,14 @@ mod disk_tests {
         std::fs::write(&src, b"copied-body").unwrap();
         let meta = sample_meta("k", 11);
         let bref = store
-            .put_object(account_id, "b", "k", None, BodySource::FileCopy(src.clone()), &meta)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                None,
+                BodySource::FileCopy(src.clone()),
+                &meta,
+            )
             .unwrap();
         match bref {
             BodyRef::Disk { path, size, .. } => {
@@ -2345,7 +2689,14 @@ mod disk_tests {
         std::fs::write(&src, b"file-body").unwrap();
         let meta = sample_meta("k", 9);
         let body_ref = store
-            .put_object(account_id, "b", "k", None, BodySource::File(src.clone()), &meta)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                None,
+                BodySource::File(src.clone()),
+                &meta,
+            )
             .unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, .. } => path,
@@ -2373,12 +2724,21 @@ mod disk_tests {
         let data = Bytes::from_static(b"abc");
         let mut meta = sample_meta("k", 3);
         store
-            .put_object(account_id, "b", "k", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                None,
+                BodySource::Bytes(data.clone()),
+                &meta,
+            )
             .unwrap();
         let (_, bin, _) = store.object_paths(account_id, "b", "k", None);
         let before = std::fs::read(&bin).unwrap();
         meta.tags.insert("x".to_string(), "y".to_string());
-        store.put_object_meta(account_id, "b", "k", None, &meta).unwrap();
+        store
+            .put_object_meta(account_id, "b", "k", None, &meta)
+            .unwrap();
         assert_eq!(std::fs::read(&bin).unwrap(), before);
         let loaded = store.load().unwrap();
         let state = loaded.get(account_id).unwrap();
@@ -2465,8 +2825,12 @@ mod disk_tests {
             ]
         );
 
-        store.delete_annotation(account_id, "b", "k", None, "a").unwrap();
-        store.delete_annotation(account_id, "b", "k", None, "missing").unwrap();
+        store
+            .delete_annotation(account_id, "b", "k", None, "a")
+            .unwrap();
+        store
+            .delete_annotation(account_id, "b", "k", None, "missing")
+            .unwrap();
         assert_eq!(
             loaded_annotations(&store),
             vec![("b".to_string(), b"second".to_vec())]
@@ -2491,7 +2855,9 @@ mod disk_tests {
             etag: "e".to_string(),
             ..Default::default()
         }];
-        store.put_object_meta(account_id, "b", "k", None, &meta).unwrap();
+        store
+            .put_object_meta(account_id, "b", "k", None, &meta)
+            .unwrap();
 
         assert_eq!(
             loaded_annotations(&store),
@@ -2502,7 +2868,9 @@ mod disk_tests {
         let rewritten: ObjectMeta =
             toml::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
         assert!(rewritten.annotations.is_empty());
-        store.delete_annotation(account_id, "b", "k", None, "old").unwrap();
+        store
+            .delete_annotation(account_id, "b", "k", None, "old")
+            .unwrap();
         assert!(loaded_annotations(&store).is_empty());
     }
 
@@ -2955,7 +3323,14 @@ mod disk_tests {
         let data = Bytes::from_static(b"payload");
         let meta = sample_meta("k", data.len() as u64);
         let body_ref = store
-            .put_object(account_id, "b", "k", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                None,
+                BodySource::Bytes(data.clone()),
+                &meta,
+            )
             .unwrap();
         // Cache hit.
         let got = store.open_object_body(&body_ref).unwrap();
@@ -2989,7 +3364,14 @@ mod disk_tests {
         let data = Bytes::from(vec![7u8; 800]);
         let meta = sample_meta("big", 800);
         let body_ref = store
-            .put_object(account_id, "b", "big", None, BodySource::Bytes(data.clone()), &meta)
+            .put_object(
+                account_id,
+                "b",
+                "big",
+                None,
+                BodySource::Bytes(data.clone()),
+                &meta,
+            )
             .unwrap();
         let body_key = crate::cache::BodyKey::new("b".to_string(), "big".to_string(), None);
         assert!(cache.get(&body_key).is_none());
@@ -3029,7 +3411,10 @@ mod disk_tests {
             .put_object(account_id, "b", "k", None, BodySource::Bytes(data), &meta)
             .unwrap();
         // Directory with no init.toml is skipped by load.
-        let mpu = store.bucket_dir(account_id, "b").join("mpu").join("upload1");
+        let mpu = store
+            .bucket_dir(account_id, "b")
+            .join("mpu")
+            .join("upload1");
         std::fs::create_dir_all(&mpu).unwrap();
 
         let loaded = store.load().unwrap();
@@ -3056,7 +3441,12 @@ mod disk_tests {
             )
             .unwrap();
         store
-            .put_bucket_subresource(account_id, "b", BucketSubresource::Lifecycle, "<Lifecycle/>")
+            .put_bucket_subresource(
+                account_id,
+                "b",
+                BucketSubresource::Lifecycle,
+                "<Lifecycle/>",
+            )
             .unwrap();
         store
             .put_bucket_subresource(account_id, "b", BucketSubresource::Cors, "<Cors/>")
@@ -3225,7 +3615,14 @@ mod disk_tests {
         dm.is_delete_marker = true;
         dm.last_modified = base + chrono::Duration::seconds(10);
         store
-            .put_object(account_id, "b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &dm)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                Some("dm1"),
+                BodySource::Bytes(Bytes::new()),
+                &dm,
+            )
             .unwrap();
         let loaded = store.load().unwrap();
         let state = loaded.get(account_id).unwrap();
@@ -3377,7 +3774,14 @@ mod disk_tests {
         dm.is_delete_marker = true;
         dm.last_modified = base + chrono::Duration::seconds(2);
         store
-            .put_object(account_id, "b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &dm)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                Some("dm1"),
+                BodySource::Bytes(Bytes::new()),
+                &dm,
+            )
             .unwrap();
         let loaded = store.load().unwrap();
         let state = loaded.get(account_id).unwrap();
@@ -3409,7 +3813,14 @@ mod disk_tests {
         m.version_id = Some("dm1".to_string());
         m.is_delete_marker = true;
         store
-            .put_object(account_id, "b", "k", Some("dm1"), BodySource::Bytes(Bytes::new()), &m)
+            .put_object(
+                account_id,
+                "b",
+                "k",
+                Some("dm1"),
+                BodySource::Bytes(Bytes::new()),
+                &m,
+            )
             .unwrap();
         // No .bin file on disk for delete markers.
         let (_, bin, toml_path) = store.object_paths(account_id, "b", "k", Some("dm1"));
@@ -3710,10 +4121,20 @@ mod disk_tests {
             .unwrap();
         let body = Bytes::from_static(b"only-part-bytes");
         store
-            .mpu_put_part(account_id, "b", "up", 1, BodySource::Bytes(body.clone()), "et", None)
+            .mpu_put_part(
+                account_id,
+                "b",
+                "up",
+                1,
+                BodySource::Bytes(body.clone()),
+                "et",
+                None,
+            )
             .unwrap();
         let meta = sample_meta("k", body.len() as u64);
-        let body_ref = store.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
+        let body_ref = store
+            .mpu_complete(account_id, "b", "up", "k", None, &meta)
+            .unwrap();
         match &body_ref {
             BodyRef::Disk { path, size, .. } => {
                 assert_eq!(*size, body.len() as u64);
@@ -3748,7 +4169,15 @@ mod disk_tests {
         let p3 = Bytes::from_static(b"CC");
         for (n, b) in [(1u32, &p1), (2, &p2), (3, &p3)] {
             store
-                .mpu_put_part(account_id, "b", "up", n, BodySource::Bytes(b.clone()), "e", None)
+                .mpu_put_part(
+                    account_id,
+                    "b",
+                    "up",
+                    n,
+                    BodySource::Bytes(b.clone()),
+                    "e",
+                    None,
+                )
                 .unwrap();
         }
         let mut expected = Vec::new();
@@ -3756,7 +4185,9 @@ mod disk_tests {
         expected.extend_from_slice(&p2);
         expected.extend_from_slice(&p3);
         let meta = sample_meta("k", expected.len() as u64);
-        let body_ref = store.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
+        let body_ref = store
+            .mpu_complete(account_id, "b", "up", "k", None, &meta)
+            .unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, size, .. } => {
                 assert_eq!(size, expected.len() as u64);
@@ -3799,11 +4230,21 @@ mod disk_tests {
             std::fs::write(&src, &data).unwrap();
             expected.extend_from_slice(&data);
             store
-                .mpu_put_part(account_id, "b", "up", (i + 1) as u32, BodySource::File(src), "et", None)
+                .mpu_put_part(
+                    account_id,
+                    "b",
+                    "up",
+                    (i + 1) as u32,
+                    BodySource::File(src),
+                    "et",
+                    None,
+                )
                 .unwrap();
         }
         let meta = sample_meta("k", expected.len() as u64);
-        let body_ref = store.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
+        let body_ref = store
+            .mpu_complete(account_id, "b", "up", "k", None, &meta)
+            .unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, size, .. } => {
                 assert_eq!(size, expected.len() as u64);
@@ -3839,10 +4280,26 @@ mod disk_tests {
         let p1 = Bytes::from_static(b"hello-");
         let p2 = Bytes::from_static(b"world-");
         store
-            .mpu_put_part(account_id, "b", "up", 1, BodySource::Bytes(p1.clone()), "e1", None)
+            .mpu_put_part(
+                account_id,
+                "b",
+                "up",
+                1,
+                BodySource::Bytes(p1.clone()),
+                "e1",
+                None,
+            )
             .unwrap();
         store
-            .mpu_put_part(account_id, "b", "up", 2, BodySource::Bytes(p2.clone()), "e2", None)
+            .mpu_put_part(
+                account_id,
+                "b",
+                "up",
+                2,
+                BodySource::Bytes(p2.clone()),
+                "e2",
+                None,
+            )
             .unwrap();
 
         // Simulate a restart: re-open the store on the same dir and load.
@@ -3858,14 +4315,24 @@ mod disk_tests {
         // Continue the upload on the fresh store.
         let p3 = Bytes::from_static(b"again!");
         store2
-            .mpu_put_part(account_id, "b", "up", 3, BodySource::Bytes(p3.clone()), "e3", None)
+            .mpu_put_part(
+                account_id,
+                "b",
+                "up",
+                3,
+                BodySource::Bytes(p3.clone()),
+                "e3",
+                None,
+            )
             .unwrap();
         let mut expected = Vec::new();
         expected.extend_from_slice(&p1);
         expected.extend_from_slice(&p2);
         expected.extend_from_slice(&p3);
         let meta = sample_meta("k", expected.len() as u64);
-        let body_ref = store2.mpu_complete(account_id, "b", "up", "k", None, &meta).unwrap();
+        let body_ref = store2
+            .mpu_complete(account_id, "b", "up", "k", None, &meta)
+            .unwrap();
         let path = match body_ref {
             BodyRef::Disk { path, .. } => path,
             _ => panic!(),
@@ -4071,19 +4538,324 @@ mod disk_tests {
             )
             .unwrap();
 
-        let bad_dir = store.accounts_dir().join(account_id).join("buckets").join("bad");
+        let bad_dir = store
+            .accounts_dir()
+            .join(account_id)
+            .join("buckets")
+            .join("bad");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join("meta.toml"), b"not valid toml = = =").unwrap();
 
         let loaded = store.load().unwrap();
         let state = loaded.get(account_id).unwrap();
-        assert!(
-            state.buckets.contains_key("good"),
-            "valid bucket must load"
-        );
+        assert!(state.buckets.contains_key("good"), "valid bucket must load");
         assert!(
             !state.buckets.contains_key("bad"),
             "corrupt bucket must be skipped, not abort the load"
         );
+    }
+
+    const PRIMARY: &str = "111111111111";
+    const SECONDARY: &str = "222222222222";
+
+    fn put_bucket_with_object(store: &DiskS3Store, account: &str, bucket: &str, body: &[u8]) {
+        store
+            .put_bucket_meta(
+                account,
+                bucket,
+                &BucketMeta {
+                    name: bucket.to_string(),
+                    account_id: account.to_string(),
+                    acl_owner_id: account.to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .put_object(
+                account,
+                bucket,
+                "k",
+                None,
+                BodySource::Bytes(Bytes::copy_from_slice(body)),
+                &sample_meta("k", body.len() as u64),
+            )
+            .unwrap();
+    }
+
+    fn object_body(state: &S3State, bucket: &str) -> Vec<u8> {
+        let BodyRef::Disk { path, .. } = &state.buckets[bucket].objects["k"].body else {
+            panic!("expected a disk body");
+        };
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn every_account_round_trips_its_own_buckets() {
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        put_bucket_with_object(&store, PRIMARY, "primary-bucket", b"one");
+        put_bucket_with_object(&store, SECONDARY, "secondary-bucket", b"two");
+        assert!(tmp
+            .path()
+            .join("accounts")
+            .join(SECONDARY)
+            .join("buckets/secondary-bucket/meta.toml")
+            .is_file());
+
+        let loaded = new_store(&tmp).load().unwrap();
+        assert_eq!(
+            loaded.keys().map(String::as_str).collect::<Vec<_>>(),
+            [PRIMARY, SECONDARY]
+        );
+        for (account, bucket, body) in [
+            (PRIMARY, "primary-bucket", b"one"),
+            (SECONDARY, "secondary-bucket", b"two"),
+        ] {
+            let state = &loaded[account];
+            assert_eq!(state.account_id, account);
+            assert_eq!(state.buckets.keys().collect::<Vec<_>>(), [bucket]);
+            assert_eq!(object_body(state, bucket), body);
+        }
+    }
+
+    #[test]
+    fn account_ids_are_escaped_into_one_directory() {
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        let odd = "../acct/x";
+        put_bucket_with_object(&store, odd, "b", b"x");
+        // Nothing escapes the accounts directory.
+        assert!(!tmp.path().join("acct").exists());
+        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("accounts"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(entries, [crate::key_escape::escape_key_segment(odd)]);
+        let loaded = new_store(&tmp).load().unwrap();
+        assert_eq!(object_body(&loaded[odd], "b"), b"x");
+        assert_eq!(store.bucket_state_accounts("b"), [odd.to_string()]);
+    }
+
+    /// Lay a bucket out the way stores did before buckets were kept per
+    /// account: `buckets/<bucket>/`, metadata without `account_id`.
+    fn write_legacy_bucket(root: &Path, bucket: &str, acl_owner_id: &str, body: &[u8]) {
+        let flat = new_store_at(root.join("flat"));
+        put_bucket_with_object(&flat, "x", bucket, body);
+        let mut meta: BucketMeta = toml::from_str(
+            &std::fs::read_to_string(
+                root.join("flat/accounts/x/buckets")
+                    .join(bucket)
+                    .join("meta.toml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        meta.account_id.clear();
+        meta.acl_owner_id = acl_owner_id.to_string();
+        let legacy = root.join("buckets").join(bucket);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::rename(root.join("flat/accounts/x/buckets").join(bucket), &legacy).unwrap();
+        crate::atomic::write_atomic_toml(&legacy.join("meta.toml"), &meta).unwrap();
+        // The legacy layout has no account to resolve object paths against.
+        std::fs::remove_dir_all(root.join("flat")).unwrap();
+    }
+
+    fn new_store_at(root: PathBuf) -> DiskS3Store {
+        DiskS3Store::new(root, Arc::new(crate::cache::BodyCache::new(1024 * 1024)))
+    }
+
+    #[test]
+    fn legacy_flat_layout_migrates_to_the_configured_default_account() {
+        let tmp = TempDir::new().unwrap();
+        // Written before the owner was recorded as an account ID.
+        write_legacy_bucket(tmp.path(), "old-bucket", "owner-id", b"old body");
+        // Created by another account, which its ACL owner still names.
+        write_legacy_bucket(tmp.path(), "theirs", SECONDARY, b"their body");
+
+        let store = new_store(&tmp).with_default_account(PRIMARY);
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded[PRIMARY].buckets.keys().collect::<Vec<_>>(),
+            ["old-bucket"]
+        );
+        assert_eq!(object_body(&loaded[PRIMARY], "old-bucket"), b"old body");
+        assert_eq!(
+            loaded[SECONDARY].buckets.keys().collect::<Vec<_>>(),
+            ["theirs"]
+        );
+        assert_eq!(object_body(&loaded[SECONDARY], "theirs"), b"their body");
+        assert!(
+            !tmp.path().join("buckets").exists(),
+            "the flat layout is gone"
+        );
+        assert!(tmp
+            .path()
+            .join("accounts")
+            .join(PRIMARY)
+            .join("buckets/old-bucket/meta.toml")
+            .is_file());
+
+        // Idempotent: the next start finds nothing left to migrate.
+        let again = new_store(&tmp)
+            .with_default_account(PRIMARY)
+            .load()
+            .unwrap();
+        assert_eq!(object_body(&again[PRIMARY], "old-bucket"), b"old body");
+    }
+
+    #[test]
+    fn interrupted_migration_resumes_and_never_overwrites() {
+        let tmp = TempDir::new().unwrap();
+        write_legacy_bucket(tmp.path(), "moved", "owner-id", b"moved body");
+        write_legacy_bucket(tmp.path(), "pending", "owner-id", b"pending body");
+        write_legacy_bucket(tmp.path(), "clash", "owner-id", b"legacy clash");
+        // A previous start moved `moved` and stopped; `clash` also exists in
+        // the new layout already.
+        let dest = tmp.path().join("accounts").join(PRIMARY).join("buckets");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::rename(tmp.path().join("buckets/moved"), dest.join("moved")).unwrap();
+        let store = new_store(&tmp).with_default_account(PRIMARY);
+        put_bucket_with_object(&store, PRIMARY, "clash", b"current clash");
+
+        let loaded = store.load().unwrap();
+        let state = &loaded[PRIMARY];
+        assert_eq!(object_body(state, "moved"), b"moved body");
+        assert_eq!(object_body(state, "pending"), b"pending body");
+        assert_eq!(object_body(state, "clash"), b"current clash");
+        // The clashing legacy copy is set aside outside the store, not
+        // discarded and not left where a later start would migrate it in.
+        assert!(!tmp.path().join("buckets").exists());
+        let aside: Vec<_> = std::fs::read_dir(tmp.path().join("legacy-conflicts"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert!(aside[0].join("meta.toml").is_file());
+        assert!(aside[0]
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with(&format!("{PRIMARY}_clash-")));
+
+        // Deleting the account's copy does not bring the old one back.
+        store.delete_bucket(PRIMARY, "clash").unwrap();
+        let reloaded = new_store(&tmp)
+            .with_default_account(PRIMARY)
+            .load()
+            .unwrap();
+        assert!(!reloaded[PRIMARY].buckets.contains_key("clash"));
+        assert!(store.bucket_state_accounts("clash").is_empty());
+    }
+
+    #[test]
+    fn migration_never_deletes_what_it_did_not_move() {
+        let tmp = TempDir::new().unwrap();
+        write_legacy_bucket(tmp.path(), "old-bucket", "owner-id", b"x");
+        let stray = tmp.path().join("buckets/notes.txt");
+        std::fs::write(&stray, b"operator notes").unwrap();
+
+        let loaded = new_store(&tmp)
+            .with_default_account(PRIMARY)
+            .load()
+            .unwrap();
+        assert_eq!(object_body(&loaded[PRIMARY], "old-bucket"), b"x");
+        assert_eq!(std::fs::read(&stray).unwrap(), b"operator notes");
+        // Nothing to migrate the next time, stray file or not.
+        let again = new_store(&tmp)
+            .with_default_account(PRIMARY)
+            .load()
+            .unwrap();
+        assert_eq!(object_body(&again[PRIMARY], "old-bucket"), b"x");
+    }
+
+    #[test]
+    fn account_ids_the_load_cannot_read_back_are_refused_at_write() {
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        let long = "1".repeat(300);
+        for account in ["", ".", "..", long.as_str()] {
+            let meta = BucketMeta {
+                name: "b".to_string(),
+                ..Default::default()
+            };
+            assert!(
+                store.put_bucket_meta(account, "b", &meta).is_err(),
+                "{account:?}"
+            );
+            assert!(store
+                .put_object(
+                    account,
+                    "b",
+                    "k",
+                    None,
+                    BodySource::Bytes(Bytes::from_static(b"x")),
+                    &sample_meta("k", 1),
+                )
+                .is_err());
+            assert!(store
+                .mpu_create(account, "b", "u", &MpuInit::default())
+                .is_err());
+        }
+        assert!(!tmp.path().join("accounts").exists(), "nothing was written");
+    }
+
+    #[test]
+    fn legacy_layout_without_a_default_account_fails_the_load() {
+        let tmp = TempDir::new().unwrap();
+        write_legacy_bucket(tmp.path(), "old-bucket", "owner-id", b"x");
+        let err = new_store(&tmp).load().unwrap_err();
+        assert!(err.to_string().contains("no default account"), "{err}");
+        assert!(tmp.path().join("buckets/old-bucket").is_dir());
+    }
+
+    #[test]
+    fn load_refusal_is_kept_per_account() {
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        put_bucket_with_object(&store, PRIMARY, "broken", b"x");
+        put_bucket_with_object(&store, SECONDARY, "fine", b"y");
+        let (_, _, toml) = store.object_paths(PRIMARY, "broken", "k", None);
+        std::fs::write(toml, b"not = = toml").unwrap();
+
+        let loaded = store.load().unwrap();
+        assert!(!loaded[PRIMARY].buckets.contains_key("broken"));
+        assert!(store.bucket_load_refused(PRIMARY, "broken"));
+        assert!(!store.bucket_load_refused(SECONDARY, "broken"));
+        assert!(!store.bucket_load_refused(PRIMARY, "fine"));
+        assert_eq!(store.bucket_state_accounts("broken"), [PRIMARY]);
+        assert_eq!(store.load_refused_accounts("broken"), [PRIMARY]);
+        assert!(store.load_refused_accounts("fine").is_empty());
+
+        // Marked, cleared and detached per account too.
+        store.mark_bucket_load_refused(SECONDARY, "fine");
+        assert!(store.bucket_load_refused(SECONDARY, "fine"));
+        assert!(!store.bucket_load_refused(PRIMARY, "fine"));
+        store.clear_bucket_load_refusal(SECONDARY, "fine").unwrap();
+        assert!(!store.bucket_load_refused(SECONDARY, "fine"));
+        store.detach_bucket(SECONDARY, "broken").unwrap();
+        assert!(store.bucket_load_refused(PRIMARY, "broken"));
+        store.detach_bucket(PRIMARY, "broken").unwrap();
+        assert!(!store.bucket_load_refused(PRIMARY, "broken"));
+    }
+
+    #[test]
+    fn a_name_stored_under_two_accounts_is_refused_in_both() {
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        put_bucket_with_object(&store, PRIMARY, "dup", b"a");
+        put_bucket_with_object(&store, SECONDARY, "dup", b"b");
+        put_bucket_with_object(&store, SECONDARY, "single", b"c");
+
+        let loaded = store.load().unwrap();
+        assert!(!loaded[PRIMARY].buckets.contains_key("dup"));
+        assert!(!loaded[SECONDARY].buckets.contains_key("dup"));
+        assert!(loaded[SECONDARY].buckets.contains_key("single"));
+        assert!(store.bucket_load_refused(PRIMARY, "dup"));
+        assert!(store.bucket_load_refused(SECONDARY, "dup"));
+        let mut holders = store.bucket_state_accounts("dup");
+        holders.sort();
+        assert_eq!(holders, [PRIMARY, SECONDARY]);
     }
 }
