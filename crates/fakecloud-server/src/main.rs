@@ -11342,21 +11342,29 @@ async fn main() {
                                     "StartedAt": t.started_at.map(|d| d.to_rfc3339()),
                                     "StoppedAt": t.stopped_at.map(|d| d.to_rfc3339()),
                                     "AvailabilityZone": "us-east-1a",
-                                    "Containers": t.containers.iter().map(|c| serde_json::json!({
-                                        "DockerId": c.runtime_id,
-                                        "Name": c.name,
-                                        "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
-                                        "Image": c.image,
-                                        "ImageID": c.image_digest,
-                                        "Ports": c.network_bindings,
-                                        "Labels": {},
-                                        "DesiredStatus": c.last_status,
-                                        "KnownStatus": c.last_status,
-                                        "ExitCode": c.exit_code,
-                                        "Health": {
-                                            "status": c.health_status.as_deref().unwrap_or("UNKNOWN"),
-                                        },
-                                    })).collect::<Vec<_>>(),
+                                    "Containers": t.containers.iter().map(|c| {
+                                        let mut container = serde_json::json!({
+                                            "DockerId": c.runtime_id,
+                                            "Name": c.name,
+                                            "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
+                                            "Image": c.image,
+                                            "ImageID": c.image_digest,
+                                            "Ports": c.network_bindings,
+                                            "Labels": {},
+                                            "DesiredStatus": c.last_status,
+                                            "KnownStatus": c.last_status,
+                                            "ExitCode": c.exit_code,
+                                            "Health": {
+                                                "status": c.health_status.as_deref().unwrap_or("UNKNOWN"),
+                                            },
+                                        });
+                                        // Task metadata v4 reports `RestartCount`
+                                        // only for containers with a restart policy.
+                                        if let Some(count) = c.restart_count {
+                                            container["RestartCount"] = serde_json::json!(count);
+                                        }
+                                        container
+                                    }).collect::<Vec<_>>(),
                                 });
                                 return (axum::http::StatusCode::OK, axum::Json(body));
                             }
@@ -11386,18 +11394,24 @@ async fn main() {
                                     "Revision": t.revision,
                                     "DesiredStatus": t.desired_status,
                                     "KnownStatus": t.last_status,
-                                    "Containers": t.containers.iter().map(|c| serde_json::json!({
-                                        "DockerId": c.runtime_id,
-                                        "Name": c.name,
-                                        "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
-                                        "Image": c.image,
-                                        "ImageID": c.image_digest,
-                                        "Ports": c.network_bindings,
-                                        "Labels": {},
-                                        "DesiredStatus": c.last_status,
-                                        "KnownStatus": c.last_status,
-                                        "ExitCode": c.exit_code,
-                                    })).collect::<Vec<_>>(),
+                                    "Containers": t.containers.iter().map(|c| {
+                                        let mut container = serde_json::json!({
+                                            "DockerId": c.runtime_id,
+                                            "Name": c.name,
+                                            "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
+                                            "Image": c.image,
+                                            "ImageID": c.image_digest,
+                                            "Ports": c.network_bindings,
+                                            "Labels": {},
+                                            "DesiredStatus": c.last_status,
+                                            "KnownStatus": c.last_status,
+                                            "ExitCode": c.exit_code,
+                                        });
+                                        if let Some(count) = c.restart_count {
+                                            container["RestartCount"] = serde_json::json!(count);
+                                        }
+                                        container
+                                    }).collect::<Vec<_>>(),
                                 });
                                 return (axum::http::StatusCode::OK, axum::Json(body));
                             }
@@ -11419,9 +11433,12 @@ async fn main() {
                     let ec = ec.clone();
                     let rt = rt.clone();
                     async move {
+                        // Requested like StopTask (so a restart policy doesn't
+                        // bring the containers back), and answered once the
+                        // task is STOPPED.
                         if let Some(runtime) = rt {
                             runtime
-                                .stop_task(&task_id, "IntrospectionForceStop")
+                                .force_stop_task(&ec, &task_id, "IntrospectionForceStop")
                                 .await;
                         }
                         let accounts = ec.read();

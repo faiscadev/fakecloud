@@ -1285,6 +1285,8 @@ export interface EcsTaskMetadataContainer {
   createdAt?: string;
   startedAt?: string;
   exitCode?: number;
+  /** Set only for containers with a restart policy. */
+  restartCount?: number;
 }
 
 export interface EcsTaskMetadata {

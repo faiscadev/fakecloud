@@ -1226,20 +1226,13 @@ impl ContainerBackingHandles {
                         });
                     }
                 }
-                ContainerTeardownIntent::EcsService {
-                    cluster_name,
-                    service_name,
-                } => {
+                ContainerTeardownIntent::EcsTasks { task_ids } => {
                     if let Some(runtime) = self.ecs_runtime.clone() {
                         let ecs_state = self.ecs_state.clone();
                         let account = self.account_id.clone();
                         tokio::spawn(async move {
-                            fakecloud_ecs::cfn_provision::cfn_stop_service_tasks(
-                                ecs_state,
-                                runtime,
-                                cluster_name,
-                                service_name,
-                                account,
+                            fakecloud_ecs::cfn_provision::cfn_stop_tasks(
+                                ecs_state, runtime, task_ids, account,
                             )
                             .await;
                         });

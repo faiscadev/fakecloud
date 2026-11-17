@@ -677,6 +677,11 @@ pub struct Container {
     /// names, reported on the task's container.
     #[serde(default)]
     pub gpu_sharing_strategy: Option<Value>,
+    /// How many times the container was restarted in place under its
+    /// `restartPolicy`; `None` for a container without one (the task
+    /// metadata endpoint reports `RestartCount` only for those).
+    #[serde(default)]
+    pub restart_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -72,6 +72,8 @@ pub enum RuntimeError {
     Wait(String),
 }
 
+use stopping::{TaskContainerHandle, TaskTeardown};
+
 /// Docker/Podman executor for ECS tasks.
 pub struct EcsRuntime {
     cli: String,
@@ -94,11 +96,22 @@ pub struct EcsRuntime {
     /// untouched and lets `docker pull` succeed against fakecloud ECR
     /// without a prior `aws ecr get-login-password | docker login`.
     docker_config: Option<Arc<TempDir>>,
-    /// Tracks per-task lists of `(container_name, docker_container_id)` so
-    /// `stop_task` can kill every container backing a task — multi-container
-    /// task definitions launch one docker container per `containerDefinitions`
-    /// entry, all of which must be torn down on stop.
-    containers: RwLock<std::collections::HashMap<String, Vec<(String, String)>>>,
+    /// Tracks per-task container handles so `stop_task` can stop every
+    /// container backing a task with its own `stopTimeout`, in `dependsOn`
+    /// order — multi-container task definitions launch one docker container
+    /// per `containerDefinitions` entry, all of which must be torn down on
+    /// stop.
+    containers: RwLock<std::collections::HashMap<String, Vec<TaskContainerHandle>>>,
+    /// Per-task network teardown captured when a task starts stopping (see
+    /// [`stopping`]), so it completes even once the task record is gone.
+    teardowns: parking_lot::Mutex<std::collections::HashMap<String, TaskTeardown>>,
+    /// Tasks whose network has been released ([`stopping`]), so it is
+    /// released exactly once. Task IDs are never reused.
+    released: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Per-task "execution finished" signals: set once the background
+    /// execution has finalized the task (STOPPED or failed).
+    task_done:
+        parking_lot::Mutex<std::collections::HashMap<String, tokio::sync::watch::Receiver<bool>>>,
     /// Cross-service delivery bus — emits `aws.ecs` EventBridge events
     /// on task state transitions when wired. `None` if the server started
     /// without EventBridge configured (or for unit tests).
@@ -149,7 +162,10 @@ pub(crate) mod eni;
 mod k8s;
 mod lb;
 mod monitoring;
+pub(crate) mod restart;
 mod secrets;
+mod stopping;
+pub(crate) use restart::RestartPolicy;
 mod task_creds;
 pub use task_creds::{task_credentials_token, AUTHORIZATION_TOKEN_ENV};
 mod task_lifecycle;
@@ -197,6 +213,9 @@ impl EcsRuntime {
             creds_helper_image: tokio::sync::Mutex::new(None),
             netns_holders: RwLock::new(std::collections::HashMap::new()),
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -229,6 +248,9 @@ impl EcsRuntime {
             creds_helper_image: tokio::sync::Mutex::new(None),
             netns_holders: RwLock::new(std::collections::HashMap::new()),
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -333,6 +355,11 @@ pub(crate) struct ContainerPlan {
     pub(crate) linux_parameters: Option<LinuxParameters>,
     /// `stopTimeout` in seconds. Becomes `--stop-timeout <N>` on `docker run`.
     pub(crate) stop_timeout: Option<u32>,
+    /// `startTimeout` in seconds: how long containers depending on this one
+    /// with `COMPLETE`/`SUCCESS`/`HEALTHY` wait for it once it has started.
+    pub(crate) start_timeout: Option<u32>,
+    /// The container's enabled `restartPolicy`, if any.
+    pub(crate) restart_policy: Option<RestartPolicy>,
     /// `user` from the container definition. Becomes `--user <value>`.
     pub(crate) user: Option<String>,
     /// `workingDirectory` from the container definition. Becomes `--workdir`.
@@ -786,6 +813,25 @@ pub(crate) fn task_desired_stopped(
     }
 }
 
+/// The stop code and reason of a requested stop (`UserInitiated` for
+/// `StopTask`, `ServiceSchedulerInitiated` for a scale-down or service
+/// deletion), which the stopped task keeps; `None` when the task stopped on
+/// its own.
+pub(crate) fn requested_stop(
+    state: &SharedEcsState,
+    account_id: &str,
+    task_id: &str,
+) -> Option<(&'static str, Option<String>)> {
+    let accounts = state.read();
+    let task = accounts.get(account_id)?.tasks.get(task_id)?;
+    let code = match task.stop_code.as_deref()? {
+        "UserInitiated" => "UserInitiated",
+        "ServiceSchedulerInitiated" => "ServiceSchedulerInitiated",
+        _ => return None,
+    };
+    Some((code, task.stopped_reason.clone()))
+}
+
 /// The region a task runs in: the region its ARN names, else the ECS state's
 /// region.
 pub(super) fn task_region(state: &SharedEcsState, account_id: &str, task_id: &str) -> String {
@@ -948,11 +994,13 @@ fn build_container_plans(
             .filter(|_| log_driver_daemon)
             .and_then(|d| d.get("logConfiguration"))
             .and_then(parse_log_configuration);
-        let stop_timeout = def.as_ref().and_then(|d| {
-            d.get("stopTimeout")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32)
-        });
+        let stop_timeout = def
+            .as_ref()
+            .and_then(|d| restart::timeout_secs(d, "stopTimeout"));
+        let start_timeout = def
+            .as_ref()
+            .and_then(|d| restart::timeout_secs(d, "startTimeout"));
+        let restart_policy = def.as_ref().and_then(restart::parse_restart_policy);
         let user = def
             .as_ref()
             .and_then(|d| d.get("user").and_then(|v| v.as_str()).map(String::from));
@@ -1003,6 +1051,8 @@ fn build_container_plans(
             ulimits,
             linux_parameters,
             stop_timeout,
+            start_timeout,
+            restart_policy,
             user,
             working_directory,
             tty,
@@ -1453,6 +1503,36 @@ fn condition_is_met(condition: DependsOnCondition, state: &InspectedState) -> bo
     }
 }
 
+/// Whether the polled `state` means a not-yet-met condition never will be:
+/// a `SUCCESS` upstream that exited non-zero, or a `HEALTHY` upstream that
+/// exited (a stopped container never becomes healthy).
+fn condition_unresolvable(condition: DependsOnCondition, state: &InspectedState) -> bool {
+    match condition {
+        DependsOnCondition::Success => state.exited && state.exit_code != 0,
+        DependsOnCondition::Healthy => state.exited,
+        DependsOnCondition::Start | DependsOnCondition::Complete => false,
+    }
+}
+
+/// Record a container's restart count (`RestartCount` in the task metadata
+/// endpoint), reported only for containers with a restart policy.
+pub(crate) fn set_restart_count(
+    state: &SharedEcsState,
+    account_id: &str,
+    task_id: &str,
+    container_name: &str,
+    count: u32,
+) {
+    let mut accounts = state.write();
+    if let Some(c) = accounts
+        .get_mut(account_id)
+        .and_then(|s| s.tasks.get_mut(task_id))
+        .and_then(|t| t.containers.iter_mut().find(|c| c.name == container_name))
+    {
+        c.restart_count = Some(count);
+    }
+}
+
 /// Test-only re-export of [`parse_port_mapping`] so sibling test modules
 /// can lock in the default-port / default-protocol behaviour without us
 /// widening the visibility of the parser itself.
@@ -1841,10 +1921,10 @@ pub(crate) fn build_run_argv(
             argv.push("--privileged".into());
         }
     }
-    if let Some(timeout) = plan.stop_timeout {
-        argv.push("--stop-timeout".into());
-        argv.push(format!("{}", timeout));
-    }
+    // The engine's own stop grace matches ECS's (30s when unset), so a stop
+    // that doesn't name a timeout still gives the container its stopTimeout.
+    argv.push("--stop-timeout".into());
+    argv.push(format!("{}", stop_timeout_secs(plan)));
     if let Some(ref user) = plan.user {
         argv.push("--user".into());
         argv.push(user.clone());
@@ -1874,6 +1954,19 @@ pub(crate) fn build_run_argv(
         argv.push(arg.clone());
     }
     argv
+}
+
+/// The SIGTERM-to-SIGKILL grace ECS gives a container it stops: its
+/// `stopTimeout`, else 30 seconds.
+pub(crate) fn stop_timeout_secs(plan: &ContainerPlan) -> u32 {
+    plan.stop_timeout
+        .unwrap_or(restart::DEFAULT_STOP_TIMEOUT_SECS)
+}
+
+/// The CLI budget for `stop --time <grace>`: the grace plus the usual
+/// allowance for the daemon round trip.
+pub(crate) fn stop_call_timeout(grace_secs: u32) -> Duration {
+    Duration::from_secs(grace_secs.into()) + CLI_CALL_TIMEOUT
 }
 
 /// Render `networkBindings` JSON for a launched container. Empty under
@@ -2348,6 +2441,9 @@ impl EcsRuntime {
             creds_helper_image: tokio::sync::Mutex::new(None),
             netns_holders: RwLock::new(std::collections::HashMap::new()),
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -2432,6 +2528,8 @@ sleep 1000 & echo $! >> "$d/pids"; wait
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -2509,7 +2607,7 @@ mod tests {
         );
     }
 
-    fn make_task(task_id: &str) -> Task {
+    pub(super) fn make_task(task_id: &str) -> Task {
         Task {
             task_arn: Arn::new(
                 "ecs",
@@ -2729,7 +2827,7 @@ mod tests {
         );
     }
 
-    fn make_container(name: &str, essential: bool) -> crate::state::Container {
+    pub(super) fn make_container(name: &str, essential: bool) -> crate::state::Container {
         crate::state::Container {
             container_arn: format!(
                 "arn:aws:ecs:us-east-1:000000000000:container/default/abc/{name}"
@@ -2751,6 +2849,7 @@ mod tests {
             managed_agents: None,
             image_digest: None,
             gpu_sharing_strategy: None,
+            restart_count: None,
         }
     }
 
@@ -3002,6 +3101,8 @@ mod tests {
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -3167,6 +3268,8 @@ mod tests {
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -3214,6 +3317,8 @@ mod tests {
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -3292,6 +3397,8 @@ mod tests {
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -3597,6 +3704,67 @@ mod tests {
         assert_eq!(DependsOnCondition::parse("ANY"), None);
     }
 
+    /// A SUCCESS upstream that failed, or a HEALTHY upstream that exited,
+    /// can never satisfy its dependent; COMPLETE and START always resolve.
+    #[test]
+    fn condition_unresolvable_detects_dead_dependencies() {
+        let exited = |code| InspectedState {
+            started: true,
+            exited: true,
+            exit_code: code,
+            health: None,
+        };
+        let running = InspectedState {
+            started: true,
+            exited: false,
+            exit_code: 0,
+            health: Some("unhealthy".into()),
+        };
+        assert!(condition_unresolvable(
+            DependsOnCondition::Success,
+            &exited(1)
+        ));
+        assert!(!condition_unresolvable(
+            DependsOnCondition::Success,
+            &exited(0)
+        ));
+        assert!(condition_unresolvable(
+            DependsOnCondition::Healthy,
+            &exited(0)
+        ));
+        // Unhealthy but running may still become healthy.
+        assert!(!condition_unresolvable(
+            DependsOnCondition::Healthy,
+            &running
+        ));
+        assert!(!condition_unresolvable(
+            DependsOnCondition::Complete,
+            &exited(1)
+        ));
+        assert!(!condition_unresolvable(
+            DependsOnCondition::Start,
+            &exited(1)
+        ));
+    }
+
+    /// Every container gets the engine stop grace ECS gives it: its
+    /// stopTimeout, else 30 seconds.
+    #[test]
+    fn run_argv_always_carries_the_ecs_stop_timeout() {
+        let mut plan = minimal_plan();
+        let argv = |p: &ContainerPlan| {
+            build_run_argv(p, &[], "t1", "host.docker.internal", OWN_NET, "alpine")
+        };
+        let flag_value = |args: &[String]| {
+            let i = args.iter().position(|a| a == "--stop-timeout").unwrap();
+            args[i + 1].clone()
+        };
+        assert_eq!(flag_value(&argv(&plan)), "30");
+        plan.stop_timeout = Some(5);
+        assert_eq!(flag_value(&argv(&plan)), "5");
+        assert_eq!(stop_timeout_secs(&plan), 5);
+    }
+
     // ── ulimits + linuxParameters + misc docker flags (O6) ──
 
     #[test]
@@ -3622,6 +3790,8 @@ mod tests {
             }],
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -3675,6 +3845,8 @@ mod tests {
                 privileged: true,
             }),
             stop_timeout: Some(30),
+            start_timeout: None,
+            restart_policy: None,
             user: Some("1000:1000".into()),
             working_directory: Some("/app".into()),
             tty: true,
@@ -3853,6 +4025,7 @@ mod tests {
             managed_agents: None,
             image_digest: None,
             gpu_sharing_strategy: None,
+            restart_count: None,
         }];
         acct.tasks.insert("t1".into(), task);
 
@@ -4204,6 +4377,39 @@ mod tests {
             pid_mode: Some("shared".into()),
             ipc_mode: Some("shared".into()),
         }
+    }
+
+    /// `restartPolicy` and `startTimeout` reach the launch plan of a daemon
+    /// task as they do for a regular one.
+    #[test]
+    fn daemon_plan_carries_restart_policy_and_start_timeout() {
+        let containers = vec![
+            serde_json::json!({
+                "name": "agent",
+                "image": "busybox",
+                "startTimeout": 45,
+                "restartPolicy": {"enabled": true, "ignoredExitCodes": [0], "restartAttemptPeriod": 90}
+            }),
+            serde_json::json!({
+                "name": "off",
+                "image": "busybox",
+                "restartPolicy": {"enabled": false}
+            }),
+        ];
+        let (state, task_id) = daemon_task_state(daemon_task_definition(containers, Vec::new()));
+        let plans = build_container_plans(&state, "000000000000", &task_id, 4566).unwrap();
+        let agent = plans.iter().find(|p| p.container_name == "agent").unwrap();
+        assert_eq!(agent.start_timeout, Some(45));
+        assert_eq!(
+            agent.restart_policy,
+            Some(RestartPolicy {
+                ignored_exit_codes: vec![0],
+                attempt_period: Duration::from_secs(90),
+            })
+        );
+        let off = plans.iter().find(|p| p.container_name == "off").unwrap();
+        assert_eq!(off.restart_policy, None);
+        assert_eq!(off.start_timeout, None);
     }
 
     #[test]

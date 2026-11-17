@@ -1291,6 +1291,8 @@ type EcsTaskMetadataContainer struct {
 	CreatedAt     *string               `json:"createdAt,omitempty"`
 	StartedAt     *string               `json:"startedAt,omitempty"`
 	ExitCode      *int64                `json:"exitCode,omitempty"`
+	// RestartCount is set only for containers with a restart policy.
+	RestartCount *int64 `json:"restartCount,omitempty"`
 }
 
 // EcsTaskMetadata is the v4 metadata-URI aggregate for one task.

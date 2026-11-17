@@ -1353,12 +1353,10 @@ pub enum ContainerTeardownIntent {
         incarnation: String,
         volume: Option<String>,
     },
-    /// `AWS::ECS::Service` -- stop the REAL tasks (containers) the service was
-    /// running. The cluster + service name locate the orphaned task records.
-    EcsService {
-        cluster_name: String,
-        service_name: String,
-    },
+    /// `AWS::ECS::Service` / `AWS::ECS::Cluster` -- stop the REAL tasks
+    /// (containers) the service or cluster was running, captured (and their
+    /// stop begun) before the service / cluster record was removed.
+    EcsTasks { task_ids: Vec<String> },
     /// `AWS::AutoScaling::AutoScalingGroup` -- terminate the REAL EC2 instances
     /// the group launched (captured before the group record was removed).
     AsgInstances { instance_ids: Vec<String> },
