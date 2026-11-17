@@ -138,7 +138,7 @@ pub struct CloudWatchService {
     action_authorizer: Option<Arc<dyn AlarmActionAuthorizer>>,
     /// Held while queued actions are dispatched, so they are delivered one
     /// at a time in the order the state changes happened.
-    dispatch_lock: Mutex<()>,
+    pub(crate) dispatch_lock: Mutex<()>,
 }
 
 impl CloudWatchService {
@@ -200,6 +200,18 @@ impl CloudWatchService {
     /// Clear and return whether an evaluation left state to persist, for
     /// `account` (or every account when `None`).
     fn take_evaluation_dirty(&self, account: Option<&str>) -> bool {
+        // Read-only requests leave nothing dirty: check under the read lock
+        // so they don't contend for the write lock.
+        let any_dirty = {
+            let state = self.state.read();
+            match account {
+                Some(id) => state.accounts.get(id).is_some_and(|a| a.evaluation_dirty),
+                None => state.accounts.values().any(|a| a.evaluation_dirty),
+            }
+        };
+        if !any_dirty {
+            return false;
+        }
         let mut state = self.state.write();
         match account {
             Some(id) => state
@@ -215,8 +227,11 @@ impl CloudWatchService {
     /// Run every queued alarm action and record the outcomes in the alarm
     /// history. Returns whether anything ran.
     pub(crate) async fn run_pending_actions(&self) -> bool {
-        // Most requests owe no actions: don't wait behind a dispatch.
-        if !self.has_pending_actions() {
+        // Most requests owe no actions: don't wait behind a dispatch. Only
+        // when no dispatch is in flight, though: one that is running may hold
+        // this request's own notification, and the request must not respond
+        // before that action has been delivered.
+        if !self.has_pending_actions() && self.dispatch_lock.try_lock().is_ok() {
             return false;
         }
         // One dispatcher at a time, draining under the lock: actions queued

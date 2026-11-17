@@ -3601,6 +3601,28 @@ async fn actions_dispatch_in_order_and_not_after_reset() {
     assert_eq!(sns.published.lock().len(), 2);
 }
 
+/// A request that finds the queue empty still waits for a dispatch already
+/// in flight: that dispatch may hold the request's own notification.
+#[tokio::test]
+async fn empty_queue_still_waits_for_an_in_flight_dispatch() {
+    let (svc, _sns, _) = acting_service();
+    let svc = Arc::new(svc);
+    let held = svc.dispatch_lock.lock().await;
+    let waiter = {
+        let svc = Arc::clone(&svc);
+        tokio::spawn(async move { svc.run_pending_actions().await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !waiter.is_finished(),
+        "returned while a dispatch was in flight"
+    );
+    drop(held);
+    assert!(!waiter.await.unwrap());
+    // With nothing queued and nobody dispatching, it returns at once.
+    assert!(!svc.run_pending_actions().await);
+}
+
 #[tokio::test]
 async fn put_alarm_rejects_invalid_action_arns() {
     let svc = service();
