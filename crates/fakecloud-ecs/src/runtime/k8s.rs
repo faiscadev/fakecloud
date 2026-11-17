@@ -15,6 +15,15 @@
 //!   ordering among the long-running app containers isn't strictly
 //!   enforceable inside one Pod (the kubelet starts them together); the
 //!   `healthCheck` still becomes a readinessProbe.
+//!   Such an initContainer still running past its `startTimeout` fails the
+//!   task.
+//! - A container with a `restartPolicy` is restarted by the kubelet: a
+//!   native sidecar (initContainer with `restartPolicy: Always`) beside other
+//!   long-running containers, or a Pod `restartPolicy: Always` when every
+//!   long-running container has one. The kubelet restarts on every exit, so
+//!   the ECS rules (`ignoredExitCodes`, `restartAttemptPeriod`) are applied
+//!   to each observed exit ([`RestartWatch`]) to count ECS restarts and to
+//!   treat an exit ECS would not restart as the container stopping.
 //! - `healthCheck` -> container `readinessProbe` (exec).
 //! - Secrets resolve exactly as on the Docker backend and are injected as
 //!   env; the metadata endpoints are reached at the in-cluster
@@ -49,8 +58,8 @@ use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 use super::task_creds;
 use super::{
     build_container_plans, finalize_stopped_multi, mark_pull_started, mark_pull_stopped,
-    mark_running_multi, task_desired_stopped, task_should_stop, ContainerPlan, DependsOnCondition,
-    EcsRuntime, HealthCheckSpec, RunningContainer, RuntimeError,
+    mark_running_multi, set_restart_count, task_desired_stopped, task_should_stop, ContainerPlan,
+    DependsOnCondition, EcsRuntime, HealthCheckSpec, RunningContainer, RuntimeError,
 };
 use crate::state::SharedEcsState;
 
@@ -351,6 +360,20 @@ fn creds_init_outcome(pod: &Pod) -> CredsInitOutcome {
             all.iter()
                 .find(|c| c.name == task_creds::K8S_INIT_CONTAINER)
         });
+    // Under a Pod `restartPolicy: Always` (every long-running container has
+    // a restart policy) a failed initContainer is retried: its failure is
+    // in `lastState` while it backs off.
+    if let Some(t) = init
+        .and_then(|c| c.last_state.as_ref())
+        .and_then(|s| s.terminated.as_ref())
+        .filter(|t| t.exit_code != 0)
+    {
+        return CredsInitOutcome::Failed(format!(
+            "{} exited with code {}",
+            task_creds::K8S_INIT_CONTAINER,
+            t.exit_code
+        ));
+    }
     if let Some(state) = init.and_then(|c| c.state.as_ref()) {
         if let Some(t) = state.terminated.as_ref() {
             return if t.exit_code == 0 {
@@ -654,6 +677,12 @@ impl EcsRuntime {
         // RUNNING with the container runtime ids.
         let api = backend.client.pods();
         let started = build_running_list(&container_map);
+        let mut restart_watches: HashMap<String, RestartWatch> = container_map
+            .iter()
+            .filter(|e| e.restart_policy.is_some())
+            .map(|e| (e.original.clone(), RestartWatch::default()))
+            .collect();
+        let dependency_timeouts = init_dependency_timeouts(&resolved, &container_map);
         let mut marked_running = false;
         let deadline = std::time::Instant::now() + Duration::from_secs(300);
         loop {
@@ -691,10 +720,61 @@ impl EcsRuntime {
                 .and_then(|s| s.phase.as_deref())
                 .unwrap_or("Pending");
             let exits = container_exit_codes(&pod, &container_map);
+            let stopping = task_desired_stopped(state, account_id, task_id);
+            let mut restarted = false;
+            for entry in &container_map {
+                let (Some(policy), Some(watch)) = (
+                    entry.restart_policy.as_ref(),
+                    restart_watches.get_mut(&entry.original),
+                ) else {
+                    continue;
+                };
+                if watch.observe(policy, &finished_runs(&pod, &entry.k8s_name), stopping)
+                    && marked_running
+                {
+                    set_restart_count(
+                        state,
+                        account_id,
+                        task_id,
+                        &entry.original,
+                        watch.restart_count,
+                    );
+                    restarted = true;
+                }
+            }
+            if restarted {
+                self.persist_snapshot().await;
+            }
+            // A COMPLETE/SUCCESS dependency (a run-once initContainer) still
+            // running past its startTimeout: its dependents give up and the
+            // task stops, as on ECS.
+            if let Some(reason) = dependency_timeouts
+                .iter()
+                .find(|d| {
+                    init_running_for(&pod, &d.upstream_k8s, chrono::Utc::now())
+                        .is_some_and(|ran| ran >= Duration::from_secs(d.start_timeout.into()))
+                })
+                .map(|d| {
+                    super::restart::dependency_timeout_reason(
+                        &d.dependent,
+                        &d.upstream,
+                        d.condition,
+                        d.start_timeout,
+                    )
+                })
+            {
+                mark_pull_stopped(state, account_id, task_id);
+                backend.client.delete_pod(&pod_name).await;
+                backend.pods.write().remove(task_id);
+                return Err(RuntimeError::ContainerStart(reason));
+            }
 
             if !marked_running && (phase == "Running" || phase == "Succeeded" || phase == "Failed")
             {
                 mark_running_multi(state, account_id, task_id, &started);
+                for (name, watch) in &restart_watches {
+                    set_restart_count(state, account_id, task_id, name, watch.restart_count);
+                }
                 // An awsvpc task's ENI (precreated at RunTask) attaches now;
                 // its ports are served by the Pod IP, which the load
                 // balancer data plane reaches in-cluster.
@@ -727,7 +807,12 @@ impl EcsRuntime {
             // Determine task-stop from current container exit codes.
             let mut snapshot = started.clone();
             for rc in snapshot.iter_mut() {
-                rc.exit_code = exits.get(&rc.name).copied().flatten();
+                // A container the Pod restarts has exited, for ECS, only
+                // once it exits in a way its restart policy doesn't restart.
+                rc.exit_code = match restart_watches.get(&rc.name) {
+                    Some(watch) => watch.exited,
+                    None => exits.get(&rc.name).copied().flatten(),
+                };
             }
             let terminal = phase == "Succeeded" || phase == "Failed";
             if terminal || task_should_stop(&snapshot) {
@@ -887,6 +972,8 @@ pub(super) struct ContainerMapEntry {
     original: String,
     k8s_name: String,
     essential: bool,
+    /// The container's restart policy when the Pod restarts it.
+    restart_policy: Option<super::RestartPolicy>,
 }
 
 fn build_running_list(map: &[ContainerMapEntry]) -> Vec<RunningContainer> {
@@ -931,6 +1018,170 @@ fn container_exit_codes(pod: &Pod, map: &[ContainerMapEntry]) -> HashMap<String,
         .collect()
 }
 
+/// A `COMPLETE`/`SUCCESS` dependency on a run-once initContainer whose
+/// definition has a `startTimeout`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InitDependencyTimeout {
+    dependent: String,
+    upstream: String,
+    upstream_k8s: String,
+    condition: DependsOnCondition,
+    start_timeout: u32,
+}
+
+fn init_dependency_timeouts(
+    resolved: &[(ContainerPlan, Vec<(String, String)>)],
+    map: &[ContainerMapEntry],
+) -> Vec<InitDependencyTimeout> {
+    let mut out = Vec::new();
+    for (plan, _) in resolved {
+        for dep in &plan.depends_on {
+            if !matches!(
+                dep.condition,
+                DependsOnCondition::Complete | DependsOnCondition::Success
+            ) {
+                continue;
+            }
+            let Some(start_timeout) = resolved
+                .iter()
+                .find(|(p, _)| p.container_name == dep.container_name)
+                .and_then(|(p, _)| p.start_timeout)
+                .filter(|t| *t > 0)
+            else {
+                continue;
+            };
+            let Some(entry) = map.iter().find(|e| e.original == dep.container_name) else {
+                continue;
+            };
+            out.push(InitDependencyTimeout {
+                dependent: plan.container_name.clone(),
+                upstream: dep.container_name.clone(),
+                upstream_k8s: entry.k8s_name.clone(),
+                condition: dep.condition,
+                start_timeout,
+            });
+        }
+    }
+    out
+}
+
+/// How long initContainer `k8s_name` has been running, `None` unless it is
+/// running now.
+fn init_running_for(
+    pod: &Pod,
+    k8s_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
+    let started = pod
+        .status
+        .as_ref()?
+        .init_container_statuses
+        .as_ref()?
+        .iter()
+        .find(|cs| cs.name == k8s_name)?
+        .state
+        .as_ref()?
+        .running
+        .as_ref()?
+        .started_at
+        .as_ref()?
+        .0;
+    (now - started).to_std().ok()
+}
+
+/// One finished run of a Pod container: its exit code and how long it ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FinishedRun {
+    /// Identifies the run (the runtime's container ID for it).
+    key: String,
+    exit_code: i64,
+    ran_for: Duration,
+}
+
+/// The finished runs of Pod container `k8s_name` still visible in the Pod
+/// status: the previous run (`lastState`) and the current one if it has
+/// exited (`state`).
+fn finished_runs(pod: &Pod, k8s_name: &str) -> Vec<FinishedRun> {
+    let Some(status) = pod.status.as_ref() else {
+        return Vec::new();
+    };
+    let Some(cs) = status
+        .container_statuses
+        .iter()
+        .flatten()
+        .chain(status.init_container_statuses.iter().flatten())
+        .find(|cs| cs.name == k8s_name)
+    else {
+        return Vec::new();
+    };
+    [cs.last_state.as_ref(), cs.state.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.terminated.as_ref())
+        .map(|t| {
+            let started = t.started_at.as_ref().map(|s| s.0);
+            let finished = t.finished_at.as_ref().map(|f| f.0);
+            let ran_for = match (started, finished) {
+                (Some(s), Some(f)) => (f - s).to_std().unwrap_or_default(),
+                _ => Duration::ZERO,
+            };
+            let key = t.container_id.clone().unwrap_or_else(|| {
+                format!(
+                    "{}-{}",
+                    started.map(|s| s.to_rfc3339()).unwrap_or_default(),
+                    finished.map(|f| f.to_rfc3339()).unwrap_or_default()
+                )
+            });
+            FinishedRun {
+                key,
+                exit_code: t.exit_code as i64,
+                ran_for,
+            }
+        })
+        .collect()
+}
+
+/// ECS's view of a container the Pod restarts on every exit: how many of
+/// those restarts ECS would have made, and the exit ECS would not have
+/// restarted (after which, for ECS, the container is stopped).
+#[derive(Debug, Default)]
+struct RestartWatch {
+    handled: HashSet<String>,
+    restart_count: u32,
+    exited: Option<i64>,
+}
+
+impl RestartWatch {
+    /// Account for newly finished `runs`. Returns whether the restart count
+    /// changed.
+    fn observe(
+        &mut self,
+        policy: &super::RestartPolicy,
+        runs: &[FinishedRun],
+        task_stopping: bool,
+    ) -> bool {
+        let mut changed = false;
+        for run in runs {
+            if !self.handled.insert(run.key.clone()) || self.exited.is_some() {
+                continue;
+            }
+            match super::restart::restart_decision(
+                policy,
+                Some(run.exit_code),
+                run.ran_for,
+                task_stopping,
+            ) {
+                Ok(()) => {
+                    self.restart_count += 1;
+                    changed = true;
+                }
+                Err(_) => self.exited = Some(run.exit_code),
+            }
+        }
+        changed
+    }
+}
+
 /// Whether the task itself asks for host access a Pod Security level below
 /// `privileged` refuses: a privileged container, or the host PID / IPC
 /// namespace.
@@ -956,6 +1207,45 @@ fn pod_security_refuses_host_access(error: &str) -> bool {
         ]
         .iter()
         .any(|field| error.contains(field))
+}
+
+/// How a task Pod restarts the containers that have a `restartPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartLayout {
+    /// No long-running container has one: the Pod never restarts anything.
+    None,
+    /// Each becomes a native sidecar (an initContainer with
+    /// `restartPolicy: Always`), restarted on its own, while the others
+    /// stay regular containers the kubelet never restarts.
+    Sidecars,
+    /// Every long-running container has one, so there would be no regular
+    /// container left beside sidecars: the Pod's own `restartPolicy` is
+    /// `Always`.
+    PodAlways,
+}
+
+/// The [`RestartLayout`] for a task's containers. Run-once initContainers
+/// (`COMPLETE`/`SUCCESS` targets) are never restarted.
+fn restart_layout(
+    resolved: &[(ContainerPlan, Vec<(String, String)>)],
+    init_targets: &HashSet<&str>,
+) -> RestartLayout {
+    let long_running: Vec<&ContainerPlan> = resolved
+        .iter()
+        .map(|(p, _)| p)
+        .filter(|p| !init_targets.contains(p.container_name.as_str()))
+        .collect();
+    let with_policy = long_running
+        .iter()
+        .filter(|p| p.restart_policy.is_some())
+        .count();
+    if with_policy == 0 {
+        RestartLayout::None
+    } else if with_policy == long_running.len() {
+        RestartLayout::PodAlways
+    } else {
+        RestartLayout::Sidecars
+    }
 }
 
 /// Build the Pod for a task. Returns the Pod and the container-name map.
@@ -997,20 +1287,35 @@ fn build_task_pod(
         init_containers.push(creds.container());
     }
 
+    let restart = restart_layout(resolved, &init_targets);
     for (idx, (plan, env)) in resolved.iter().enumerate() {
         let k8s_name = unique_dns_name(&plan.container_name, idx, &mut used_names);
+        let is_init_target = init_targets.contains(plan.container_name.as_str());
         map.push(ContainerMapEntry {
             original: plan.container_name.clone(),
             k8s_name: k8s_name.clone(),
             essential: plan.essential,
+            // A run-once initContainer is never restarted.
+            restart_policy: plan.restart_policy.clone().filter(|_| !is_init_target),
         });
-        let container = build_container(&k8s_name, plan, env, ecr_host, ecr_port, &mut volumes);
-        if init_targets.contains(plan.container_name.as_str()) {
+        let mut container = build_container(&k8s_name, plan, env, ecr_host, ecr_port, &mut volumes);
+        if is_init_target {
+            init_containers.push(container);
+        } else if restart == RestartLayout::Sidecars && plan.restart_policy.is_some() {
+            // A native sidecar: the kubelet restarts it in place whenever it
+            // exits, whatever the Pod's own restartPolicy.
+            container.restart_policy = Some("Always".to_string());
             init_containers.push(container);
         } else {
             app_containers.push(container);
         }
     }
+    // The Pod's grace on deletion (StopTask) is the longest stopTimeout.
+    let grace = resolved
+        .iter()
+        .map(|(p, _)| super::stop_timeout_secs(p))
+        .max()
+        .unwrap_or(super::restart::DEFAULT_STOP_TIMEOUT_SECS);
 
     let mut pod_labels = std::collections::BTreeMap::new();
     pod_labels.insert(
@@ -1048,7 +1353,15 @@ fn build_task_pod(
             ..ObjectMeta::default()
         },
         spec: Some(PodSpec {
-            restart_policy: Some("Never".to_string()),
+            restart_policy: Some(
+                if restart == RestartLayout::PodAlways {
+                    "Always"
+                } else {
+                    "Never"
+                }
+                .to_string(),
+            ),
+            termination_grace_period_seconds: Some(grace.into()),
             init_containers: (!init_containers.is_empty()).then_some(init_containers),
             containers: app_containers,
             volumes: (!pod_volumes.is_empty()).then_some(pod_volumes),
@@ -1247,6 +1560,8 @@ mod tests {
             ulimits: vec![],
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -1377,6 +1692,204 @@ mod tests {
         assert_eq!(inits[0].name, "migrate");
         assert_eq!(spec.containers.len(), 1);
         assert_eq!(spec.containers[0].name, "web");
+    }
+
+    fn restart_policy(period: u64) -> crate::runtime::RestartPolicy {
+        crate::runtime::RestartPolicy {
+            ignored_exit_codes: vec![0],
+            attempt_period: Duration::from_secs(period),
+        }
+    }
+
+    #[test]
+    fn restart_policy_container_beside_others_becomes_a_native_sidecar() {
+        let app = plan("app", true);
+        let mut agent = plan("agent", false);
+        agent.restart_policy = Some(restart_policy(60));
+        let (pod, map) = build(&[(app, vec![]), (agent, vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy.as_deref(), Some("Never"));
+        let inits = spec.init_containers.unwrap();
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].name, "agent");
+        assert_eq!(inits[0].restart_policy.as_deref(), Some("Always"));
+        assert_eq!(spec.containers.len(), 1);
+        assert_eq!(spec.containers[0].name, "app");
+        assert!(spec.containers[0].restart_policy.is_none());
+        assert!(map
+            .iter()
+            .find(|e| e.original == "agent")
+            .unwrap()
+            .restart_policy
+            .is_some());
+        assert!(map
+            .iter()
+            .find(|e| e.original == "app")
+            .unwrap()
+            .restart_policy
+            .is_none());
+    }
+
+    #[test]
+    fn every_long_running_container_with_a_policy_restarts_the_pod() {
+        let mut app = plan("app", true);
+        app.restart_policy = Some(restart_policy(60));
+        let mut migrate = plan("migrate", false);
+        // A run-once dependency target is never restarted.
+        migrate.restart_policy = Some(restart_policy(60));
+        app.depends_on = vec![DependsOn {
+            container_name: "migrate".to_string(),
+            condition: DependsOnCondition::Complete,
+        }];
+        let (pod, map) = build(&[(migrate, vec![]), (app, vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
+        assert_eq!(spec.containers.len(), 1);
+        assert_eq!(spec.containers[0].name, "app");
+        let inits = spec.init_containers.unwrap();
+        assert_eq!(inits[0].name, "migrate");
+        assert!(inits[0].restart_policy.is_none());
+        assert!(map
+            .iter()
+            .find(|e| e.original == "migrate")
+            .unwrap()
+            .restart_policy
+            .is_none());
+    }
+
+    #[test]
+    fn pod_grace_is_the_longest_stop_timeout() {
+        let (pod, _) = build(&[(plan("app", true), vec![])]);
+        assert_eq!(pod.spec.unwrap().termination_grace_period_seconds, Some(30));
+        let mut a = plan("a", true);
+        a.stop_timeout = Some(5);
+        let mut b = plan("b", false);
+        b.stop_timeout = Some(90);
+        let (pod, _) = build(&[(a, vec![]), (b, vec![])]);
+        assert_eq!(pod.spec.unwrap().termination_grace_period_seconds, Some(90));
+    }
+
+    use k8s_openapi::api::core::v1::{
+        ContainerState as State, ContainerStateTerminated as Terminated, ContainerStatus as Status,
+        PodStatus as PStatus,
+    };
+
+    fn terminated_at(id: &str, code: i32, ran_secs: i64) -> State {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let start = chrono::Utc::now() - chrono::Duration::seconds(ran_secs + 5);
+        State {
+            terminated: Some(Terminated {
+                container_id: Some(id.to_string()),
+                exit_code: code,
+                started_at: Some(Time(start)),
+                finished_at: Some(Time(start + chrono::Duration::seconds(ran_secs))),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn pod_with_status(name: &str, last: Option<State>, now: Option<State>) -> Pod {
+        Pod {
+            status: Some(PStatus {
+                container_statuses: Some(vec![Status {
+                    name: name.to_string(),
+                    last_state: last,
+                    state: now,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restart_watch_counts_ecs_restarts_once_per_run() {
+        let policy = restart_policy(60);
+        let mut watch = RestartWatch::default();
+        // First run exited 1 after 70s and is still the current state.
+        let pod = pod_with_status("app", None, Some(terminated_at("c1", 1, 70)));
+        let runs = finished_runs(&pod, "app");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].exit_code, 1);
+        assert_eq!(runs[0].ran_for, Duration::from_secs(70));
+        assert!(watch.observe(&policy, &runs, false));
+        assert_eq!(watch.restart_count, 1);
+        // The kubelet restarted it: the same run now shows as lastState.
+        let pod = pod_with_status("app", Some(terminated_at("c1", 1, 70)), None);
+        assert!(!watch.observe(&policy, &finished_runs(&pod, "app"), false));
+        assert_eq!(watch.restart_count, 1);
+        assert_eq!(watch.exited, None);
+        // The next run exits 0, which the policy ignores: stopped for ECS.
+        let pod = pod_with_status(
+            "app",
+            Some(terminated_at("c1", 1, 70)),
+            Some(terminated_at("c2", 0, 120)),
+        );
+        assert!(!watch.observe(&policy, &finished_runs(&pod, "app"), false));
+        assert_eq!(watch.restart_count, 1);
+        assert_eq!(watch.exited, Some(0));
+    }
+
+    #[test]
+    fn restart_watch_stops_a_container_that_exits_too_early() {
+        let mut watch = RestartWatch::default();
+        let pod = pod_with_status("app", None, Some(terminated_at("c1", 2, 10)));
+        assert!(!watch.observe(&restart_policy(60), &finished_runs(&pod, "app"), false));
+        assert_eq!(watch.exited, Some(2));
+        assert_eq!(watch.restart_count, 0);
+    }
+
+    #[test]
+    fn start_timeout_applies_to_running_init_dependencies() {
+        use k8s_openapi::api::core::v1::ContainerStateRunning;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let mut web = plan("web", true);
+        web.depends_on = vec![DependsOn {
+            container_name: "migrate".to_string(),
+            condition: DependsOnCondition::Success,
+        }];
+        let mut migrate = plan("migrate", false);
+        migrate.start_timeout = Some(30);
+        let resolved = vec![(migrate, vec![]), (web, vec![])];
+        let (_, map) = build(&resolved);
+        let timeouts = init_dependency_timeouts(&resolved, &map);
+        assert_eq!(timeouts.len(), 1);
+        assert_eq!(timeouts[0].dependent, "web");
+        assert_eq!(timeouts[0].upstream, "migrate");
+        assert_eq!(timeouts[0].start_timeout, 30);
+
+        let now = chrono::Utc::now();
+        let pod = Pod {
+            status: Some(PStatus {
+                init_container_statuses: Some(vec![Status {
+                    name: "migrate".to_string(),
+                    state: Some(State {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(now - chrono::Duration::seconds(31))),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ran = init_running_for(&pod, "migrate", now).unwrap();
+        assert!(ran >= Duration::from_secs(30));
+        assert!(init_running_for(&pod, "web", now).is_none());
+
+        // No startTimeout on the upstream: nothing to enforce.
+        let mut web = plan("web", true);
+        web.depends_on = vec![DependsOn {
+            container_name: "migrate".to_string(),
+            condition: DependsOnCondition::Complete,
+        }];
+        let resolved = vec![(plan("migrate", false), vec![]), (web, vec![])];
+        let (_, map) = build(&resolved);
+        assert!(init_dependency_timeouts(&resolved, &map).is_empty());
     }
 
     #[test]

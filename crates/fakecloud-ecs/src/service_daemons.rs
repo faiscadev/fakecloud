@@ -35,6 +35,11 @@ impl EcsService {
                 )
             })?
             .clone();
+        for cd in &containers {
+            crate::runtime::restart::validate_restart_policy(cd).map_err(|msg| {
+                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ClientException", msg)
+            })?;
+        }
         let task_role_arn = body
             .get("taskRoleArn")
             .and_then(|v| v.as_str())

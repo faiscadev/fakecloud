@@ -298,6 +298,7 @@ impl EcsService {
                         def,
                         body.get("overrides"),
                     ),
+                    restart_count: None,
                 })
                 .collect();
             let awslogs = td_containers.iter().find_map(|def| {
@@ -1398,6 +1399,7 @@ pub(super) mod multi_container_tests {
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: None,
+                restart_count: None,
             });
         }
 
@@ -1460,6 +1462,8 @@ mod port_mapping_tests {
             ulimits: Vec::new(),
             linux_parameters: None,
             stop_timeout: None,
+            start_timeout: None,
+            restart_policy: None,
             user: None,
             working_directory: None,
             tty: false,
@@ -1675,6 +1679,7 @@ mod port_mapping_tests {
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: None,
+                restart_count: None,
             }],
             overrides: serde_json::json!({}),
             started_by: None,

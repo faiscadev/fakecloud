@@ -48,6 +48,7 @@ impl EcsService {
                     "Container definition is missing required field: image",
                 ));
             }
+            crate::runtime::restart::validate_restart_policy(cd).map_err(client_exception)?;
             // Validate `dependsOn[]` entry shape: `condition` must be
             // one of the AWS-documented values (START/COMPLETE/SUCCESS/
             // HEALTHY). Real ECS rejects unknown conditions with a

@@ -79,8 +79,27 @@ The runtime translates the following task-definition fields straight into `docke
 - On Kubernetes, `privileged`, `hostPID` and `hostIPC` are refused by Pod Security levels below `privileged`; such a task stops with `TaskFailedToStart` and the admission error as its reason
 - `systemControls[]` -> `--sysctl <namespace>=<value>`
 - `logConfiguration.logDriver`, while a daemon with a log driver volume is active in the task's cluster and the engine server is Docker Engine: `json-file` -> `--log-driver json-file` plus its `options` as `--log-opt`; any other driver -> the `local` driver (rotating at 1 GiB x 100 files), so fakecloud still reads the container's output for `awslogs` forwarding but it writes no json-file log. On Podman (including a Docker CLI on Podman's compat socket) only an explicit `json-file` is passed, which Podman maps to `k8s-file`. With no such daemon, or an engine that doesn't answer, the container keeps the engine's default logging. The driver is chosen when a container starts, so a container started before a log driver daemon became active keeps the engine default (json-file on Docker) and its log is in the volume even if its `logConfiguration` names another driver
-- `stopTimeout` -> `--stop-timeout` (also bounds the SIGTERM→SIGKILL grace inside force-stop)
+- `stopTimeout` -> `--stop-timeout` (30 seconds when unset, the ECS default), and the SIGTERM-to-SIGKILL grace every stop uses: `StopTask`, a scale-down, the sidecars left running after an essential container exits. `StopTask` returns while the containers are still stopping, as on ECS, and they stop in reverse `dependsOn` order. On Kubernetes the Pod's `terminationGracePeriodSeconds` is the longest `stopTimeout` in the task
 - `volumeConfigurations[]` (per-task EBS attachments) -> volume per task with size, encryption, and FS type recorded on the task's `attachments[]` and bind-mounted at the declared `mountPoint`
+
+### Container restart policies
+
+A container definition's `restartPolicy` (regular and daemon task definitions alike) restarts the container in place when it exits, without replacing the task, following the ECS agent's rules:
+
+- Any exit code is restarted, `0` included, unless it is listed in `ignoredExitCodes`.
+- The container must have run for `restartAttemptPeriod` seconds (default 300) since it last started or restarted; a container that exits sooner is not restarted.
+- Nothing is restarted while the task is stopping.
+- A container that is not restarted exits as it would without a policy: an essential one stops the task.
+
+`RegisterTaskDefinition` and `RegisterDaemonTaskDefinition` reject a policy without `enabled`, more than 50 `ignoredExitCodes`, or a `restartAttemptPeriod` outside 60-1800 seconds with `ClientException`.
+
+On Docker and Podman the exited container is started again (`start` on the same container), so it keeps its container ID (`runtimeId`), mounts, network namespace and published ports, and the task's ENI IP and load balancer targets stay valid; an `awsvpc` container that publishes its own ports has its ENI targets pointed at the ports it gets on restart. The task metadata endpoint v4 reports the container's `RestartCount` (only for containers with a restart policy, as on ECS); `DescribeTasks` has no restart count field, and shows the container `RUNNING` throughout.
+
+On Kubernetes, where a single container in a Pod can only be restarted by the kubelet, a container with a restart policy becomes a native sidecar (an initContainer with `restartPolicy: Always`, Kubernetes 1.29 or later) when the task has other long-running containers, and the Pod's own `restartPolicy` is `Always` when every long-running container has one. The kubelet restarts such a container on every exit, with its own backoff; fakecloud applies the ECS rules to each exit it observes, counting the restarts ECS would make in `RestartCount` and treating an exit ECS would not restart (an ignored exit code, or one before `restartAttemptPeriod`) as the container stopping, which stops the task when the container is essential. A non-essential container is still restarted by the kubelet after such an exit, though ECS considers it stopped. A container that is the target of a `COMPLETE`/`SUCCESS` dependency runs once as an initContainer and is never restarted, and when the Pod's `restartPolicy` is `Always` a failing initContainer is retried by the kubelet instead of failing the task.
+
+### Container dependencies and startTimeout
+
+`dependsOn[]` conditions gate each container's start: `START` once the upstream has started, `COMPLETE` once it exited, `SUCCESS` once it exited 0, `HEALTHY` once its health check passes (immediately when it has none). As on ECS, a dependent waiting on `COMPLETE`, `SUCCESS` or `HEALTHY` gives up when the upstream has been running for the upstream's `startTimeout`: the dependent never starts and the task stops with `TaskFailedToStart` and a `stoppedReason` naming both containers, the condition and the timeout. Without a `startTimeout` on the upstream there is no time limit, as on ECS: the dependent waits until the condition is met, can no longer be met (a `SUCCESS` upstream that exited non-zero, a `HEALTHY` upstream that exited, which stop the task the same way), or the task is stopped. On Kubernetes a `COMPLETE`/`SUCCESS` upstream is an initContainer, and one still running past its `startTimeout` stops the task the same way; `START`/`HEALTHY` ordering between long-running containers is best-effort there.
 
 ### awslogs flush before STOPPED
 

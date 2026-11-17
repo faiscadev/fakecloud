@@ -1116,6 +1116,7 @@ pub(crate) fn spawn_service_tasks(
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: gpu_sharing_strategy_of(def),
+                restart_count: None,
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {
@@ -1311,6 +1312,7 @@ pub(crate) fn spawn_daemon_tasks(
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: gpu_sharing_strategy_of(def),
+                restart_count: None,
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {

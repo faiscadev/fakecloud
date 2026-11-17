@@ -1,6 +1,38 @@
 //! `EcsRuntime` `task_lifecycle` family — extracted from service.rs by audit-2026-05-19.
 
+use super::restart::RestartTracker;
 use super::*;
+
+/// One `dependsOn[]` gate the launch loop waits on.
+pub(super) struct DependencyGate<'a> {
+    /// The container waiting to launch.
+    pub dependent: &'a str,
+    /// The started container it depends on.
+    pub upstream: &'a RunningContainer,
+    pub upstream_plan: &'a ContainerPlan,
+    /// When the upstream was launched (its `startTimeout` counts from it).
+    pub upstream_started: std::time::Instant,
+    pub condition: DependsOnCondition,
+}
+
+/// How a dependency wait ended without failing the task.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum GateOutcome {
+    /// The condition holds: launch the dependent.
+    Met,
+    /// The task is being stopped: launch nothing more.
+    TaskStopping,
+}
+
+/// Restart-policy state of a running task's containers, indexed like the
+/// started-containers list.
+pub(super) struct RestartContext<'a> {
+    pub trackers: Vec<Option<RestartTracker>>,
+    plans: &'a [ResolvedContainerPlan],
+    /// Whether each container publishes its own awsvpc ports.
+    owns_ports: &'a [bool],
+    eni_ip: Option<&'a str>,
+}
 
 impl EcsRuntime {
     /// Fill in each plan's engine-specific log driver flags and bind every
@@ -340,32 +372,54 @@ impl EcsRuntime {
             .entry(task_id.to_string())
             .or_default();
         let mut started: Vec<RunningContainer> = Vec::with_capacity(resolved_plans.len());
-        for (idx, (rp, run_image)) in resolved_plans.iter().zip(run_images.iter()).enumerate() {
+        // When each started container was launched, parallel to `started`:
+        // dependency start timeouts and restart attempt periods count from it.
+        let mut launched_at: Vec<std::time::Instant> = Vec::with_capacity(resolved_plans.len());
+        // Whether each started container owns its published ports (an
+        // awsvpc container with no namespace holder), which a restart
+        // republishes.
+        let mut owns_ports: Vec<bool> = Vec::with_capacity(resolved_plans.len());
+        'launch: for (idx, (rp, run_image)) in
+            resolved_plans.iter().zip(run_images.iter()).enumerate()
+        {
             // Wait for every dependsOn[] entry on this container. Upstreams
             // declared in the same task always show up earlier in the
             // launch order thanks to topo_sort_plans, so we only ever look
             // backwards into `started`.
             for dep in &rp.plan.depends_on {
-                let upstream = match started.iter().find(|c| c.name == dep.container_name) {
-                    Some(u) => u,
+                let Some(upstream_idx) = started.iter().position(|c| c.name == dep.container_name)
+                else {
                     // Upstream not in this task definition (we ignored it
                     // during topo-sort too). Skip the gate — this matches
                     // the existing "ignore unknown dependency" behaviour.
-                    None => continue,
+                    continue;
                 };
-                // Whether the upstream has a healthCheck configured —
-                // governs the HEALTHY shortcut: AWS treats HEALTHY as
-                // immediately satisfied when the upstream has no probe.
-                let upstream_has_health_check = resolved_plans
+                let Some(upstream_plan) = resolved_plans
                     .iter()
-                    .find(|p| p.plan.container_name == dep.container_name)
-                    .is_some_and(|p| p.plan.health_check.is_some());
-                if let Err(err) = self
-                    .wait_for_depends_on(upstream, dep.condition, upstream_has_health_check)
+                    .map(|p| &p.plan)
+                    .find(|p| p.container_name == dep.container_name)
+                else {
+                    continue;
+                };
+                let gate = DependencyGate {
+                    dependent: &rp.plan.container_name,
+                    upstream: &started[upstream_idx],
+                    upstream_plan,
+                    upstream_started: launched_at[upstream_idx],
+                    condition: dep.condition,
+                };
+                match self
+                    .wait_for_depends_on(state, account_id, task_id, gate)
                     .await
                 {
-                    self.cleanup_partial_start(&started, task_id);
-                    return Err(err);
+                    Ok(GateOutcome::Met) => {}
+                    // Stopped while waiting: launch nothing more; the
+                    // stopped-during-launch path below cleans up.
+                    Ok(GateOutcome::TaskStopping) => break 'launch,
+                    Err(err) => {
+                        self.cleanup_partial_start(&started, task_id);
+                        return Err(err);
+                    }
                 }
             }
             let mut env = rp.env.clone();
@@ -432,6 +486,8 @@ impl EcsRuntime {
                 return Err(RuntimeError::ContainerStart(err));
             }
             let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
+            launched_at.push(std::time::Instant::now());
+            owns_ports.push(eni_ip.is_some() && holder.is_none());
             // The ENI IP isn't routable from fakecloud: record where each
             // container port was published so ELBv2 reaches it (see `eni`).
             if let Some(ip) = eni_ip.as_deref() {
@@ -446,7 +502,11 @@ impl EcsRuntime {
                 .write()
                 .entry(task_id.to_string())
                 .or_default()
-                .push((rp.plan.container_name.clone(), container_id.clone()));
+                .push((
+                    rp.plan.container_name.clone(),
+                    container_id.clone(),
+                    stop_timeout_secs(&rp.plan),
+                ));
             started.push(RunningContainer {
                 name: rp.plan.container_name.clone(),
                 container_id,
@@ -466,9 +526,13 @@ impl EcsRuntime {
         // kill. Mirrors the k8s backend, which observes a 404 from the
         // StopTask-deleted Pod and finalizes the same way.
         if task_desired_stopped(state, account_id, task_id) {
-            for rc in &started {
+            for (rc, rp) in started.iter().zip(&resolved_plans).rev() {
+                let grace = stop_timeout_secs(&rp.plan);
                 let _ = self
-                    .cli_output(["stop", "--time", "10", &rc.container_id], CLI_CALL_TIMEOUT)
+                    .cli_output(
+                        ["stop", "--time", &grace.to_string(), &rc.container_id],
+                        stop_call_timeout(grace),
+                    )
                     .await;
                 let _ = self
                     .cli_output(["rm", "-f", &rc.container_id], CLI_CALL_TIMEOUT)
@@ -511,6 +575,21 @@ impl EcsRuntime {
         }
 
         mark_running_multi(state, account_id, task_id, &started);
+        let trackers: Vec<Option<RestartTracker>> = resolved_plans
+            .iter()
+            .zip(&launched_at)
+            .map(|(rp, at)| {
+                rp.plan
+                    .restart_policy
+                    .clone()
+                    .map(|p| RestartTracker::new(p, *at))
+            })
+            .collect();
+        for (rc, tracker) in started.iter().zip(&trackers) {
+            if tracker.is_some() {
+                set_restart_count(state, account_id, task_id, &rc.name, 0);
+            }
+        }
         self.register_lb_targets(state, account_id, task_id);
         self.emit_state_change(state, account_id, task_id, "RUNNING", None);
         // Persist the PENDING->RUNNING transition so DescribeTasks reports
@@ -524,14 +603,21 @@ impl EcsRuntime {
         // container's `healthStatus` from `docker inspect` so
         // DescribeTasks reflects HEALTHCHECK transitions in near real
         // time.
+        let mut restarts = RestartContext {
+            trackers,
+            plans: &resolved_plans,
+            owns_ports: &owns_ports,
+            eni_ip: eni_ip.as_deref(),
+        };
         let wait_outcome = self
-            .wait_for_task_exit_with_health(state, account_id, task_id, &started)
+            .wait_for_task_exit_with_health(state, account_id, task_id, &started, &mut restarts)
             .await?;
 
         // Stop and reap any sidecars still running. Best-effort — failures
         // here shouldn't keep the task from transitioning to STOPPED.
         let mut final_containers = started.clone();
-        for (i, rc) in started.iter().enumerate() {
+        // Reverse launch order: dependents stop before their dependencies.
+        for (i, rc) in started.iter().enumerate().rev() {
             if Some(i) == wait_outcome.exited_index {
                 final_containers[i].exit_code = Some(wait_outcome.exit_code);
                 continue;
@@ -568,8 +654,12 @@ impl EcsRuntime {
                 _ => false,
             };
             if still_running {
+                let grace = stop_timeout_secs(&resolved_plans[i].plan);
                 let _ = self
-                    .cli_output(["stop", "--time", "10", &rc.container_id], CLI_CALL_TIMEOUT)
+                    .cli_output(
+                        ["stop", "--time", &grace.to_string(), &rc.container_id],
+                        stop_call_timeout(grace),
+                    )
                     .await;
                 let wait_out = self
                     .cli_output(["wait", &rc.container_id], CLI_CALL_TIMEOUT)
@@ -673,12 +763,18 @@ impl EcsRuntime {
     /// transitions instead of the boot-time `UNKNOWN`. Returns the
     /// index into `started` of the container whose exit determined the
     /// task lifetime, its exit code, and the stopCode.
+    ///
+    /// A container with a restart policy that exits is restarted in place
+    /// (`start` on the same container, so its ID, mounts, network namespace
+    /// and published ports stay) when [`RestartTracker::decide`] allows it,
+    /// and then doesn't count as exited.
     pub(super) async fn wait_for_task_exit_with_health(
         &self,
         state: &SharedEcsState,
         account_id: &str,
         task_id: &str,
         started: &[RunningContainer],
+        restarts: &mut RestartContext<'_>,
     ) -> Result<TaskExitOutcome, RuntimeError> {
         let any_essential = started.iter().any(|c| c.essential);
         let mut working: Vec<RunningContainer> = started.to_vec();
@@ -719,10 +815,17 @@ impl EcsRuntime {
                     let err = String::from_utf8_lossy(&wait_out.stderr).to_string();
                     return Err(RuntimeError::Wait(err));
                 }
-                let exit_code: i64 = String::from_utf8_lossy(&wait_out.stdout)
+                let parsed: Option<i64> = String::from_utf8_lossy(&wait_out.stdout)
                     .trim()
                     .parse()
-                    .unwrap_or(-1);
+                    .ok();
+                if self
+                    .try_restart_in_place(state, account_id, task_id, rc, i, parsed, restarts)
+                    .await
+                {
+                    continue;
+                }
+                let exit_code = parsed.unwrap_or(-1);
                 working[i].exit_code = Some(exit_code);
                 if first_exited.is_none() && (rc.essential || !any_essential) {
                     first_exited = Some(i);
@@ -747,66 +850,155 @@ impl EcsRuntime {
         }
     }
 
+    /// Restart an exited container in place if its restart policy allows
+    /// it. Returns whether it is running again.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_restart_in_place(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        rc: &RunningContainer,
+        idx: usize,
+        exit_code: Option<i64>,
+        restarts: &mut RestartContext<'_>,
+    ) -> bool {
+        let Some(tracker) = restarts.trackers.get_mut(idx).and_then(|t| t.as_mut()) else {
+            return false;
+        };
+        let stopping = task_desired_stopped(state, account_id, task_id);
+        if let Err(why) = tracker.decide(exit_code, std::time::Instant::now(), stopping) {
+            tracing::info!(
+                task = %task_id,
+                container = %rc.name,
+                exit_code = ?exit_code,
+                reason = ?why,
+                "container exited and is not restarted under its restart policy"
+            );
+            return false;
+        }
+        let out = self
+            .cli_output(["start", &rc.container_id], CONTAINER_RUN_TIMEOUT)
+            .await;
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                tracing::warn!(
+                    task = %task_id,
+                    container = %rc.name,
+                    error = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "restart policy: could not restart the container"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task = %task_id,
+                    container = %rc.name,
+                    error = %e,
+                    "restart policy: could not restart the container"
+                );
+                return false;
+            }
+        }
+        // A StopTask that landed after the decision found the container
+        // already exited; stop what was just started so it isn't orphaned.
+        if task_desired_stopped(state, account_id, task_id) {
+            let grace = stop_timeout_secs(&restarts.plans[idx].plan);
+            let _ = self
+                .cli_output(
+                    ["stop", "--time", &grace.to_string(), &rc.container_id],
+                    stop_call_timeout(grace),
+                )
+                .await;
+            return false;
+        }
+        tracker.record_restart(std::time::Instant::now());
+        let count = tracker.restart_count;
+        tracing::info!(
+            task = %task_id,
+            container = %rc.name,
+            exit_code = ?exit_code,
+            restart_count = count,
+            "container restarted in place under its restart policy"
+        );
+        // A container that publishes its own awsvpc ports may get new
+        // ephemeral host ports on start: point the ENI's targets at them.
+        if restarts.owns_ports.get(idx).copied().unwrap_or(false) {
+            if let Some(ip) = restarts.eni_ip {
+                self.publish_awsvpc_ports(
+                    account_id,
+                    ip,
+                    &rc.container_id,
+                    &restarts.plans[idx].plan,
+                )
+                .await;
+            }
+        }
+        set_restart_count(state, account_id, task_id, &rc.name, count);
+        self.persist_snapshot().await;
+        true
+    }
+
     /// Block the launch of a dependent container until its upstream
-    /// reaches the requested `dependsOn[].condition`. We poll
-    /// `docker inspect` at a small interval; the wait is bounded by an
-    /// AWS-style timeout (120s by default — long enough for image
-    /// startup but short enough to surface bugs as a clean
-    /// `ContainerStart` failure).
+    /// reaches the requested `dependsOn[].condition`, polling `docker
+    /// inspect` at a small interval.
     ///
-    /// `upstream_has_health_check` is needed for the `HEALTHY` branch:
-    /// when the upstream has no healthCheck, AWS treats `HEALTHY` as
-    /// immediately satisfied (otherwise the dependent would block
-    /// forever, since docker reports `Health.Status` only when the
-    /// container has a HEALTHCHECK directive).
+    /// As on ECS, the wait for `COMPLETE`/`SUCCESS`/`HEALTHY` gives up once
+    /// the upstream has been started for its `startTimeout`; an upstream
+    /// without one is waited on until the condition resolves, the task is
+    /// stopped, or the condition can no longer be met (a `SUCCESS` upstream
+    /// that exited non-zero, a `HEALTHY` upstream that exited).
+    ///
+    /// `HEALTHY` against an upstream with no healthCheck is immediately
+    /// satisfied (docker reports `Health.Status` only for containers with
+    /// a HEALTHCHECK, so there is nothing to wait for).
     pub(super) async fn wait_for_depends_on(
         &self,
-        upstream: &RunningContainer,
-        condition: DependsOnCondition,
-        upstream_has_health_check: bool,
-    ) -> Result<(), RuntimeError> {
-        // Bounded wait — chosen to comfortably cover slow init scripts
-        // without letting a wedged dependency stall a task indefinitely.
-        const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        gate: DependencyGate<'_>,
+    ) -> Result<GateOutcome, RuntimeError> {
         const POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-        // HEALTHY against an upstream without a healthCheck: AWS treats
-        // this as immediately satisfied because there's no probe to
-        // observe. Skip the polling loop entirely so the dependent isn't
-        // wedged forever waiting for a status that docker will never set.
-        if matches!(condition, DependsOnCondition::Healthy) && !upstream_has_health_check {
-            return Ok(());
+        let condition = gate.condition;
+        if matches!(condition, DependsOnCondition::Healthy)
+            && gate.upstream_plan.health_check.is_none()
+        {
+            return Ok(GateOutcome::Met);
         }
-
-        let deadline = std::time::Instant::now() + WAIT_TIMEOUT;
         loop {
-            let inspect = inspect_container_state(&self.cli, &upstream.container_id).await;
-            if let Some(state) = inspect {
-                if condition_is_met(condition, &state) {
-                    return Ok(());
+            if task_desired_stopped(state, account_id, task_id) {
+                return Ok(GateOutcome::TaskStopping);
+            }
+            if let Some(st) = inspect_container_state(&self.cli, &gate.upstream.container_id).await
+            {
+                if condition_is_met(condition, &st) {
+                    return Ok(GateOutcome::Met);
                 }
-                // SUCCESS specifically: if the container exited with a
-                // non-zero code, the gate can never be satisfied. Bail
-                // immediately rather than waiting for the timeout — this
-                // matches ECS's "stoppedReason: dependency failed" path.
-                if matches!(condition, DependsOnCondition::Success)
-                    && state.exited
-                    && state.exit_code != 0
-                {
+                if condition_unresolvable(condition, &st) {
                     return Err(RuntimeError::ContainerStart(format!(
                         "dependency on container {} ({}) failed: upstream exited with code {}",
-                        upstream.name,
-                        DependsOnCondition::Success.as_aws_str(),
-                        state.exit_code,
+                        gate.upstream.name,
+                        condition.as_aws_str(),
+                        st.exit_code,
                     )));
                 }
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(RuntimeError::ContainerStart(format!(
-                    "timed out waiting for container {} to reach condition {}",
-                    upstream.name,
-                    condition.as_aws_str(),
-                )));
+            if restart::dependency_timed_out(
+                condition,
+                gate.upstream_plan.start_timeout,
+                gate.upstream_started,
+                std::time::Instant::now(),
+            ) {
+                return Err(RuntimeError::ContainerStart(
+                    restart::dependency_timeout_reason(
+                        gate.dependent,
+                        &gate.upstream.name,
+                        condition,
+                        gate.upstream_plan.start_timeout.unwrap_or_default(),
+                    ),
+                ));
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -862,12 +1054,22 @@ impl EcsRuntime {
         if list.is_empty() {
             return false;
         }
-        // `docker stop` sends SIGTERM then SIGKILL after a timeout.
-        for (_name, id) in &list {
-            let _ = self
-                .cli_output(["stop", "--time", "10", id], CLI_CALL_TIMEOUT)
-                .await;
-        }
+        // `docker stop` sends SIGTERM then SIGKILL after the container's
+        // `stopTimeout`. As on ECS, StopTask returns while the containers
+        // are still stopping (the wait loop in `run_task_inner` observes the
+        // exits), and they stop in reverse launch order: the launch order is
+        // the `dependsOn` order, which ECS reverses for shutdown.
+        let cli = self.container_cli();
+        tokio::spawn(async move {
+            for (_name, id, grace) in list.iter().rev() {
+                let _ = cli
+                    .output(
+                        ["stop", "--time", &grace.to_string(), id],
+                        stop_call_timeout(*grace),
+                    )
+                    .await;
+            }
+        });
         tracing::info!(task = %task_id, reason = %reason, "ecs task stop requested");
         true
     }
@@ -885,7 +1087,7 @@ impl EcsRuntime {
             .containers
             .read()
             .values()
-            .flat_map(|list| list.iter().map(|(_, id)| id.clone()))
+            .flat_map(|list| list.iter().map(|(_, id, _)| id.clone()))
             .collect();
         for id in ids {
             let _ = self.cli_output(["kill", &id], CLI_CALL_TIMEOUT).await;
