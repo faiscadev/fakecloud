@@ -185,6 +185,11 @@ impl SqsQueue {
         for mut m in messages.into_iter().rev() {
             m.visible_at = None;
             m.receive_count = m.receive_count.saturating_sub(1);
+            // An undone first receive was never a receive at all: it must
+            // not stamp `ApproximateFirstReceiveTimestamp`.
+            if m.receive_count == 0 {
+                m.first_received_at = None;
+            }
             if let Some(handle) = m.receipt_handle.take() {
                 if let Some(list) = self.receipt_handle_map.get_mut(&m.message_id) {
                     list.retain(|h| h != &handle);
@@ -198,15 +203,31 @@ impl SqsQueue {
     }
 
     /// Delete the messages with these ids, wherever they are (in flight, or
-    /// back in the queue after their visibility timeout ran out).
+    /// back in the queue after their visibility timeout ran out). Like
+    /// `DeleteMessage`, the receipt handles stay known, so a consumer that also
+    /// received the message can still delete it with its own handle.
     pub fn delete_messages(&mut self, message_ids: &[String]) {
         self.messages
             .retain(|m| !message_ids.contains(&m.message_id));
         self.inflight
             .retain(|m| !message_ids.contains(&m.message_id));
-        for id in message_ids {
-            self.receipt_handle_map.remove(id);
+    }
+
+    /// Undo the receive of `messages` that are still in flight (see
+    /// [`Self::restore_taken`]); one deleted or purged meanwhile stays gone.
+    pub fn restore_in_flight(&mut self, messages: Vec<SqsMessage>) {
+        let mut restorable = Vec::new();
+        for m in messages {
+            if let Some(i) = self
+                .inflight
+                .iter()
+                .position(|f| f.message_id == m.message_id)
+            {
+                self.inflight.remove(i);
+                restorable.push(m);
+            }
         }
+        self.restore_taken(restorable);
     }
 }
 

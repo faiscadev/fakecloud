@@ -529,11 +529,9 @@ impl SqsLambdaPoller {
         else {
             return;
         };
-        let ids: Vec<&str> = at_rest.iter().map(|m| m.message_id.as_str()).collect();
-        queue
-            .inflight
-            .retain(|m| !ids.contains(&m.message_id.as_str()));
-        queue.restore_taken(at_rest);
+        // Only what is still in flight comes back: a message deleted or purged
+        // while the poller had it is not resurrected.
+        queue.restore_in_flight(at_rest);
     }
 
     /// Hand `batch` to the function and apply the outcome to the queue:
@@ -1771,5 +1769,111 @@ mod tests {
         );
         poller.poll(&mut batching).await;
         assert_eq!(invocations.lock().unwrap().len(), 1);
+    }
+
+    /// A batch held for the batching window was never received: no receive
+    /// count and no `ApproximateFirstReceiveTimestamp` stay behind.
+    #[tokio::test]
+    async fn a_held_batch_leaves_no_first_receive_timestamp() {
+        let (poller, sqs_state, lambda_state) = build_states();
+        reshape(
+            &sqs_state,
+            &lambda_state,
+            vec![queued_message("m1", None)],
+            false,
+            |m| m.maximum_batching_window_in_seconds = Some(60),
+        );
+        let poller = poller.with_lambda_delivery(Arc::new(RecordingLambda {
+            invocations: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let mut batching = BatchingState::default();
+        for _ in 0..3 {
+            poller.poll(&mut batching).await;
+        }
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(queue.messages.len(), 1);
+        assert_eq!(queue.messages[0].receive_count, 0);
+        assert_eq!(queue.messages[0].first_received_at, None);
+        assert!(queue.inflight.is_empty());
+    }
+
+    /// Undoing a receive brings back only what is still in flight: a message
+    /// deleted (or purged) while the poller had it stays deleted.
+    #[tokio::test]
+    async fn undoing_a_receive_does_not_resurrect_a_deleted_message() {
+        let (poller, sqs_state, lambda_state) = build_states();
+        reshape(
+            &sqs_state,
+            &lambda_state,
+            vec![queued_message("gone", None), queued_message("kept", None)],
+            false,
+            |_| {},
+        );
+        let queue_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:k2-poll");
+        let at_rest = {
+            let mut sqs = sqs_state.write();
+            let queue = sqs
+                .default_regional_mut()
+                .queues
+                .values_mut()
+                .next()
+                .unwrap();
+            let taken = queue.take_receivable(10, 30, Utc::now(), &|_| false);
+            queue.commit_taken(&taken.messages);
+            // A DeleteMessage for one of them lands before the undo.
+            queue.delete_messages(&["gone".to_string()]);
+            taken.messages
+        };
+        poller.unreceive(&queue_arn, at_rest);
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        let ids: Vec<&str> = queue
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect();
+        assert_eq!(ids, ["kept"]);
+        assert!(queue.inflight.is_empty());
+    }
+
+    /// The mapping acknowledging a message keeps its receipt handles known,
+    /// as DeleteMessage does, so another consumer's delete with its own valid
+    /// handle still succeeds.
+    #[tokio::test]
+    async fn acknowledging_keeps_the_receipt_handles_known() {
+        let (poller, sqs_state, _lambda_state) = build_states();
+        let poller = poller.with_lambda_delivery(Arc::new(RecordingLambda {
+            invocations: Arc::new(Mutex::new(Vec::new())),
+        }));
+        poller.poll(&mut BatchingState::default()).await;
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        assert!(queue.messages.is_empty() && queue.inflight.is_empty());
+        assert!(
+            queue
+                .receipt_handle_map
+                .get("msg-1")
+                .is_some_and(|handles| !handles.is_empty()),
+            "the acknowledged message's receipt handle is still recognised"
+        );
     }
 }
