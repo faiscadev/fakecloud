@@ -615,6 +615,11 @@ impl ResourceProvisioner {
                 "Function {function_name} does not exist yet — retry once it has been provisioned"
             ));
         }
+        fakecloud_lambda::esm_config::check_consumer_group_unique(
+            &source_configs,
+            state.event_source_mappings.values(),
+        )
+        .map_err(|e| lambda_handler_error(&e))?;
         // An ARN (e.g. an alias's, from `Ref` on an AWS::Lambda::Alias) keeps
         // its qualifier, as CreateEventSourceMapping keeps it, so the mapping
         // invokes that alias.
@@ -658,6 +663,7 @@ impl ResourceProvisioner {
             provisioned_poller_config: source_configs.provisioned_poller,
             logging_config: source_configs.logging,
             tags: fakecloud_lambda::esm_config::tags(props),
+            last_processing_result: None,
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))

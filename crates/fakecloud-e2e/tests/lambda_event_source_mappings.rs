@@ -628,3 +628,76 @@ async fn sqs_scaling_config_round_trips() {
         .unwrap();
     assert!(updated.scaling_config().is_none());
 }
+
+/// A consumer group ID is unique among the Kafka mappings: a second mapping
+/// (MSK or self-managed) naming a group in use is refused, and the group is
+/// free again once its mapping is deleted.
+#[tokio::test]
+async fn kafka_consumer_group_ids_are_unique() {
+    use aws_sdk_lambda::types::{
+        AmazonManagedKafkaEventSourceConfig, EndPointType, EventSourcePosition,
+        SelfManagedEventSource, SelfManagedKafkaEventSourceConfig,
+    };
+
+    let server = TestServer::start().await;
+    let lambda = server.lambda_client().await;
+    create_function(&lambda, "esm-group-fn").await;
+    let cluster = "arn:aws:kafka:us-east-1:123456789012:cluster/orders/0b1c2d3e-1111-2222-3333-444455556666-1";
+    let first = lambda
+        .create_event_source_mapping()
+        .function_name("esm-group-fn")
+        .event_source_arn(cluster)
+        .topics("orders")
+        .starting_position(EventSourcePosition::TrimHorizon)
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("shared-group")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let err = lambda
+        .create_event_source_mapping()
+        .function_name("esm-group-fn")
+        .self_managed_event_source(
+            SelfManagedEventSource::builder()
+                .endpoints(
+                    EndPointType::KafkaBootstrapServers,
+                    vec!["broker:9092".to_string()],
+                )
+                .build(),
+        )
+        .self_managed_kafka_event_source_config(
+            SelfManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("shared-group")
+                .build(),
+        )
+        .topics("orders")
+        .starting_position(EventSourcePosition::TrimHorizon)
+        .send()
+        .await
+        .expect_err("a second mapping joined a group in use");
+    assert_eq!(error_code(err), "ResourceConflictException");
+
+    lambda
+        .delete_event_source_mapping()
+        .uuid(first.uuid().unwrap())
+        .send()
+        .await
+        .unwrap();
+    lambda
+        .create_event_source_mapping()
+        .function_name("esm-group-fn")
+        .event_source_arn(cluster)
+        .topics("orders")
+        .starting_position(EventSourcePosition::TrimHorizon)
+        .amazon_managed_kafka_event_source_config(
+            AmazonManagedKafkaEventSourceConfig::builder()
+                .consumer_group_id("shared-group")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("the group is free once its mapping is deleted");
+}

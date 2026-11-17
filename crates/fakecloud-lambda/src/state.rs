@@ -263,6 +263,11 @@ pub struct EventSourceMapping {
     /// mapping's `EventSourceMappingArn`.
     #[serde(default)]
     pub tags: BTreeMap<String, String>,
+    /// `LastProcessingResult` as the source's poller last reported it
+    /// (`OK`, `PROBLEM: ...`); `None` until it has processed anything,
+    /// which reads as `No records processed`.
+    #[serde(default)]
+    pub last_processing_result: Option<String>,
 }
 
 /// A recorded Lambda invocation from cross-service delivery.
@@ -1071,6 +1076,7 @@ mod tests {
                 provisioned_poller_config: None,
                 logging_config: None,
                 tags: Default::default(),
+                last_processing_result: None,
             },
         );
         legacy.layers.insert(
