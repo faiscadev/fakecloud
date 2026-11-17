@@ -24,7 +24,7 @@ fakecloud implements Amazon Elastic Container Service (ECS) with full API covera
 - **Agent surface** — `SubmitContainerStateChange`, `SubmitTaskStateChange`, `SubmitAttachmentStateChanges`, `DiscoverPollEndpoint`
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (clusters and task definitions)
 - **Account settings** — `PutAccountSetting`, `PutAccountSettingDefault`, `DeleteAccountSetting`, `ListAccountSettings`
-- **Daemons** — `RegisterDaemonTaskDefinition`, `DescribeDaemonTaskDefinition`, `DeleteDaemonTaskDefinition`, `ListDaemonTaskDefinitions`, `CreateDaemon`, `DescribeDaemon`, `UpdateDaemon`, `DeleteDaemon`, `ListDaemons`, `DescribeDaemonDeployments`, `ListDaemonDeployments`, `DescribeDaemonRevisions`. `CreateDaemon` spawns one task per matching capacity-provider host so the daemon scales with the cluster.
+- **Daemons** — `RegisterDaemonTaskDefinition`, `DescribeDaemonTaskDefinition`, `DeleteDaemonTaskDefinition`, `ListDaemonTaskDefinitions`, `CreateDaemon`, `DescribeDaemon`, `UpdateDaemon`, `DeleteDaemon`, `ListDaemons`, `DescribeDaemonDeployments`, `ListDaemonDeployments`, `DescribeDaemonRevisions`. `CreateDaemon` spawns one task per matching capacity-provider host so the daemon scales with the cluster. Daemon tasks run from the daemon task definition (its own family/revision namespace, never a regular task definition of the same family): its container definitions, `volumes[]` and `mountPoints[]` (see [Volumes + mount points](#volumes-mount-points)), and its `pidMode` / `ipcMode` (`shared` joins the host PID / IPC namespace: `--pid host` / `--ipc host` on Docker and Podman, `hostPID` / `hostIPC` on Kubernetes, the same namespace a task definition's `pidMode` / `ipcMode` `host` joins).
 - **Express gateway services** — `CreateExpressGatewayService`, `DescribeExpressGatewayService`, `UpdateExpressGatewayService`, `DeleteExpressGatewayService` (2026 ECS Express deployment controller)
 
 ### Services + rolling deployments
@@ -74,6 +74,11 @@ The runtime translates the following task-definition fields straight into `docke
 - `user` -> `--user`
 - `readonlyRootFilesystem=true` -> `--read-only`
 - `pseudoTerminal=true` -> `--tty`
+- `privileged=true` -> `--privileged`
+- task-definition `pidMode=host` / `ipcMode=host` -> `--pid host` / `--ipc host` (`hostPID` / `hostIPC` on Kubernetes)
+- On Kubernetes, `privileged`, `hostPID` and `hostIPC` are refused by Pod Security levels below `privileged`; such a task stops with `TaskFailedToStart` and the admission error as its reason
+- `systemControls[]` -> `--sysctl <namespace>=<value>`
+- `logConfiguration.logDriver`, while a daemon with a log driver volume is active in the task's cluster and the engine server is Docker Engine: `json-file` -> `--log-driver json-file` plus its `options` as `--log-opt`; any other driver -> the `local` driver (rotating at 1 GiB x 100 files), so fakecloud still reads the container's output for `awslogs` forwarding but it writes no json-file log. On Podman (including a Docker CLI on Podman's compat socket) only an explicit `json-file` is passed, which Podman maps to `k8s-file`. With no such daemon, or an engine that doesn't answer, the container keeps the engine's default logging. The driver is chosen when a container starts, so a container started before a log driver daemon became active keeps the engine default (json-file on Docker) and its log is in the volume even if its `logConfiguration` names another driver
 - `stopTimeout` -> `--stop-timeout` (also bounds the SIGTERM→SIGKILL grace inside force-stop)
 - `volumeConfigurations[]` (per-task EBS attachments) -> volume per task with size, encryption, and FS type recorded on the task's `attachments[]` and bind-mounted at the declared `mountPoint`
 
@@ -153,8 +158,9 @@ Task-definition `volumes[]` and per-container `mountPoints[]` translate into rea
 - **EFS** — `efsVolumeConfiguration.fileSystemId` resolves to a host-side stub directory under `/tmp/fakecloud/efs/<filesystemId>[/<rootDirectory>]`. Multiple tasks targeting the same filesystem id share the stub, so a writer task and a reader task can exchange data the same way they would on real EFS.
 - **FSx for Windows** — `fsxWindowsFileServerVolumeConfiguration.fileSystemId` resolves to an analogous stub under `/tmp/fakecloud/fsx/<filesystemId>/<rootDirectory>`.
 - **Docker named volume** — `dockerVolumeConfiguration` passes the volume name through verbatim; docker creates the named volume on first reference.
+- **Log driver volume** (daemon task definitions) — `logDriverVolumeConfiguration` with `driver=json-file` mounts the container engine's json-file log directory, which the engine reports itself, so it is right when fakecloud runs in a container or the engine in a VM. On Docker that is `<DockerRootDir>/containers`: one directory per container, named with the container ID, holding `<container-id>-json.log` and its rotated files, so a daemon reads the logs of the other tasks' containers that use the json-file driver (or no `logConfiguration`, since json-file is the engine default) and not of those using another driver. That `<id>/<id>-json.log` layout is Docker Engine only. Podman has no separate json-file format (`json-file` is an alias for `k8s-file`), so on Podman the volume holds Podman's own layout, `<GraphRoot>/<driver>-containers`, whose per-container directories hold `userdata/ctr.log`. If the engine doesn't answer, the daemon task fails to start rather than mount a guessed directory.
 
-`mountPoints[].readOnly` is honoured by appending `:ro` to the rendered `-v` flag.
+`mountPoints[].readOnly` is honoured by appending `:ro` to the rendered `-v` flag. On the Kubernetes backend every volume (host binds, EFS/FSx, and log driver volumes included) is a Pod-local `emptyDir` shared by the task's containers, since a Pod gets no host path on the node.
 
 ### Secrets injection
 

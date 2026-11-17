@@ -526,6 +526,28 @@ impl EcsRuntime {
         let mut fallback_reason: Option<String> = None;
         if creds_init.is_some() {
             match &create {
+                // Pod Security refused the task's own privileged / hostPID /
+                // hostIPC: a relaunch without the credentials initContainer
+                // would be refused the same way, so fail with admission's
+                // reason instead of blaming the credentials route. Any other
+                // refusal (a policy aimed at the initContainer, a transient
+                // API error) keeps the full-URI fallback below.
+                Err(e)
+                    if requests_host_access(&resolved)
+                        && pod_security_refuses_host_access(&e.to_string()) =>
+                {
+                    let reason = format!("create task pod: {e}");
+                    mark_pull_stopped(state, account_id, task_id);
+                    // The API server may have accepted the Pod despite the
+                    // error: make sure it's gone, as the fallback path does,
+                    // or keep owning it so StopTask / shutdown still reach it.
+                    if backend.delete_pod_and_wait(&pod_name).await {
+                        backend.pods.write().remove(task_id);
+                    } else {
+                        backend.keep_deleting(task_id, &pod_name);
+                    }
+                    return Err(RuntimeError::ContainerStart(reason));
+                }
                 // Admission refused the Pod (typically NET_ADMIN under a
                 // restrictive Pod Security level).
                 Err(e) => fallback_reason = Some(format!("task pod refused: {e}")),
@@ -909,6 +931,33 @@ fn container_exit_codes(pod: &Pod, map: &[ContainerMapEntry]) -> HashMap<String,
         .collect()
 }
 
+/// Whether the task itself asks for host access a Pod Security level below
+/// `privileged` refuses: a privileged container, or the host PID / IPC
+/// namespace.
+fn requests_host_access(resolved: &[(ContainerPlan, Vec<(String, String)>)]) -> bool {
+    resolved.iter().any(|(p, _)| {
+        p.host_namespaces.pid
+            || p.host_namespaces.ipc
+            || p.linux_parameters.as_ref().is_some_and(|lp| lp.privileged)
+    })
+}
+
+/// Whether a Pod creation error is Pod Security admission refusing host
+/// access itself (`violates PodSecurity "...": host namespaces (hostPID=true)
+/// ... privileged (... securityContext.privileged=true)`), as opposed to the
+/// credentials initContainer's `NET_ADMIN`, another policy engine, or a
+/// transient API error.
+fn pod_security_refuses_host_access(error: &str) -> bool {
+    error.contains("violates PodSecurity")
+        && [
+            "hostPID=true",
+            "hostIPC=true",
+            "securityContext.privileged=true",
+        ]
+        .iter()
+        .any(|field| error.contains(field))
+}
+
 /// Build the Pod for a task. Returns the Pod and the container-name map.
 #[allow(clippy::too_many_arguments)]
 fn build_task_pod(
@@ -981,6 +1030,10 @@ fn build_task_pod(
         })
         .collect();
 
+    // Host namespaces are task-level: every plan carries the same value.
+    let host_pid = resolved.iter().any(|(p, _)| p.host_namespaces.pid);
+    let host_ipc = resolved.iter().any(|(p, _)| p.host_namespaces.ipc);
+
     let pull_secrets = pull_secret.map(|name| {
         vec![LocalObjectReference {
             name: name.to_string(),
@@ -1000,6 +1053,8 @@ fn build_task_pod(
             containers: app_containers,
             volumes: (!pod_volumes.is_empty()).then_some(pod_volumes),
             image_pull_secrets: pull_secrets,
+            host_pid: host_pid.then_some(true),
+            host_ipc: host_ipc.then_some(true),
             ..PodSpec::default()
         }),
         ..Pod::default()
@@ -1197,6 +1252,9 @@ mod tests {
             tty: false,
             interactive: false,
             readonly_rootfs: false,
+            host_namespaces: Default::default(),
+            log_configuration: None,
+            log_argv: vec![],
         }
     }
 
@@ -1387,12 +1445,73 @@ mod tests {
             container_path: "/data".to_string(),
             read_only: false,
             cleanup_on_stop: true,
+            log_driver: None,
         };
         a.volume_mounts = vec![vm.clone()];
         b.volume_mounts = vec![vm];
         let (pod, _) = build(&[(a, vec![]), (b, vec![])]);
         let vols = pod.spec.unwrap().volumes.unwrap();
         assert_eq!(vols.len(), 1, "same source should share one volume");
+    }
+
+    #[test]
+    fn only_a_pod_security_refusal_of_host_access_short_circuits() {
+        // Pod Security refusing the task's own host access.
+        assert!(pod_security_refuses_host_access(
+            r#"pods "fakecloud-ecs-t" is forbidden: violates PodSecurity "baseline:latest": host namespaces (hostPID=true, hostIPC=true)"#
+        ));
+        assert!(pod_security_refuses_host_access(
+            r#"pods "p" is forbidden: violates PodSecurity "baseline:latest": privileged (container "agent" must not set securityContext.privileged=true)"#
+        ));
+        // Pod Security refusing only the credentials initContainer.
+        assert!(!pod_security_refuses_host_access(
+            r#"pods "p" is forbidden: violates PodSecurity "baseline:latest": non-default capabilities (container "fakecloud-ecs-creds" must not include "NET_ADMIN" in securityContext.capabilities.add)"#
+        ));
+        // Another policy engine, or a transient API error.
+        assert!(!pod_security_refuses_host_access(
+            r#"admission webhook "validation.gatekeeper.sh" denied the request: hostPID=true is not allowed"#
+        ));
+        assert!(!pod_security_refuses_host_access(
+            "connection reset by peer"
+        ));
+    }
+
+    #[test]
+    fn host_access_is_privileged_or_a_host_namespace() {
+        assert!(!requests_host_access(&[(plan("app", true), vec![])]));
+        let mut pid = plan("agent", true);
+        pid.host_namespaces.pid = true;
+        assert!(requests_host_access(&[
+            (plan("app", true), vec![]),
+            (pid, vec![])
+        ]));
+        let mut ipc = plan("agent", true);
+        ipc.host_namespaces.ipc = true;
+        assert!(requests_host_access(&[(ipc, vec![])]));
+        let mut privileged = plan("agent", true);
+        privileged.linux_parameters = Some(crate::runtime::LinuxParameters {
+            privileged: true,
+            ..Default::default()
+        });
+        assert!(requests_host_access(&[(privileged, vec![])]));
+    }
+
+    #[test]
+    fn host_namespaces_set_host_pid_and_ipc_on_the_pod() {
+        let (pod, _) = build(&[(plan("app", true), vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.host_pid, None);
+        assert_eq!(spec.host_ipc, None);
+
+        let mut agent = plan("agent", true);
+        agent.host_namespaces = crate::runtime::HostNamespaces {
+            pid: true,
+            ipc: true,
+        };
+        let (pod, _) = build(&[(agent, vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.host_pid, Some(true));
+        assert_eq!(spec.host_ipc, Some(true));
     }
 
     fn creds_init() -> CredsInit {
