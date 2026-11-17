@@ -136,7 +136,7 @@ impl EcsRuntime {
     /// if the task record is dropped (reset, stack delete) before the
     /// containers are gone. A task already STOPPED keeps its status.
     pub fn begin_stopping(&self, state: &SharedEcsState, account_id: &str, task_id: &str) {
-        let (targets, teardown, was_live) = {
+        let (targets, teardown) = {
             let mut accounts = state.write();
             let Some(s) = accounts.get_mut(account_id) else {
                 return;
@@ -147,7 +147,11 @@ impl EcsRuntime {
             };
             task.desired_status = "STOPPED".into();
             task.stopping_at = task.stopping_at.or(Some(Utc::now()));
-            let was_live = task.last_status != "STOPPED";
+            // A STOPPED record already released what it held; its targets
+            // and ENI IP may belong to a live replacement by now.
+            if task.last_status == "STOPPED" {
+                return;
+            }
             let task = task.clone();
             let teardown = TaskTeardown {
                 region: fakecloud_aws::arn::region_of(&task.task_arn)
@@ -156,17 +160,18 @@ impl EcsRuntime {
                 eni_ip: super::eni::task_eni_ip(&task),
                 eni_id: super::eni::task_eni_id(&task),
             };
-            (compute_elbv2_targets(s, &task), teardown, was_live)
+            (compute_elbv2_targets(s, &task), teardown)
         };
         {
             let mut teardowns = self.teardowns.lock();
-            if teardowns.contains_key(task_id) {
-                // Already stopping: its targets were deregistered then.
+            if teardowns.contains_key(task_id) || self.released.lock().contains(task_id) {
+                // Already stopping (its targets were deregistered then), or
+                // already released.
                 return;
             }
             teardowns.insert(task_id.to_string(), teardown);
         }
-        if was_live && !targets.is_empty() {
+        if !targets.is_empty() {
             set_last_status(state, account_id, task_id, "DEACTIVATING");
         }
         if let Some(bus) = &self.delivery_bus {
@@ -174,9 +179,13 @@ impl EcsRuntime {
                 bus.deregister_elbv2_targets(account_id, &tg_arn, tg_targets);
             }
         }
-        if was_live {
-            set_last_status(state, account_id, task_id, "STOPPING");
-        }
+        set_last_status(state, account_id, task_id, "STOPPING");
+    }
+
+    /// Whether `task_id` started stopping (its targets were deregistered or
+    /// its network released): it must not register targets again.
+    pub(crate) fn stopping_began(&self, task_id: &str) -> bool {
+        self.teardowns.lock().contains_key(task_id) || self.released.lock().contains(task_id)
     }
 
     /// Release a stopped task's network: its load balancer targets (if
@@ -192,6 +201,11 @@ impl EcsRuntime {
         task_id: &str,
     ) {
         let captured = self.teardowns.lock().remove(task_id);
+        // Exactly once: a second release could remove the route or ENI of
+        // a replacement that reused the address.
+        if !self.released.lock().insert(task_id.to_string()) {
+            return;
+        }
         let teardown = match captured {
             Some(t) => t,
             None => {
@@ -300,8 +314,9 @@ impl EcsRuntime {
 
     /// [`Self::stop_task`], then wait until the containers have stopped and
     /// the background execution has finalized the task (STOPPED, its load
-    /// balancer targets and ENI released). For teardown paths that recreate
-    /// or drop what the task used (reset, stack deletion, force-stop).
+    /// balancer targets and ENI released), each container getting its full
+    /// `stopTimeout`. For background teardown that drops the task record
+    /// afterwards (stack deletion).
     pub async fn stop_task_and_wait(
         &self,
         state: &SharedEcsState,
@@ -316,7 +331,10 @@ impl EcsRuntime {
             .get(task_id)
             .cloned()
             .unwrap_or_default();
-        let total_grace = list.iter().map(|c| c.stop_timeout).sum::<u32>();
+        let total_grace: u64 = match &self.k8s {
+            Some(k) => k.grace_secs(task_id).await.unwrap_or(0),
+            None => list.iter().map(|c| u64::from(c.stop_timeout)).sum(),
+        };
         if self.k8s.is_some() {
             self.stop_task(state, account_id, task_id, reason).await;
         } else {
@@ -324,20 +342,71 @@ impl EcsRuntime {
             self.abort_execs(Some(task_id));
             stop_in_waves(self.container_cli(), list).await;
         }
-        let Some(mut done) = done else {
-            // The execution was already over (and released the network):
-            // drop what `begin_stopping` captured just now.
-            self.teardowns.lock().remove(task_id);
-            return;
+        // The execution finishes within seconds of the last container exit;
+        // a wedged daemon must not hang the caller.
+        let budget = Duration::from_secs(total_grace) + CLI_CALL_TIMEOUT * 2;
+        self.await_finalize(state, account_id, task_id, done, budget)
+            .await;
+    }
+
+    /// Kill every container behind a task at once (SIGKILL; on Kubernetes,
+    /// the Pod deleted with no grace period) and wait, a few seconds at
+    /// most, for the execution to finalize it. For teardown and force paths
+    /// that must answer promptly (reset, force-stop), never waiting out a
+    /// `stopTimeout`.
+    pub async fn kill_task_and_wait(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+    ) {
+        let done = self.task_done.lock().get(task_id).cloned();
+        self.begin_stopping(state, account_id, task_id);
+        self.abort_execs(Some(task_id));
+        if let Some(k) = &self.k8s {
+            k.kill_task(task_id).await;
+        } else {
+            let list = self
+                .containers
+                .read()
+                .get(task_id)
+                .cloned()
+                .unwrap_or_default();
+            let mut kills = tokio::task::JoinSet::new();
+            for c in list {
+                let cli = self.container_cli();
+                kills.spawn(async move {
+                    let _ = cli
+                        .output(["kill", &c.container_id], KILL_CALL_TIMEOUT)
+                        .await;
+                });
+            }
+            kills.join_all().await;
+        }
+        self.await_finalize(state, account_id, task_id, done, KILL_FINALIZE_WAIT)
+            .await;
+    }
+
+    /// Wait up to `budget` for the task's execution (`done`) to finalize it;
+    /// release its network here when the execution never ran or didn't
+    /// finish in time. The release runs exactly once either way.
+    async fn await_finalize(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        done: Option<tokio::sync::watch::Receiver<bool>>,
+        budget: Duration,
+    ) {
+        let finished = match done {
+            Some(mut done) => tokio::time::timeout(budget, done.wait_for(|finished| *finished))
+                .await
+                .is_ok_and(|r| r.is_ok()),
+            // No execution in flight: it is over (and released the network
+            // already), or it never started (a reset before `run_task`),
+            // in which case what `begin_stopping` captured is released now.
+            None => false,
         };
-        // Bounded: the execution finishes within seconds of the last
-        // container exit; a wedged daemon must not hang a reset.
-        let budget = Duration::from_secs(total_grace.into()) + CLI_CALL_TIMEOUT * 2;
-        let finished = tokio::time::timeout(budget, done.wait_for(|finished| *finished))
-            .await
-            .is_ok_and(|r| r.is_ok());
-        // An execution that finished released the network itself; one that
-        // didn't in time (a wedged daemon) has it released here.
         if !finished {
             let region = task_region(state, account_id, task_id);
             self.finish_teardown(state, account_id, &region, task_id);
@@ -345,8 +414,9 @@ impl EcsRuntime {
     }
 
     /// Introspection force-stop: request the stop as `StopTask` does (so a
-    /// restart policy doesn't bring the containers back) and wait until the
-    /// task is STOPPED. Returns false when no account has the task.
+    /// restart policy doesn't bring the containers back), kill the
+    /// containers, and answer once the task is STOPPED (bounded to a few
+    /// seconds). Returns false when no account has the task.
     pub async fn force_stop_task(
         &self,
         state: &SharedEcsState,
@@ -364,11 +434,19 @@ impl EcsRuntime {
             request_task_stop(task, reason);
             account_id
         };
-        self.stop_task_and_wait(state, &account_id, task_id, reason)
-            .await;
+        self.kill_task_and_wait(state, &account_id, task_id).await;
         true
     }
 }
+
+/// Budget for one `docker kill`.
+const KILL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a kill waits for the execution to finalize the task: a killed
+/// container's exit is seen within one 200ms poll, and the finalize (logs,
+/// `rm`, state) takes about a second more on a healthy daemon. Short enough
+/// for an SDK's request timeout (5 seconds in the Python SDK).
+const KILL_FINALIZE_WAIT: Duration = Duration::from_secs(3);
 
 #[cfg(test)]
 mod tests {
@@ -474,6 +552,87 @@ mod tests {
         let state = state_with(task);
         rt.begin_stopping(&state, "000000000000", "t1");
         assert_eq!(status(&state).0, "STOPPED");
+        // Nothing captured from the stale record (its targets / ENI IP may
+        // belong to a replacement now).
+        assert!(rt.teardowns.lock().is_empty());
+        assert!(!rt.stopping_began("t1"));
+    }
+
+    fn running_awsvpc_task(id: &str, ip: &str) -> crate::state::Task {
+        let mut task = crate::runtime::tests::make_task(id);
+        task.last_status = "RUNNING".into();
+        super::super::eni::attach_eni(
+            &mut task,
+            "att-1",
+            &format!("eni-{id}"),
+            "subnet-1",
+            ip.parse().unwrap(),
+            "02:00:00:00:00:01",
+        );
+        task
+    }
+
+    /// A task's network is released once: a second release (a late
+    /// finalize after a reset's fallback) must not remove the route of a
+    /// replacement that reused the ENI IP.
+    #[test]
+    fn network_is_released_exactly_once() {
+        use fakecloud_core::dataplane::{register_target, registered_target, Endpoint};
+        let acct = "000000000000";
+        let rt = EcsRuntime::bare_for_tests();
+        let state = state_with(running_awsvpc_task("t1", "10.9.0.7"));
+        register_target(acct, "10.9.0.7", 80, Endpoint::new("127.0.0.1", 40001));
+        rt.begin_stopping(&state, acct, "t1");
+        rt.finish_teardown(&state, acct, "us-east-1", "t1");
+        assert!(registered_target(acct, "10.9.0.7", 80).is_none());
+        // A replacement reuses the IP; the old task's late release is a no-op.
+        register_target(acct, "10.9.0.7", 80, Endpoint::new("127.0.0.1", 40002));
+        rt.finish_teardown(&state, acct, "us-east-1", "t1");
+        rt.deprovision(&state, acct, "us-east-1", "t1");
+        assert!(registered_target(acct, "10.9.0.7", 80).is_some());
+        assert!(rt.stopping_began("t1"));
+    }
+
+    /// A reset that drops a task before its execution ever started still
+    /// releases what the task held (its precreated ENI).
+    #[tokio::test]
+    async fn kill_releases_a_task_that_never_ran() {
+        use fakecloud_core::dataplane::{register_target, registered_target, Endpoint};
+        let acct = "000000000000";
+        let rt = EcsRuntime::bare_for_tests();
+        let mut task = running_awsvpc_task("t2", "10.9.0.8");
+        task.last_status = "PENDING".into();
+        task.task_id = "t2".into();
+        let state = state_with(task);
+        register_target(acct, "10.9.0.8", 80, Endpoint::new("127.0.0.1", 40003));
+        rt.begin_stopping(&state, acct, "t2");
+        state.write().get_mut(acct).unwrap().tasks.remove("t2");
+        let started = std::time::Instant::now();
+        rt.kill_task_and_wait(&state, acct, "t2").await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(rt.teardowns.lock().is_empty());
+        assert!(registered_target(acct, "10.9.0.8", 80).is_none());
+    }
+
+    #[test]
+    fn a_scheduler_stop_keeps_its_stop_code() {
+        let mut task = crate::runtime::tests::make_task("t1");
+        task.stop_code = Some("ServiceSchedulerInitiated".into());
+        task.stopped_reason = Some("Scaling activity initiated by (deployment ecs-svc/1)".into());
+        let state = state_with(task);
+        assert_eq!(
+            requested_stop(&state, "000000000000", "t1"),
+            Some((
+                "ServiceSchedulerInitiated",
+                Some("Scaling activity initiated by (deployment ecs-svc/1)".into())
+            ))
+        );
+        let mut exited = crate::runtime::tests::make_task("t1");
+        exited.stop_code = Some("EssentialContainerExited".into());
+        assert_eq!(
+            requested_stop(&state_with(exited), "000000000000", "t1"),
+            None
+        );
     }
 
     /// The network teardown is captured when the task starts stopping, so

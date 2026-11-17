@@ -466,18 +466,16 @@ impl ResetState {
         let tasks = take_and_reset(&mut self.ecs.write(), account, rows);
         if let Some(rt) = self.ecs_runtime.clone() {
             if !tasks.is_empty() {
-                // Stop them all at once, each waiting until its containers
-                // are gone and its network is released, so nothing reset
-                // can race a recreate under the same name or host port.
+                // Kill them all at once (a reset never waits out a
+                // stopTimeout), each waiting until its containers are gone
+                // and its network is released, so nothing reset can race a
+                // recreate under the same name or host port.
                 let ecs = self.ecs.clone();
                 teardown.push(async move {
                     let mut stops = tokio::task::JoinSet::new();
                     for (acct, task) in tasks {
                         let (rt, ecs) = (rt.clone(), ecs.clone());
-                        stops.spawn(async move {
-                            rt.stop_task_and_wait(&ecs, &acct, &task, "fakecloud reset")
-                                .await
-                        });
+                        stops.spawn(async move { rt.kill_task_and_wait(&ecs, &acct, &task).await });
                     }
                     stops.join_all().await;
                 });

@@ -743,12 +743,11 @@ impl EcsRuntime {
         // the awslogs group/stream has been materialised.
         self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
         let exit_code = wait_outcome.exit_code;
-        // A StopTask (or scale-down) keeps its UserInitiated stop code and
+        // A StopTask (UserInitiated) or a scheduler stop (scale-down, service
+        // deletion: ServiceSchedulerInitiated) keeps its stop code and
         // reason, as on ECS, rather than the container exit it caused.
-        let (stop_code, stopped_reason) = match user_initiated_stop(state, account_id, task_id) {
-            Some(reason) => ("UserInitiated", reason),
-            None => (wait_outcome.stop_code, None),
-        };
+        let (stop_code, stopped_reason) =
+            requested_stop(state, account_id, task_id).unwrap_or((wait_outcome.stop_code, None));
         self.deprovision(state, account_id, &region, task_id);
         finalize_stopped_multi(
             state,

@@ -1421,6 +1421,43 @@ pub(crate) fn recompute_service_counts(
     }
 }
 
+/// Stop code ECS gives tasks the service scheduler stops (scale-down,
+/// service deletion).
+pub(crate) const SERVICE_SCHEDULER_STOP_CODE: &str = "ServiceSchedulerInitiated";
+
+/// The `stoppedReason` ECS gives a task the service scheduler stops:
+/// "Scaling activity initiated by (deployment <id>)", naming the service's
+/// primary deployment.
+pub(crate) fn scheduler_stop_reason(
+    state: &EcsState,
+    cluster_name: &str,
+    service_name: &str,
+) -> String {
+    let deployment = state
+        .services
+        .get(&EcsState::service_key(cluster_name, service_name))
+        .and_then(|svc| {
+            svc.deployments
+                .iter()
+                .find(|d| d.status == "PRIMARY")
+                .or_else(|| svc.deployments.first())
+        })
+        .map(|d| d.deployment_id.clone());
+    match deployment {
+        Some(id) => format!("Scaling activity initiated by (deployment {id})"),
+        None => "Scaling activity initiated by (service scheduler)".to_string(),
+    }
+}
+
+/// Record a service-scheduler stop on `task` (desired STOPPED, stoppingAt,
+/// `ServiceSchedulerInitiated` with `reason`).
+pub(crate) fn mark_scheduler_stop(task: &mut crate::state::Task, reason: &str) {
+    task.desired_status = "STOPPED".into();
+    task.stopping_at = Some(Utc::now());
+    task.stop_code = Some(SERVICE_SCHEDULER_STOP_CODE.into());
+    task.stopped_reason = Some(reason.to_string());
+}
+
 /// Whether a task `lastStatus` is one of the ECS task lifecycle states
 /// before STOPPED: PROVISIONING, PENDING, ACTIVATING, RUNNING, and the
 /// stopping ones (DEACTIVATING, STOPPING, DEPROVISIONING), during which the

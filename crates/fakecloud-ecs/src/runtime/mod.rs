@@ -105,6 +105,9 @@ pub struct EcsRuntime {
     /// Per-task network teardown captured when a task starts stopping (see
     /// [`stopping`]), so it completes even once the task record is gone.
     teardowns: parking_lot::Mutex<std::collections::HashMap<String, TaskTeardown>>,
+    /// Tasks whose network has been released ([`stopping`]), so it is
+    /// released exactly once. Task IDs are never reused.
+    released: parking_lot::Mutex<std::collections::HashSet<String>>,
     /// Per-task "execution finished" signals: set once the background
     /// execution has finalized the task (STOPPED or failed).
     task_done:
@@ -212,6 +215,7 @@ impl EcsRuntime {
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
             teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
             task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -246,6 +250,7 @@ impl EcsRuntime {
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
             teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
             task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -808,17 +813,23 @@ pub(crate) fn task_desired_stopped(
     }
 }
 
-/// The reason of a user-requested stop (`StopTask`, a scale-down, a
-/// deletion), which keeps stop code `UserInitiated` on the stopped task;
-/// `None` when the task stopped on its own.
-pub(crate) fn user_initiated_stop(
+/// The stop code and reason of a requested stop (`UserInitiated` for
+/// `StopTask`, `ServiceSchedulerInitiated` for a scale-down or service
+/// deletion), which the stopped task keeps; `None` when the task stopped on
+/// its own.
+pub(crate) fn requested_stop(
     state: &SharedEcsState,
     account_id: &str,
     task_id: &str,
-) -> Option<Option<String>> {
+) -> Option<(&'static str, Option<String>)> {
     let accounts = state.read();
     let task = accounts.get(account_id)?.tasks.get(task_id)?;
-    (task.stop_code.as_deref() == Some("UserInitiated")).then(|| task.stopped_reason.clone())
+    let code = match task.stop_code.as_deref()? {
+        "UserInitiated" => "UserInitiated",
+        "ServiceSchedulerInitiated" => "ServiceSchedulerInitiated",
+        _ => return None,
+    };
+    Some((code, task.stopped_reason.clone()))
 }
 
 /// The region a task runs in: the region its ARN names, else the ECS state's
@@ -2432,6 +2443,7 @@ impl EcsRuntime {
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
             teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
             task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            released: parking_lot::Mutex::new(std::collections::HashSet::new()),
         }
     }
 }

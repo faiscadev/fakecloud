@@ -1006,6 +1006,32 @@ pub(super) mod multi_container_tests {
     /// A stopping task (DEACTIVATING / STOPPING / DEPROVISIONING) is no
     /// longer in a service's runningCount, but still blocks DeleteCluster and
     /// keeps a deleted service draining, as on ECS.
+    /// Scheduler-driven stops carry ServiceSchedulerInitiated and the
+    /// "Scaling activity" reason naming the primary deployment.
+    #[test]
+    fn scheduler_stops_are_service_scheduler_initiated() {
+        let svc = fresh_service();
+        insert_task(&svc, "a", "prod");
+        let mut accounts = svc.state.write();
+        let st = accounts.get_mut("000000000000").unwrap();
+        assert_eq!(
+            crate::service::helpers::scheduler_stop_reason(st, "prod", "missing"),
+            "Scaling activity initiated by (service scheduler)"
+        );
+        let task = st.tasks.get_mut("a").unwrap();
+        crate::service::helpers::mark_scheduler_stop(
+            task,
+            "Scaling activity initiated by (deployment ecs-svc/1)",
+        );
+        assert_eq!(task.desired_status, "STOPPED");
+        assert_eq!(task.stop_code.as_deref(), Some("ServiceSchedulerInitiated"));
+        assert_eq!(
+            task.stopped_reason.as_deref(),
+            Some("Scaling activity initiated by (deployment ecs-svc/1)")
+        );
+        assert!(task.stopping_at.is_some());
+    }
+
     #[test]
     fn stopping_tasks_leave_running_count_but_stay_live() {
         let svc = fresh_service();

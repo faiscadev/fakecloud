@@ -161,11 +161,11 @@ pub(super) struct K8sTaskBackend {
     /// task_id -> Pod name, so StopTask/stop_all can find the Pod.
     pods: std::sync::Arc<RwLock<HashMap<String, String>>>,
     /// Whether the API server runs native sidecars (restartable
-    /// initContainers, Kubernetes 1.29+), detected once at startup. An
-    /// older server drops the initContainer `restartPolicy`, which would
-    /// leave a long-running container blocking the Pod as a plain
-    /// initContainer.
-    native_sidecars: bool,
+    /// initContainers, Kubernetes 1.29+), detected once at startup (assumed
+    /// when the version can't be read), and turned off for good when the API
+    /// server refuses a Pod for its initContainer `restartPolicy`. An older
+    /// server that silently drops the field is caught by the version check.
+    native_sidecars: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for K8sTaskBackend {
@@ -187,12 +187,14 @@ impl K8sTaskBackend {
         let native_sidecars = match client.client().apiserver_version().await {
             Ok(v) => supports_native_sidecars(&v.major, &v.minor),
             Err(e) => {
+                // Assume a current cluster; a refusal of a sidecar Pod turns
+                // them off (see `sidecars_refused`).
                 tracing::warn!(
                     error = %e,
-                    "could not read the Kubernetes API server version; ECS container restart \
-                     policies use a Pod restartPolicy of Always instead of native sidecars"
+                    "could not read the Kubernetes API server version; assuming native sidecars \
+                     for ECS container restart policies"
                 );
-                false
+                true
             }
         };
         tracing::info!(
@@ -211,7 +213,7 @@ impl K8sTaskBackend {
             pull_secret: env.pull_secret,
             pod_config,
             pods: std::sync::Arc::new(RwLock::new(HashMap::new())),
-            native_sidecars,
+            native_sidecars: std::sync::atomic::AtomicBool::new(native_sidecars),
         })
     }
 
@@ -228,6 +230,48 @@ impl K8sTaskBackend {
             }
             None => false,
         }
+    }
+
+    /// Stop using native sidecars: the API server refused one.
+    fn disable_native_sidecars(&self) {
+        if self
+            .native_sidecars
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                "the Kubernetes API server refused a native sidecar (initContainer \
+                 restartPolicy); ECS container restart policies now use a Pod restartPolicy \
+                 of Always"
+            );
+        }
+    }
+
+    /// Delete a task's Pod with no grace period (SIGKILL), for teardown
+    /// paths that must not wait out the containers' stopTimeout.
+    pub(super) async fn kill_task(&self, task_id: &str) -> bool {
+        let Some(name) = self.pods.read().get(task_id).cloned() else {
+            return false;
+        };
+        let params = kube::api::DeleteParams {
+            grace_period_seconds: Some(0),
+            ..Default::default()
+        };
+        if let Err(e) = self.client.pods().delete(&name, &params).await {
+            if !is_not_found(&e) {
+                tracing::warn!(pod = %name, error = %e, "could not kill ECS task pod");
+            }
+        }
+        true
+    }
+
+    /// The task Pod's `terminationGracePeriodSeconds` (its longest
+    /// `stopTimeout`), if the Pod is known.
+    pub(super) async fn grace_secs(&self, task_id: &str) -> Option<u64> {
+        let name = self.pods.read().get(task_id).cloned()?;
+        let pod = self.client.pods().get(&name).await.ok()?;
+        pod.spec?
+            .termination_grace_period_seconds
+            .and_then(|g| u64::try_from(g).ok())
     }
 
     pub(super) async fn stop_all(&self) {
@@ -550,7 +594,9 @@ impl EcsRuntime {
                 task_id,
                 &with_creds,
                 creds_init,
-                backend.native_sidecars,
+                backend
+                    .native_sidecars
+                    .load(std::sync::atomic::Ordering::Relaxed),
             );
             pod_config.apply(&mut pod);
             (pod, map)
@@ -566,6 +612,12 @@ impl EcsRuntime {
 
         mark_pull_started(state, account_id, task_id);
         let mut create = backend.client.create_pod(&pod).await;
+        if create_refused_sidecars(&create, &pod) {
+            backend.disable_native_sidecars();
+            let (pod, map) = build(&pod_name, creds_init.as_ref());
+            container_map = map;
+            create = backend.client.create_pod(&pod).await;
+        }
         let mut fallback_reason: Option<String> = None;
         if creds_init.is_some() {
             match &create {
@@ -664,6 +716,12 @@ impl EcsRuntime {
                     .write()
                     .insert(task_id.to_string(), pod_name.clone());
                 create = backend.client.create_pod(&pod).await;
+                if create_refused_sidecars(&create, &pod) {
+                    backend.disable_native_sidecars();
+                    let (pod, map) = build(&pod_name, None);
+                    container_map = map;
+                    create = backend.client.create_pod(&pod).await;
+                }
             }
         }
         mark_pull_stopped(state, account_id, task_id);
@@ -797,7 +855,12 @@ impl EcsRuntime {
                 return Err(RuntimeError::ContainerStart(reason));
             }
 
-            if !marked_running && (phase == "Running" || phase == "Succeeded" || phase == "Failed")
+            // A task stopped while its Pod started never reaches RUNNING (nor
+            // registers load balancer targets its stop already removed); the
+            // Pod's deletion finalizes it.
+            if !marked_running
+                && !stopping
+                && (phase == "Running" || phase == "Succeeded" || phase == "Failed")
             {
                 mark_running_multi(state, account_id, task_id, &started);
                 // RestartCount is reported only for containers with a policy.
@@ -1337,6 +1400,31 @@ fn restart_layout(
     } else {
         RestartLayout::PodAlways
     }
+}
+
+/// Whether a Pod creation failed because the API server doesn't accept a
+/// `restartPolicy` on initContainers (no native sidecars), for a Pod that
+/// has one.
+fn create_refused_sidecars<E: std::fmt::Display>(create: &Result<(), E>, pod: &Pod) -> bool {
+    let has_sidecar = pod
+        .spec
+        .as_ref()
+        .and_then(|s| s.init_containers.as_ref())
+        .is_some_and(|inits| inits.iter().any(|c| c.restart_policy.is_some()));
+    match create {
+        Err(e) if has_sidecar => sidecars_refused(&e.to_string()),
+        _ => false,
+    }
+}
+
+/// Whether an API error refuses an initContainer `restartPolicy`, as a
+/// server without native sidecars does (`spec.initContainers[0].restartPolicy:
+/// Forbidden: may not be set for init containers`, or an unknown field).
+fn sidecars_refused(error: &str) -> bool {
+    error.contains("restartPolicy")
+        && (error.contains("initContainers")
+            || error.contains("Forbidden")
+            || error.contains("unknown field"))
 }
 
 /// Whether an API server `major`/`minor` (as `/version` reports them, e.g.
@@ -2022,6 +2110,30 @@ mod tests {
         assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
         assert!(spec.init_containers.is_none());
         assert!(spec.containers.iter().all(|c| c.restart_policy.is_none()));
+    }
+
+    /// A Pod refused for its initContainer restartPolicy (a server without
+    /// native sidecars) is rebuilt without them; other refusals aren't.
+    #[test]
+    fn sidecar_refusal_is_recognized_only_for_sidecar_pods() {
+        let app = plan("app", true);
+        let mut agent = plan("agent", false);
+        agent.restart_policy = Some(restart_policy(60));
+        let (with_sidecar, _) = build(&[(app.clone(), vec![]), (agent, vec![])]);
+        let (plain, _) = build(&[(app, vec![])]);
+        let refused: Result<(), String> = Err(
+            "Pod \"p\" is invalid: spec.initContainers[0].restartPolicy: Forbidden: may not be \
+             set for init containers"
+                .into(),
+        );
+        assert!(create_refused_sidecars(&refused, &with_sidecar));
+        assert!(!create_refused_sidecars(&refused, &plain));
+        let other: Result<(), String> = Err("violates PodSecurity \"restricted\"".into());
+        assert!(!create_refused_sidecars(&other, &with_sidecar));
+        assert!(!create_refused_sidecars(
+            &Ok::<(), String>(()),
+            &with_sidecar
+        ));
     }
 
     #[test]

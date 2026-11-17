@@ -19,6 +19,11 @@ impl EcsRuntime {
         let Some(task) = s.tasks.get(task_id) else {
             return;
         };
+        // A task already stopping was taken out of its target groups (and
+        // nothing would take a late registration out again).
+        if task.desired_status == "STOPPED" || self.stopping_began(task_id) {
+            return;
+        }
         let targets = compute_elbv2_targets(s, task);
         drop(accounts);
         for (tg_arn, tg_targets) in targets {

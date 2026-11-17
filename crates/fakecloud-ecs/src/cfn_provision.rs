@@ -91,39 +91,61 @@ pub async fn cfn_launch_service_tasks(
     }
 }
 
-/// Stop the REAL tasks (containers) backing a CFN-provisioned ECS service when
-/// its stack is deleted (or the service is removed by a stack update). Mirrors
-/// the direct `DeleteService` teardown (`stop_task` per running task) so a stack
-/// delete does not leak the running task containers. The service record itself
-/// has already been removed by the synchronous provisioner delete; this reaps
-/// the orphaned task containers and drops their records. Intended to be
-/// `tokio::spawn`ed by the CloudFormation delete drain.
-pub async fn cfn_stop_service_tasks(
+/// The live tasks (not STOPPED) of `cluster_name`, of its service
+/// `service_name` only when given.
+pub fn cfn_live_tasks(
+    state: &SharedEcsState,
+    account_id: &str,
+    cluster_name: &str,
+    service_name: Option<&str>,
+) -> Vec<String> {
+    let accounts = state.read();
+    let Some(st) = accounts.get(account_id) else {
+        return Vec::new();
+    };
+    let service_tag = service_name.map(|s| format!("ecs-svc/{s}"));
+    st.tasks
+        .iter()
+        .filter(|(_, t)| {
+            t.cluster_name == cluster_name
+                && t.last_status != "STOPPED"
+                && service_tag
+                    .as_deref()
+                    .is_none_or(|tag| t.started_by.as_deref() == Some(tag))
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Start stopping `task_ids` for a stack deletion, while the service and
+/// cluster records they belong to still exist: their load balancer targets
+/// (found through the service) are deregistered and their ENIs captured for
+/// release, so removing those records next doesn't leak either. The
+/// containers are then stopped by [`cfn_stop_tasks`].
+pub fn cfn_begin_stopping_tasks(
+    state: &SharedEcsState,
+    runtime: &EcsRuntime,
+    account_id: &str,
+    task_ids: &[String],
+) {
+    for id in task_ids {
+        runtime.begin_stopping(state, account_id, id);
+    }
+}
+
+/// Stop the REAL tasks (containers) of a CFN-provisioned ECS service or
+/// cluster when its stack is deleted (or the resource is removed by a stack
+/// update), so a stack delete does not leak the running task containers.
+/// `task_ids` were captured (and [`cfn_begin_stopping_tasks`] run) by the
+/// synchronous provisioner delete before it removed the service / cluster
+/// record; this stops the containers and drops the task records. Intended
+/// to be `tokio::spawn`ed by the CloudFormation delete drain.
+pub async fn cfn_stop_tasks(
     state: SharedEcsState,
     runtime: Arc<EcsRuntime>,
-    cluster_name: String,
-    service_name: String,
+    task_ids: Vec<String>,
     account_id: String,
 ) {
-    let task_ids = {
-        let mut accounts = state.write();
-        let Some(st) = accounts.get_mut(&account_id) else {
-            return;
-        };
-        let service_tag = format!("ecs-svc/{service_name}");
-        let ids: Vec<String> = st
-            .tasks
-            .iter()
-            .filter(|(_, t)| {
-                t.started_by.as_deref() == Some(service_tag.as_str())
-                    && t.cluster_name == cluster_name
-                    && t.last_status != "STOPPED"
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids
-    };
-
     // Tasks stop together. Each record is dropped only once its execution
     // has finalized the task (load balancer targets and ENI released,
     // awslogs forwarded), which reads the record.
