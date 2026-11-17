@@ -2266,6 +2266,7 @@ async fn main() {
     let ssm_state_for_fail = ssm_state.clone();
     let ssm_state_for_policy_events = ssm_state.clone();
     let ssm_state_for_session_inject = ssm_state.clone();
+    let ssm_state_for_alarm_actions = ssm_state.clone();
     let mut ssm_service = SsmService::new(ssm_state)
         .with_secretsmanager(secretsmanager_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
@@ -4827,7 +4828,9 @@ async fn main() {
                                 ));
                             }
                             let account_count = snapshot.accounts.accounts.len();
-                            *cloudwatch_state.write() = snapshot.accounts;
+                            let mut accounts = snapshot.accounts;
+                            accounts.migrate_loaded();
+                            *cloudwatch_state.write() = accounts;
                             tracing::info!(
                                 accounts = account_count,
                                 "loaded cloudwatch persistence snapshot"
@@ -4850,7 +4853,8 @@ async fn main() {
             None
         };
     // Alarm actions: SNS topics and Lambda functions through the shared
-    // deliveries, EC2 instance actions through the EC2 service.
+    // deliveries, EC2 instance actions through the EC2 service, OpsItems
+    // through the SSM service.
     let delivery_for_cloudwatch_alarms = {
         let mut bus = DeliveryBus::new().with_sns(sns_delivery.clone());
         if let Some(ref ld) = lambda_delivery {
@@ -4864,6 +4868,12 @@ async fn main() {
             .with_ec2_actions(Arc::new(cloudwatch_alarm_hooks::Ec2AlarmActions::new(
                 sfn_registry_handle.clone(),
             )))
+            .with_ops_item_actions(Arc::new(
+                cloudwatch_alarm_hooks::SsmOpsItemAlarmActions::new(
+                    sfn_registry_handle.clone(),
+                    ssm_state_for_alarm_actions,
+                ),
+            ))
             .with_action_authorizer(Arc::new(cloudwatch_alarm_hooks::AlarmActionPolicies::new(
                 fakecloud_core::auth::MultiResourcePolicyProvider::shared(vec![
                     fakecloud_sns::resource_policy::SnsResourcePolicyProvider::shared(

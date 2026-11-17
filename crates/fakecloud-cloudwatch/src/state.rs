@@ -28,6 +28,28 @@ impl CloudWatchAccounts {
         Self::default()
     }
 
+    /// Bring state loaded from an older snapshot up to date: alarm mute rule
+    /// ARNs written as `alarm-mute-rule/<name>` become
+    /// `alarm-mute-rule:<name>`, their tags moving with them.
+    pub fn migrate_loaded(&mut self) {
+        for acct in self.accounts.values_mut() {
+            let mut moved = Vec::new();
+            for rules in acct.mute_rules.values_mut() {
+                for rule in rules.values_mut() {
+                    if let Some((prefix, name)) = rule.arn.split_once(":alarm-mute-rule/") {
+                        let new = format!("{prefix}:alarm-mute-rule:{name}");
+                        moved.push((std::mem::replace(&mut rule.arn, new.clone()), new));
+                    }
+                }
+            }
+            for (old, new) in moved {
+                if let Some(tags) = acct.tags.remove(&old) {
+                    acct.tags.entry(new).or_default().extend(tags);
+                }
+            }
+        }
+    }
+
     /// Deep-clone for snapshot serialization. `Clone` isn't derived
     /// because the live state is held behind a `RwLock` and the rest of
     /// the crate references it by reference — this helper makes the
@@ -86,6 +108,10 @@ pub struct CloudWatchState {
     /// region -> rule_name -> AlarmMuteRule
     #[serde(default)]
     pub mute_rules: BTreeMap<String, BTreeMap<String, AlarmMuteRule>>,
+    /// region -> alarm_name -> the alarm's current mute window (present
+    /// while a mute rule mutes the alarm).
+    #[serde(default)]
+    pub alarm_mutes: BTreeMap<String, BTreeMap<String, MuteWindow>>,
     /// region -> dataset_identifier -> Dataset (KMS key association)
     #[serde(default)]
     pub datasets: BTreeMap<String, BTreeMap<String, Dataset>>,
@@ -610,6 +636,19 @@ pub struct CompositeAlarm {
     pub alarm_exit: AlarmExit,
 }
 
+/// An alarm's mute window: what it was when the window started.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MuteWindow {
+    /// The alarm's state when the window started. When the window ends, the
+    /// actions of the alarm's state then run if it differs.
+    pub start: PreviousState,
+    /// A composite alarm's actions its `ActionsSuppressor` was already
+    /// holding when the window started (`pending_action_from`), kept if
+    /// nothing replaced them during the window.
+    #[serde(default)]
+    pub composite_pending: Option<PreviousState>,
+}
+
 /// An alarm's state before a transition, as alarm notifications report it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PreviousState {
@@ -767,4 +806,7 @@ pub struct AlarmMuteRule {
     pub start_date: Option<DateTime<Utc>>,
     pub expire_date: Option<DateTime<Utc>>,
     pub last_updated_timestamp: DateTime<Utc>,
+    /// When the rule was first created (kept across updates).
+    #[serde(default)]
+    pub created_timestamp: Option<DateTime<Utc>>,
 }

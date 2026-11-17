@@ -67,10 +67,15 @@ impl MetricReader for CloudwatchMetricReader {
         let Some(alarms) = acct.alarms_in(region) else {
             return Vec::new();
         };
+        // An alarm whose actions are disabled, or muted by an alarm mute
+        // rule, doesn't run its scaling policy.
+        let now = chrono::Utc::now();
         alarms
             .values()
             .filter(|a| a.state_value.as_str() == "ALARM")
+            .filter(|a| a.actions_enabled)
             .filter(|a| a.alarm_actions.iter().any(|act| act == policy_arn))
+            .filter(|a| !fakecloud_cloudwatch::alarm_muted(acct, region, &a.alarm_name, now))
             .map(|a| a.alarm_name.clone())
             .collect()
     }

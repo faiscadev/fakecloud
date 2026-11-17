@@ -1683,3 +1683,190 @@ async fn composite_alarm_reports_action_suppression() {
         ]
     );
 }
+
+// A mute rule active now holds back the alarm's SNS notification; deleting
+// the rule ends the mute window and, the alarm being in ALARM rather than the
+// state the window started in, the notification goes out. Only the queue is
+// polled.
+#[tokio::test]
+async fn active_mute_rule_suppresses_alarm_notification() {
+    use aws_sdk_cloudwatch::types::{MuteTargets, Rule, Schedule};
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let sqs = server.sqs_client().await;
+    let (topic_arn, queue_url) = topic_with_queue(&server, "muted-alarm").await;
+
+    cw.put_metric_alarm()
+        .alarm_name("Muted")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(1.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .alarm_actions(&topic_arn)
+        .send()
+        .await
+        .expect("put alarm");
+    // Starts every minute and lasts an hour: muting now.
+    cw.put_alarm_mute_rule()
+        .name("maintenance")
+        .rule(
+            Rule::builder()
+                .schedule(
+                    Schedule::builder()
+                        .expression("cron(* * * * *)")
+                        .duration("PT1H")
+                        .timezone("America/New_York")
+                        .build(),
+                )
+                .build(),
+        )
+        .mute_targets(MuteTargets::builder().alarm_names("Muted").build())
+        .send()
+        .await
+        .expect("put mute rule");
+    cw.put_metric_data()
+        .namespace("App")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Errors")
+                .value(5.0)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put data");
+
+    // Past at least one evaluation timer tick (10s).
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 1, std::time::Duration::from_secs(12))
+            .await;
+    assert!(messages.is_empty(), "muted alarm notified: {messages:?}");
+
+    cw.delete_alarm_mute_rule()
+        .alarm_mute_rule_name("maintenance")
+        .send()
+        .await
+        .expect("delete mute rule");
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 1, std::time::Duration::from_secs(10))
+            .await;
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    let envelope: serde_json::Value = serde_json::from_str(messages[0].body().unwrap()).unwrap();
+    let alarm: serde_json::Value =
+        serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+    assert_eq!(alarm["AlarmName"], "Muted");
+    assert_eq!(alarm["NewStateValue"], "ALARM");
+}
+
+// An SSM OpsItem alarm action opens an OpsItem in OpsCenter, once while it is
+// unresolved, and again after it is resolved.
+#[tokio::test]
+async fn alarm_ops_item_action_opens_an_ops_item() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let ssm = server.ssm_client().await;
+    let action = "arn:aws:ssm:us-east-1:123456789012:opsitem:2#CATEGORY=Availability";
+    cw.put_metric_alarm()
+        .alarm_name("Disk")
+        .alarm_description("Disk almost full")
+        .namespace("App")
+        .metric_name("DiskUsed")
+        .statistic(Statistic::Maximum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(90.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .alarm_actions(action)
+        .send()
+        .await
+        .expect("put alarm");
+    let set = |state: StateValue| {
+        let cw = cw.clone();
+        async move {
+            cw.set_alarm_state()
+                .alarm_name("Disk")
+                .state_value(state)
+                .state_reason("test")
+                .send()
+                .await
+                .expect("set state");
+        }
+    };
+    let from_alarm = || {
+        let ssm = ssm.clone();
+        async move {
+            ssm.describe_ops_items()
+                .send()
+                .await
+                .expect("describe ops items")
+                .ops_item_summaries()
+                .iter()
+                .filter(|s| s.source() == Some("CloudWatch Alarm"))
+                .cloned()
+                .collect::<Vec<_>>()
+        }
+    };
+
+    set(StateValue::Alarm).await;
+    let items = from_alarm().await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    let summary = &items[0];
+    assert_eq!(
+        summary.title(),
+        Some("CloudWatch alarm - 'Disk' is in ALARM state")
+    );
+    assert_eq!(summary.severity(), Some("2"));
+    assert_eq!(summary.category(), Some("Availability"));
+    let id = summary.ops_item_id().unwrap().to_string();
+    let item = ssm
+        .get_ops_item()
+        .ops_item_id(&id)
+        .send()
+        .await
+        .expect("get ops item")
+        .ops_item()
+        .cloned()
+        .unwrap();
+    assert_eq!(item.description(), Some("Disk almost full"));
+    let resources = item
+        .operational_data()
+        .and_then(|d| d.get("/aws/resources"))
+        .and_then(|v| v.value())
+        .expect("related resources");
+    assert!(
+        resources.contains("arn:aws:cloudwatch:us-east-1:123456789012:alarm:Disk"),
+        "{resources}"
+    );
+
+    // Still open: going back into ALARM opens no other.
+    set(StateValue::Ok).await;
+    set(StateValue::Alarm).await;
+    assert_eq!(from_alarm().await.len(), 1);
+
+    // Resolved: the next ALARM opens a new one.
+    ssm.update_ops_item()
+        .ops_item_id(&id)
+        .status(aws_sdk_ssm::types::OpsItemStatus::Resolved)
+        .send()
+        .await
+        .expect("resolve");
+    set(StateValue::Ok).await;
+    set(StateValue::Alarm).await;
+    assert_eq!(from_alarm().await.len(), 2);
+
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("Disk")
+        .history_item_type(aws_sdk_cloudwatch::types::HistoryItemType::Action)
+        .send()
+        .await
+        .expect("history");
+    assert!(history
+        .alarm_history_items()
+        .iter()
+        .filter_map(|i| i.history_summary())
+        .all(|s| s == format!("Successfully executed action {action}")));
+}

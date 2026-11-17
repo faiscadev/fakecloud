@@ -15,7 +15,9 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_persistence::SnapshotStore;
 use tokio::sync::Mutex;
 
-use crate::alarm_actions::{AlarmActionAuthorizer, AlarmNotification, Ec2AlarmActionHook};
+use crate::alarm_actions::{
+    AlarmActionAuthorizer, AlarmNotification, Ec2AlarmActionHook, OpsItemAlarmActionHook,
+};
 
 use crate::state::{
     AlarmHistoryItem, AlarmMetricQuery, AlarmMetricStat, AlarmState, CloudWatchSnapshot, Dashboard,
@@ -136,6 +138,8 @@ pub struct CloudWatchService {
     ec2_actions: Option<Arc<dyn Ec2AlarmActionHook>>,
     /// Checks action targets' resource policies.
     action_authorizer: Option<Arc<dyn AlarmActionAuthorizer>>,
+    /// Opens OpsItems for Systems Manager alarm actions.
+    ops_item_actions: Option<Arc<dyn OpsItemAlarmActionHook>>,
     /// Held while queued actions are dispatched, so they are delivered one
     /// at a time in the order the state changes happened.
     pub(crate) dispatch_lock: Mutex<()>,
@@ -150,8 +154,16 @@ impl CloudWatchService {
             delivery: None,
             ec2_actions: None,
             action_authorizer: None,
+            ops_item_actions: None,
             dispatch_lock: Mutex::new(()),
         }
+    }
+
+    /// Open OpsItems for Systems Manager OpsItem alarm actions through
+    /// `hook`.
+    pub fn with_ops_item_actions(mut self, hook: Arc<dyn OpsItemAlarmActionHook>) -> Self {
+        self.ops_item_actions = Some(hook);
+        self
     }
 
     /// Deliver alarm actions to SNS topics and Lambda functions through `bus`.
@@ -251,6 +263,7 @@ impl CloudWatchService {
         let targets = crate::alarm_actions::ActionTargets {
             delivery: self.delivery.as_deref(),
             ec2: self.ec2_actions.as_deref(),
+            ops_items: self.ops_item_actions.as_deref(),
             authorizer: self.action_authorizer.as_deref(),
         };
         let mut acted = false;
@@ -296,6 +309,7 @@ impl CloudWatchService {
             .filter(|(_, a)| {
                 a.alarms.values().any(|r| !r.is_empty())
                     || a.composite_alarms.values().any(|r| !r.is_empty())
+                    || a.log_alarms.values().any(|r| !r.is_empty())
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -308,15 +322,27 @@ impl CloudWatchService {
                 .alarms
                 .keys()
                 .chain(acct.composite_alarms.keys())
+                .chain(acct.log_alarms.keys())
                 .cloned()
                 .collect();
             for region in regions {
-                crate::alarm_eval::evaluate_alarms_in(
-                    acct,
-                    &region,
-                    now,
-                    crate::alarm_eval::Scope::Due,
-                );
+                // A bug evaluating one region must not stop the others (or
+                // the timer): it's logged and the pass goes on.
+                let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::alarm_eval::evaluate_alarms_in(
+                        acct,
+                        &region,
+                        now,
+                        crate::alarm_eval::Scope::Due,
+                    );
+                }));
+                if evaluated.is_err() {
+                    tracing::error!(
+                        account = %account_id,
+                        region = %region,
+                        "alarm evaluation panicked"
+                    );
+                }
             }
         }
         // Also runs actions other services' metrics queued (see
@@ -328,13 +354,18 @@ impl CloudWatchService {
         }
     }
 
-    /// Run [`Self::evaluate_all_alarms`] every `interval`, forever.
+    /// Run [`Self::evaluate_all_alarms`] every `interval`, forever. Each pass
+    /// runs as its own task, so a panic in one pass is logged and the next
+    /// tick still runs.
     pub async fn run_alarm_evaluator(self: Arc<Self>, interval: std::time::Duration) {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            self.evaluate_all_alarms().await;
+            let svc = self.clone();
+            if let Err(e) = tokio::spawn(async move { svc.evaluate_all_alarms().await }).await {
+                tracing::error!(error = %e, "alarm evaluation pass failed");
+            }
         }
     }
 
@@ -547,8 +578,13 @@ impl AwsService for CloudWatchService {
                     );
                 }
                 // Composites referencing a deleted alarm (or one whose
-                // actions changed) follow at once.
-                "DeleteAlarms" | "EnableAlarmActions" | "DisableAlarmActions" => {
+                // actions changed) follow at once; a mute rule created,
+                // changed or deleted starts or ends mute windows at once.
+                "DeleteAlarms"
+                | "EnableAlarmActions"
+                | "DisableAlarmActions"
+                | "PutAlarmMuteRule"
+                | "DeleteAlarmMuteRule" => {
                     self.evaluate_region(
                         &req.account_id,
                         &req.region,
@@ -2299,6 +2335,8 @@ impl CloudWatchService {
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
         let account_id = acct.account_id.clone();
+        // Mute windows starting or ending now, before this change.
+        let mutes = crate::alarm_mutes::update_mutes(acct, &req.region, now);
         // SetAlarmState can target a metric, composite or log alarm; look up
         // the metric store first, then fall back to the other two. Each arm
         // updates the alarm in place and yields the history item for it and
@@ -2421,9 +2459,12 @@ impl CloudWatchService {
             ));
         };
         push_alarm_history(acct, &req.region, item);
-        // Queued under the state lock, so it keeps its place in transition
-        // order.
-        if let Some(mut n) = notification {
+        // Queued under the state lock, so they keep their place in
+        // transition order; a muted alarm's actions are held back.
+        let mut notifications = mutes.owed;
+        notifications.extend(notification);
+        crate::alarm_mutes::hold_muted(acct, &req.region, &mutes.muted, &mut notifications, now);
+        for mut n in notifications {
             n.epoch = acct.epoch;
             acct.pending_actions.push(n);
         }
