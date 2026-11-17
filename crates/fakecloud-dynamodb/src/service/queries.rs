@@ -884,9 +884,7 @@ pub(super) fn validate_partition_key_condition(
     expr_attr_names: &HashMap<String, String>,
 ) -> Result<(), AwsServiceError> {
     let mut pk_seen = false;
-    for raw in split_on_and(key_condition) {
-        let part = strip_outer_parens(raw.trim()).trim();
-
+    for part in key_condition_terms(key_condition) {
         // begins_with(...) targets the sort key, never the partition key.
         let lower = part.to_ascii_lowercase();
         if lower.starts_with("begins_with(") || lower.starts_with("begins_with (") {
@@ -940,6 +938,22 @@ pub(super) fn validate_partition_key_condition(
         ));
     }
     Ok(())
+}
+
+/// The AND-ed terms of a key condition, with their parentheses removed. boto3's
+/// `Key("pk").eq(..) & Key("sk").between(..)` sends `(#n0 = :v0 AND #n1 BETWEEN :v1 AND :v2)`,
+/// so a term can itself be a parenthesized AND.
+fn key_condition_terms(key_condition: &str) -> Vec<&str> {
+    let mut terms = Vec::new();
+    for raw in split_on_and(key_condition) {
+        let part = strip_outer_parens(raw.trim()).trim();
+        if split_on_and(part).len() > 1 {
+            terms.extend(key_condition_terms(part));
+        } else {
+            terms.push(part);
+        }
+    }
+    terms
 }
 
 /// The `Select` enum set, in the order AWS lists it.
@@ -1521,6 +1535,30 @@ mod tests {
             .err()
             .expect("non-equality partition key rejected");
         assert!(format!("{non_eq:?}").contains("Query key condition not supported"));
+    }
+
+    #[test]
+    fn partition_key_condition_accepts_parenthesized_terms() {
+        let names: HashMap<String, String> = [("#n0", "pk"), ("#n1", "sk")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        for ok in [
+            "(#n0 = :v0 AND #n1 BETWEEN :v1 AND :v2)",
+            "(#n0 = :v0 AND #n1 >= :v1)",
+            "((#n0 = :v0) AND (#n1 < :v1))",
+        ] {
+            assert!(
+                validate_partition_key_condition(ok, "pk", &names).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in ["(#n1 = :v0 AND #n1 >= :v1)", "(#n0 > :v0 AND #n1 >= :v1)"] {
+            assert!(
+                validate_partition_key_condition(bad, "pk", &names).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]
