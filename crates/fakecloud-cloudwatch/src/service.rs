@@ -11,8 +11,11 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use std::sync::Arc;
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_persistence::SnapshotStore;
 use tokio::sync::Mutex;
+
+use crate::alarm_actions::{AlarmActionAuthorizer, AlarmNotification, Ec2AlarmActionHook};
 
 use crate::state::{
     AlarmHistoryItem, AlarmMetricQuery, AlarmMetricStat, AlarmState, CloudWatchSnapshot, Dashboard,
@@ -127,6 +130,15 @@ pub struct CloudWatchService {
     pub(crate) state: SharedCloudWatchState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<Mutex<()>>,
+    /// Where alarm actions go (SNS topics, Lambda functions).
+    delivery: Option<Arc<DeliveryBus>>,
+    /// Performs EC2 instance alarm actions.
+    ec2_actions: Option<Arc<dyn Ec2AlarmActionHook>>,
+    /// Checks action targets' resource policies.
+    action_authorizer: Option<Arc<dyn AlarmActionAuthorizer>>,
+    /// Held while queued actions are dispatched, so they are delivered one
+    /// at a time in the order the state changes happened.
+    pub(crate) dispatch_lock: Mutex<()>,
 }
 
 impl CloudWatchService {
@@ -135,6 +147,194 @@ impl CloudWatchService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(Mutex::new(())),
+            delivery: None,
+            ec2_actions: None,
+            action_authorizer: None,
+            dispatch_lock: Mutex::new(()),
+        }
+    }
+
+    /// Deliver alarm actions to SNS topics and Lambda functions through `bus`.
+    pub fn with_delivery(mut self, bus: Arc<DeliveryBus>) -> Self {
+        self.delivery = Some(bus);
+        self
+    }
+
+    /// Perform EC2 alarm actions (stop / terminate / reboot / recover) through
+    /// `hook`.
+    pub fn with_ec2_actions(mut self, hook: Arc<dyn Ec2AlarmActionHook>) -> Self {
+        self.ec2_actions = Some(hook);
+        self
+    }
+
+    /// Check alarm action targets' resource policies (Lambda function
+    /// policies, cross-account SNS topic policies) through `authorizer`.
+    pub fn with_action_authorizer(mut self, authorizer: Arc<dyn AlarmActionAuthorizer>) -> Self {
+        self.action_authorizer = Some(authorizer);
+        self
+    }
+
+    /// Evaluate the alarms of `account_id` in `region` `scope` selects now,
+    /// queueing the actions their state changes owe.
+    pub(crate) fn evaluate_region(
+        &self,
+        account_id: &str,
+        region: &str,
+        scope: crate::alarm_eval::Scope<'_>,
+    ) {
+        let mut state = self.state.write();
+        if let Some(acct) = state.accounts.get_mut(account_id) {
+            crate::alarm_eval::evaluate_alarms_in(acct, region, Utc::now(), scope);
+        }
+    }
+
+    /// Whether any account has queued alarm actions.
+    fn has_pending_actions(&self) -> bool {
+        self.state
+            .read()
+            .accounts
+            .values()
+            .any(|a| !a.pending_actions.is_empty())
+    }
+
+    /// Clear and return whether an evaluation left state to persist, for
+    /// `account` (or every account when `None`).
+    fn take_evaluation_dirty(&self, account: Option<&str>) -> bool {
+        // Read-only requests leave nothing dirty: check under the read lock
+        // so they don't contend for the write lock.
+        let any_dirty = {
+            let state = self.state.read();
+            match account {
+                Some(id) => state.accounts.get(id).is_some_and(|a| a.evaluation_dirty),
+                None => state.accounts.values().any(|a| a.evaluation_dirty),
+            }
+        };
+        if !any_dirty {
+            return false;
+        }
+        let mut state = self.state.write();
+        match account {
+            Some(id) => state
+                .accounts
+                .get_mut(id)
+                .is_some_and(|a| std::mem::take(&mut a.evaluation_dirty)),
+            None => state.accounts.values_mut().fold(false, |dirty, a| {
+                std::mem::take(&mut a.evaluation_dirty) | dirty
+            }),
+        }
+    }
+
+    /// Run every queued alarm action and record the outcomes in the alarm
+    /// history. Returns whether anything ran.
+    pub(crate) async fn run_pending_actions(&self) -> bool {
+        // Most requests owe no actions: don't wait behind a dispatch. Only
+        // when no dispatch is in flight, though: one that is running may hold
+        // this request's own notification, and the request must not respond
+        // before that action has been delivered.
+        if !self.has_pending_actions() && self.dispatch_lock.try_lock().is_ok() {
+            return false;
+        }
+        // One dispatcher at a time, draining under the lock: actions queued
+        // in transition order are delivered in that order.
+        let _dispatching = self.dispatch_lock.lock().await;
+        let pending: Vec<AlarmNotification> = {
+            let mut state = self.state.write();
+            state
+                .accounts
+                .values_mut()
+                .flat_map(|a| std::mem::take(&mut a.pending_actions))
+                .collect()
+        };
+        if pending.is_empty() {
+            return false;
+        }
+        let targets = crate::alarm_actions::ActionTargets {
+            delivery: self.delivery.as_deref(),
+            ec2: self.ec2_actions.as_deref(),
+            authorizer: self.action_authorizer.as_deref(),
+        };
+        let mut acted = false;
+        for n in &pending {
+            // Queued before a reset of the account: the alarm is gone.
+            let current = self.state.read().get(&n.account_id).map(|a| a.epoch);
+            if current != Some(n.epoch) {
+                continue;
+            }
+            let items = crate::alarm_actions::dispatch(n, targets).await;
+            if items.is_empty() {
+                continue;
+            }
+            acted = true;
+            let mut state = self.state.write();
+            let Some(acct) = state.accounts.get_mut(&n.account_id) else {
+                continue;
+            };
+            if acct.epoch != n.epoch {
+                continue;
+            }
+            for item in items {
+                push_alarm_history(acct, &n.region, item);
+            }
+        }
+        acted
+    }
+
+    /// Evaluate the alarms whose outcome can have changed with time alone
+    /// (past their next period boundary, or composites with a running
+    /// suppression), run the actions their state changes owe, and persist
+    /// the result. The server runs this on a timer so alarms change state
+    /// (and act) as time passes, the way CloudWatch evaluates them each
+    /// period. The state lock is held per account; accounts without alarms
+    /// cost a map lookup.
+    pub async fn evaluate_all_alarms(&self) {
+        let now = Utc::now();
+        let accounts: Vec<String> = self
+            .state
+            .read()
+            .accounts
+            .iter()
+            .filter(|(_, a)| {
+                a.alarms.values().any(|r| !r.is_empty())
+                    || a.composite_alarms.values().any(|r| !r.is_empty())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for account_id in accounts {
+            let mut state = self.state.write();
+            let Some(acct) = state.accounts.get_mut(&account_id) else {
+                continue;
+            };
+            let regions: std::collections::BTreeSet<String> = acct
+                .alarms
+                .keys()
+                .chain(acct.composite_alarms.keys())
+                .cloned()
+                .collect();
+            for region in regions {
+                crate::alarm_eval::evaluate_alarms_in(
+                    acct,
+                    &region,
+                    now,
+                    crate::alarm_eval::Scope::Due,
+                );
+            }
+        }
+        // Also runs actions other services' metrics queued (see
+        // `CloudwatchDeliveryImpl`).
+        let acted = self.run_pending_actions().await;
+        let dirty = self.take_evaluation_dirty(None);
+        if acted || dirty {
+            self.save_snapshot().await;
+        }
+    }
+
+    /// Run [`Self::evaluate_all_alarms`] every `interval`, forever.
+    pub async fn run_alarm_evaluator(self: Arc<Self>, interval: std::time::Duration) {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            self.evaluate_all_alarms().await;
         }
     }
 
@@ -333,7 +533,34 @@ impl AwsService for CloudWatchService {
                 &req.action,
             )),
         };
-        if mutates && result.is_ok() {
+        // A forced state or a new configuration can change states: evaluate
+        // the region right away so the alarms (and composites over them)
+        // transition and act without waiting for the evaluation timer.
+        // (PutMetricData evaluates just the alarms on the series it wrote.)
+        if result.is_ok() {
+            match req.action.as_str() {
+                "SetAlarmState" | "PutMetricAlarm" | "PutCompositeAlarm" | "PutLogAlarm" => {
+                    self.evaluate_region(
+                        &req.account_id,
+                        &req.region,
+                        crate::alarm_eval::Scope::All,
+                    );
+                }
+                // Composites referencing a deleted alarm (or one whose
+                // actions changed) follow at once.
+                "DeleteAlarms" | "EnableAlarmActions" | "DisableAlarmActions" => {
+                    self.evaluate_region(
+                        &req.account_id,
+                        &req.region,
+                        crate::alarm_eval::Scope::Composites,
+                    );
+                }
+                _ => {}
+            }
+        }
+        let acted = self.run_pending_actions().await;
+        let evaluated = self.take_evaluation_dirty(Some(&req.account_id));
+        if (mutates && result.is_ok()) || acted || evaluated {
             self.save_snapshot().await;
         }
         // rpcv2Cbor and awsJson1_0 callers expect a CBOR / JSON response
@@ -1003,6 +1230,13 @@ pub(crate) struct MetricBucket {
     unit: Option<String>,
 }
 
+impl MetricBucket {
+    /// The number of samples aggregated into this bucket.
+    pub(crate) fn sample_count(&self) -> f64 {
+        self.agg.count
+    }
+}
+
 /// Resolve a single statistic (simple, e.g. `Sum`, or percentile, e.g. `p99`)
 /// for one bucket. `samples` must be sorted ascending.
 pub(crate) fn resolve_stat(
@@ -1021,8 +1255,8 @@ pub(crate) fn resolve_stat(
 /// each distinct dimension combination as its own metric) and, when a unit
 /// filter is set, only datapoints published with that unit.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn collect_metric_buckets(
-    data: &[MetricDatum],
+pub(crate) fn collect_metric_buckets<'a>(
+    data: impl IntoIterator<Item = &'a MetricDatum>,
     metric_name: &str,
     dim_filter: &BTreeMap<String, String>,
     unit_filter: Option<&str>,
@@ -1031,7 +1265,7 @@ pub(crate) fn collect_metric_buckets(
     end_ts: DateTime<Utc>,
 ) -> BTreeMap<DateTime<Utc>, MetricBucket> {
     let mut buckets: BTreeMap<DateTime<Utc>, MetricBucket> = BTreeMap::new();
-    for d in data.iter() {
+    for d in data {
         if d.metric_name != metric_name {
             continue;
         }
@@ -1108,6 +1342,7 @@ impl CloudWatchService {
         let acct = state.get_or_create(&req.account_id);
         let metrics_map = acct.metrics_in_mut(&req.region);
         let bucket = metrics_map.entry(namespace.clone()).or_default();
+        let mut touched: Vec<crate::series_index::SeriesKey> = Vec::new();
 
         for member in members {
             let metric_name = member
@@ -1167,6 +1402,10 @@ impl CloudWatchService {
                 ));
             }
 
+            let key = (metric_name.clone(), dimensions.clone());
+            if !touched.contains(&key) {
+                touched.push(key);
+            }
             bucket.push(MetricDatum {
                 metric_name,
                 dimensions,
@@ -1177,6 +1416,17 @@ impl CloudWatchService {
                 storage_resolution,
             });
         }
+
+        // Evaluate just the alarms on the series this put wrote.
+        crate::alarm_eval::evaluate_alarms_in(
+            acct,
+            &req.region,
+            Utc::now(),
+            crate::alarm_eval::Scope::Series {
+                namespace: &namespace,
+                series: &touched,
+            },
+        );
 
         Ok(empty_metadata_response("PutMetricData", &req.request_id))
     }
@@ -1626,6 +1876,11 @@ impl CloudWatchService {
             }
         }
 
+        validate_alarm_actions(
+            [&ok_actions, &alarm_actions, &insufficient_data_actions],
+            &req.region,
+            crate::alarm_actions::AlarmKind::Metric,
+        )?;
         let arn = crate::state::alarm_arn(&req.region, &req.account_id, &alarm_name);
         let now = Utc::now();
 
@@ -1633,7 +1888,7 @@ impl CloudWatchService {
         let acct = state.get_or_create(&req.account_id);
         let alarms = acct.alarms_in_mut(&req.region);
         let existing = alarms.get(&alarm_name).cloned();
-        let alarm = MetricAlarm {
+        let mut alarm = MetricAlarm {
             alarm_name: alarm_name.clone(),
             alarm_arn: arn,
             alarm_description,
@@ -1684,37 +1939,58 @@ impl CloudWatchService {
             evaluation_criteria,
             evaluation_window,
             evaluation_interval,
+            // An update leaves the alarm's state (and everything computed with
+            // it) unchanged; a new alarm enters INSUFFICIENT_DATA now.
+            state_reason_data: existing.as_ref().and_then(|a| a.state_reason_data.clone()),
+            state_transitioned_timestamp: Some(
+                existing
+                    .as_ref()
+                    .map(|a| {
+                        a.state_transitioned_timestamp
+                            .unwrap_or(a.state_updated_timestamp)
+                    })
+                    .unwrap_or(now),
+            ),
+            evaluation_state: existing.as_ref().and_then(|a| a.evaluation_state),
+            alarm_exit: existing
+                .as_ref()
+                .map(|a| a.alarm_exit)
+                .unwrap_or_else(crate::state::AlarmExit::new),
+            // A new configuration is evaluated right away, ending any hold of
+            // a state set by SetAlarmState.
+            manual_hold_until: None,
+            next_evaluation_at: None,
         };
+        // An evaluation error belongs to the configuration that caused it. A
+        // single-metric configuration is re-evaluated right after this put
+        // (clearing or keeping it with a fresh reason); metric-math,
+        // anomaly-detection and PromQL alarms aren't evaluated here, so the
+        // error is cleared now.
+        if alarm.evaluation_state.is_some() && crate::alarm_eval::not_single_metric(&alarm) {
+            alarm.evaluation_state = None;
+            alarm.state_updated_timestamp = now;
+        }
         let alarm_arn = alarm.alarm_arn.clone();
         let history_name = alarm_name.clone();
-        let created = existing.is_none();
+        let original = existing.as_ref().map(metric_alarm_config);
+        let updated = metric_alarm_config(&alarm);
         alarms.insert(alarm_name, alarm);
 
         // Persist inline Tags into the ARN-keyed tag store, but ONLY on create.
         // AWS ignores the inline Tags param when PutMetricAlarm updates an
         // existing alarm; tags on an existing alarm are managed via
         // TagResource / UntagResource.
-        if created && !inline_tags.is_empty() {
+        if original.is_none() && !inline_tags.is_empty() {
             let bucket = acct.tags.entry(alarm_arn).or_default();
             for (k, v) in inline_tags {
                 bucket.insert(k, v);
             }
         }
 
-        let summary = if created {
-            format!("Alarm \"{history_name}\" created")
-        } else {
-            format!("Alarm \"{history_name}\" updated")
-        };
-        let history_data = "{\"type\":\"Update\",\"version\":\"1.0\"}".to_string();
         push_alarm_history(
             acct,
             &req.region,
-            &history_name,
-            "MetricAlarm",
-            "ConfigurationUpdate",
-            summary,
-            history_data,
+            configuration_update_item(&history_name, "MetricAlarm", original, updated, now),
         );
 
         Ok(empty_metadata_response("PutMetricAlarm", &req.request_id))
@@ -1897,12 +2173,7 @@ impl CloudWatchService {
         // Recompute alarm states from stored metric data first, so this returns
         // the same fresh state DescribeAlarms would (a PutMetricData crossing a
         // threshold is reflected here rather than a stale stored value).
-        {
-            let mut state = self.state.write();
-            if let Some(acct) = state.accounts.get_mut(&req.account_id) {
-                crate::alarm_eval::evaluate_alarms(acct, &req.region, Utc::now());
-            }
-        }
+        self.evaluate_region(&req.account_id, &req.region, crate::alarm_eval::Scope::All);
 
         let state = self.state.read();
         let mut inner = String::from("<MetricAlarms>");
@@ -2011,37 +2282,137 @@ impl CloudWatchService {
         let new_state = AlarmState::parse(&state_value)
             .ok_or_else(|| invalid_param("StateValue must be OK | ALARM | INSUFFICIENT_DATA"))?;
 
+        // StateReasonData is stored as given (AWS hands it to Auto Scaling
+        // policies verbatim), but it must be JSON.
+        let state_reason_data = optional_query_param(req, "StateReasonData");
+        if let Some(d) = &state_reason_data {
+            if serde_json::from_str::<serde_json::Value>(d).is_err() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidFormat",
+                    "Data was not syntactically valid JSON",
+                ));
+            }
+        }
+
         let now = Utc::now();
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
+        let account_id = acct.account_id.clone();
         // SetAlarmState can target a metric, composite or log alarm; look up
-        // the metric store first, then fall back to the other two.
-        let (old_state, alarm_type) = if let Some(alarm) =
-            acct.alarms_in_mut(&req.region).get_mut(&alarm_name)
-        {
-            let old = alarm.state_value.as_str().to_string();
-            alarm.state_value = new_state;
-            alarm.state_reason = state_reason.clone();
-            alarm.state_updated_timestamp = now;
+        // the metric store first, then fall back to the other two. Each arm
+        // updates the alarm in place and yields the history item for it and
+        // the state it replaced. StateUpdatedTimestamp always moves;
+        // StateTransitionedTimestamp only when the value actually changes.
+        let set = |alarm_type: &str,
+                   value: &mut AlarmState,
+                   reason: &mut String,
+                   reason_data: &mut Option<String>,
+                   updated: &mut DateTime<Utc>,
+                   transitioned: &mut Option<DateTime<Utc>>,
+                   exit: &mut crate::state::AlarmExit| {
+            let prev = crate::state::PreviousState {
+                value: *value,
+                reason: reason.clone(),
+                reason_data: reason_data.clone(),
+                timestamp: *updated,
+            };
+            exit.note(*value, new_state, now);
+            let item = crate::alarm_eval::state_update_item(
+                &alarm_name,
+                alarm_type,
+                now,
+                crate::alarm_eval::StateSnapshot {
+                    value: *value,
+                    reason,
+                    reason_data: reason_data.as_deref(),
+                },
+                crate::alarm_eval::StateSnapshot {
+                    value: new_state,
+                    reason: &state_reason,
+                    reason_data: state_reason_data.as_deref(),
+                },
+            );
+            if *value != new_state {
+                *transitioned = Some(now);
+            } else if transitioned.is_none() {
+                *transitioned = Some(*updated);
+            }
+            *value = new_state;
+            *reason = state_reason.clone();
+            *reason_data = state_reason_data.clone();
+            *updated = now;
+            (item, prev)
+        };
+        // When the state value changes, the new state's actions run: right
+        // away for metric and log alarms, and for a composite once its
+        // ActionsSuppressor lets them (the evaluation that follows decides).
+        let mut notification = None;
+        let item = if let Some(alarm) = acct.alarms_in_mut(&req.region).get_mut(&alarm_name) {
             // Mark this as a manual override so a later evaluation with no
-            // datapoints keeps it rather than resetting to INSUFFICIENT_DATA.
+            // datapoints keeps it rather than resetting to INSUFFICIENT_DATA,
+            // and hold it until the alarm's next evaluation (each minute, or
+            // each period for a high-resolution alarm): AWS doesn't
+            // re-evaluate it within this request.
             alarm.state_manually_set = true;
-            (old, "MetricAlarm")
+            let hold = crate::alarm_eval::next_boundary(
+                now,
+                crate::alarm_eval::evaluation_interval(alarm),
+            );
+            alarm.manual_hold_until = hold;
+            alarm.next_evaluation_at = hold;
+            let (item, prev) = set(
+                "MetricAlarm",
+                &mut alarm.state_value,
+                &mut alarm.state_reason,
+                &mut alarm.state_reason_data,
+                &mut alarm.state_updated_timestamp,
+                &mut alarm.state_transitioned_timestamp,
+                &mut alarm.alarm_exit,
+            );
+            notification = crate::alarm_actions::metric_alarm_notification(
+                &account_id,
+                &req.region,
+                alarm,
+                &prev,
+            );
+            item
         } else if let Some(composite) = acct
             .composite_alarms_in_mut(&req.region)
             .get_mut(&alarm_name)
         {
-            let old = composite.state_value.as_str().to_string();
-            composite.state_value = new_state;
-            composite.state_reason = state_reason.clone();
-            composite.state_updated_timestamp = now;
-            (old, "CompositeAlarm")
+            // Kept until a child changes state or the configuration changes.
+            composite.state_manually_set = true;
+            let (item, prev) = set(
+                "CompositeAlarm",
+                &mut composite.state_value,
+                &mut composite.state_reason,
+                &mut composite.state_reason_data,
+                &mut composite.state_updated_timestamp,
+                &mut composite.state_transitioned_timestamp,
+                &mut composite.alarm_exit,
+            );
+            if prev.value != new_state {
+                composite.pending_action_from = Some(prev);
+            }
+            item
         } else if let Some(log_alarm) = acct.log_alarms_in_mut(&req.region).get_mut(&alarm_name) {
-            let old = log_alarm.state_value.as_str().to_string();
-            log_alarm.state_value = new_state;
-            log_alarm.state_reason = state_reason.clone();
-            log_alarm.state_updated_timestamp = now;
-            (old, "LogAlarm")
+            let (item, prev) = set(
+                "LogAlarm",
+                &mut log_alarm.state_value,
+                &mut log_alarm.state_reason,
+                &mut log_alarm.state_reason_data,
+                &mut log_alarm.state_updated_timestamp,
+                &mut log_alarm.state_transitioned_timestamp,
+                &mut log_alarm.alarm_exit,
+            );
+            notification = crate::alarm_actions::log_alarm_notification(
+                &account_id,
+                &req.region,
+                log_alarm,
+                &prev,
+            );
+            item
         } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -2049,22 +2420,14 @@ impl CloudWatchService {
                 format!("Alarm {alarm_name} not found"),
             ));
         };
-
-        let new_state_str = new_state.as_str().to_string();
-        let summary = format!("Alarm updated from {old_state} to {new_state_str}");
-        let history_data = format!(
-            "{{\"oldState\":{{\"stateValue\":\"{old_state}\"}},\"newState\":{{\"stateValue\":\"{new_state_str}\",\"stateReason\":\"{}\"}}}}",
-            state_reason.replace('"', "\\\"")
-        );
-        push_alarm_history(
-            acct,
-            &req.region,
-            &alarm_name,
-            alarm_type,
-            "StateUpdate",
-            summary,
-            history_data,
-        );
+        push_alarm_history(acct, &req.region, item);
+        // Queued under the state lock, so it keeps its place in transition
+        // order.
+        if let Some(mut n) = notification {
+            n.epoch = acct.epoch;
+            acct.pending_actions.push(n);
+        }
+        drop(state);
 
         Ok(empty_metadata_response("SetAlarmState", &req.request_id))
     }
@@ -2091,6 +2454,19 @@ impl CloudWatchService {
         )?;
         let alarm_filter = optional_query_param(req, "AlarmName");
         let type_filter = optional_query_param(req, "HistoryItemType");
+        // Like DescribeAlarms, only metric-alarm history is returned unless
+        // AlarmTypes asks for composite and/or log alarms.
+        let mut alarm_types = collect_member_values(req, "AlarmTypes");
+        for t in &alarm_types {
+            if !matches!(t.as_str(), "MetricAlarm" | "CompositeAlarm" | "LogAlarm") {
+                return Err(invalid_param(format!(
+                    "AlarmTypes has an invalid value '{t}'"
+                )));
+            }
+        }
+        if alarm_types.is_empty() {
+            alarm_types.push("MetricAlarm".to_string());
+        }
         let start_date =
             optional_query_param(req, "StartDate").and_then(|s| parse_input_timestamp(&s));
         let end_date = optional_query_param(req, "EndDate").and_then(|s| parse_input_timestamp(&s));
@@ -2117,6 +2493,9 @@ impl CloudWatchService {
                         }
                     }
                     for item in list.iter() {
+                        if !alarm_types.contains(&item.alarm_type) {
+                            continue;
+                        }
                         if let Some(t) = type_filter.as_ref() {
                             if &item.history_item_type != t {
                                 continue;
@@ -2324,23 +2703,167 @@ impl CloudWatchService {
 pub(crate) fn push_alarm_history(
     acct: &mut crate::state::CloudWatchState,
     region: &str,
-    alarm_name: &str,
-    alarm_type: &str,
-    history_item_type: &str,
-    history_summary: String,
-    history_data: String,
+    item: AlarmHistoryItem,
 ) {
     acct.alarm_history_in_mut(region)
-        .entry(alarm_name.to_string())
+        .entry(item.alarm_name.clone())
         .or_default()
-        .push(AlarmHistoryItem {
-            alarm_name: alarm_name.to_string(),
-            alarm_type: alarm_type.to_string(),
-            timestamp: Utc::now(),
-            history_item_type: history_item_type.to_string(),
-            history_summary,
-            history_data,
-        });
+        .push(item);
+}
+
+/// Reject any action ARN that isn't a documented action form for `kind` of
+/// alarm (see [`crate::alarm_actions::validate_action`]).
+pub(crate) fn validate_alarm_actions(
+    lists: [&[String]; 3],
+    region: &str,
+    kind: crate::alarm_actions::AlarmKind,
+) -> Result<(), AwsServiceError> {
+    for arn in lists.into_iter().flatten() {
+        crate::alarm_actions::validate_action(arn, region, kind).map_err(validation_error)?;
+    }
+    Ok(())
+}
+
+/// The `ConfigurationUpdate` history item a Put*Alarm call records: the
+/// `createdAlarm` configuration on create, `originalAlarm` + `updatedAlarm` on
+/// update.
+pub(crate) fn configuration_update_item(
+    alarm_name: &str,
+    alarm_type: &str,
+    original: Option<serde_json::Value>,
+    updated: serde_json::Value,
+    at: DateTime<Utc>,
+) -> AlarmHistoryItem {
+    let (summary, data) = match original {
+        None => (
+            format!("Alarm \"{alarm_name}\" created"),
+            serde_json::json!({"type": "Create", "version": "1.0", "createdAlarm": updated}),
+        ),
+        Some(original) => (
+            format!("Alarm \"{alarm_name}\" updated"),
+            serde_json::json!({
+                "type": "Update",
+                "version": "1.0",
+                "originalAlarm": original,
+                "updatedAlarm": updated,
+            }),
+        ),
+    };
+    AlarmHistoryItem {
+        alarm_name: alarm_name.to_string(),
+        alarm_type: alarm_type.to_string(),
+        timestamp: at,
+        history_item_type: "ConfigurationUpdate".to_string(),
+        history_summary: summary,
+        history_data: data.to_string(),
+    }
+}
+
+fn dimensions_json(dims: &BTreeMap<String, String>) -> serde_json::Value {
+    serde_json::Value::Array(
+        dims.iter()
+            .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
+            .collect(),
+    )
+}
+
+/// A metric alarm's configuration as alarm history reports it.
+pub(crate) fn metric_alarm_config(a: &MetricAlarm) -> serde_json::Value {
+    let metrics: Vec<serde_json::Value> = a
+        .metrics
+        .iter()
+        .map(|q| {
+            serde_json::json!({
+                "id": q.id,
+                "expression": q.expression,
+                "label": q.label,
+                "returnData": q.return_data,
+                "accountId": q.account_id,
+                "period": q.period,
+                "metricStat": q.metric_stat.as_ref().map(|ms| serde_json::json!({
+                    "metric": {
+                        "namespace": ms.namespace,
+                        "metricName": ms.metric_name,
+                        "dimensions": dimensions_json(&ms.dimensions),
+                    },
+                    "period": ms.period,
+                    "stat": ms.stat,
+                    "unit": ms.unit,
+                })),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "alarmName": a.alarm_name,
+        "alarmDescription": a.alarm_description,
+        "actionsEnabled": a.actions_enabled,
+        "okactions": a.ok_actions,
+        "alarmActions": a.alarm_actions,
+        "insufficientDataActions": a.insufficient_data_actions,
+        "metricName": a.metric_name,
+        "namespace": a.namespace,
+        "statistic": a.statistic,
+        "extendedStatistic": a.extended_statistic,
+        "dimensions": dimensions_json(&a.dimensions),
+        "period": a.period,
+        "unit": a.unit,
+        "evaluationPeriods": a.evaluation_periods,
+        "datapointsToAlarm": a.datapoints_to_alarm,
+        "threshold": a.threshold,
+        "thresholdMetricId": a.threshold_metric_id,
+        "comparisonOperator": a.comparison_operator,
+        "treatMissingData": a.treat_missing_data,
+        "evaluateLowSampleCountPercentile": a.evaluate_low_sample_count_percentile,
+        "evaluationInterval": a.evaluation_interval,
+        "metrics": metrics,
+    })
+}
+
+/// A composite alarm's configuration as alarm history reports it.
+pub(crate) fn composite_alarm_config(a: &crate::state::CompositeAlarm) -> serde_json::Value {
+    serde_json::json!({
+        "alarmName": a.alarm_name,
+        "alarmDescription": a.alarm_description,
+        "alarmRule": a.alarm_rule,
+        "actionsEnabled": a.actions_enabled,
+        "okactions": a.ok_actions,
+        "alarmActions": a.alarm_actions,
+        "insufficientDataActions": a.insufficient_data_actions,
+        "actionsSuppressor": a.actions_suppressor,
+        "actionsSuppressorWaitPeriod": a.actions_suppressor_wait_period,
+        "actionsSuppressorExtensionPeriod": a.actions_suppressor_extension_period,
+    })
+}
+
+/// A log alarm's configuration as alarm history reports it.
+pub(crate) fn log_alarm_config(a: &crate::state::LogAlarm) -> serde_json::Value {
+    serde_json::json!({
+        "alarmName": a.alarm_name,
+        "alarmDescription": a.alarm_description,
+        "actionsEnabled": a.actions_enabled,
+        "okactions": a.ok_actions,
+        "alarmActions": a.alarm_actions,
+        "insufficientDataActions": a.insufficient_data_actions,
+        "scheduledQueryConfiguration": {
+            "queryString": a.query_string,
+            "scheduledQueryRoleARN": a.scheduled_query_role_arn,
+            "aggregationExpression": a.aggregation_expression,
+            "logGroupIdentifiers": a.log_group_identifiers,
+            "queryARN": a.query_arn,
+            "scheduleConfiguration": {
+                "scheduleExpression": a.schedule_expression,
+                "startTimeOffset": a.schedule_start_time_offset,
+                "endTimeOffset": a.schedule_end_time_offset,
+            },
+        },
+        "queryResultsToEvaluate": a.query_results_to_evaluate,
+        "queryResultsToAlarm": a.query_results_to_alarm,
+        "threshold": a.threshold,
+        "comparisonOperator": a.comparison_operator,
+        "treatMissingData": a.treat_missing_data,
+        "actionLogLineCount": a.action_log_line_count,
+        "actionLogLineRoleArn": a.action_log_line_role_arn,
+    })
 }
 
 fn render_alarm(alarm: &MetricAlarm) -> String {
@@ -2378,6 +2901,7 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
         "<StateReason>{}</StateReason>",
         xml_escape(&alarm.state_reason)
     ));
+    push_state_reason_data(&mut s, alarm.state_reason_data.as_deref());
     s.push_str(&format!(
         "<StateUpdatedTimestamp>{}</StateUpdatedTimestamp>",
         alarm
@@ -2445,6 +2969,17 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     ));
     render_alarm_metrics(&mut s, &alarm.metrics);
+    if let Some(e) = alarm.evaluation_state {
+        s.push_str(&format!(
+            "<EvaluationState>{}</EvaluationState>",
+            e.as_str()
+        ));
+    }
+    push_state_transitioned_timestamp(
+        &mut s,
+        alarm.state_transitioned_timestamp,
+        alarm.state_updated_timestamp,
+    );
     if let Some(w) = &alarm.evaluation_window {
         s.push_str(&w.render("EvaluationWindow"));
     }
@@ -2462,6 +2997,30 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
     }
     s.push_str("</member>");
     s
+}
+
+pub(crate) fn push_state_reason_data(s: &mut String, data: Option<&str>) {
+    if let Some(d) = data {
+        s.push_str(&format!(
+            "<StateReasonData>{}</StateReasonData>",
+            xml_escape(d)
+        ));
+    }
+}
+
+/// Render `StateTransitionedTimestamp`, falling back to the state update time
+/// for an alarm persisted before transitions were tracked.
+pub(crate) fn push_state_transitioned_timestamp(
+    s: &mut String,
+    transitioned: Option<DateTime<Utc>>,
+    updated: DateTime<Utc>,
+) {
+    s.push_str(&format!(
+        "<StateTransitionedTimestamp>{}</StateTransitionedTimestamp>",
+        transitioned
+            .unwrap_or(updated)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    ));
 }
 
 /// Render the `Metrics` (metric-math / cross-account) list of a MetricAlarm.

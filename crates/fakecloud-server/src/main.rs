@@ -16,6 +16,7 @@ mod admin_elasticache_artifacts;
 mod admin_lambda_artifacts;
 mod appas_hooks;
 mod cli;
+mod cloudwatch_alarm_hooks;
 mod dns;
 mod dynamodb_streams_lambda_poller;
 mod ec2_imds;
@@ -4845,15 +4846,48 @@ async fn main() {
         } else {
             None
         };
+    // Alarm actions: SNS topics and Lambda functions through the shared
+    // deliveries, EC2 instance actions through the EC2 service.
+    let delivery_for_cloudwatch_alarms = {
+        let mut bus = DeliveryBus::new().with_sns(sns_delivery.clone());
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
     let mut cloudwatch_service =
-        fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
+        fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone())
+            .with_delivery(delivery_for_cloudwatch_alarms)
+            .with_ec2_actions(Arc::new(cloudwatch_alarm_hooks::Ec2AlarmActions::new(
+                sfn_registry_handle.clone(),
+            )))
+            .with_action_authorizer(Arc::new(cloudwatch_alarm_hooks::AlarmActionPolicies::new(
+                fakecloud_core::auth::MultiResourcePolicyProvider::shared(vec![
+                    fakecloud_sns::resource_policy::SnsResourcePolicyProvider::shared(
+                        sns_state.clone(),
+                    ),
+                    fakecloud_lambda::resource_policy::LambdaResourcePolicyProvider::shared(
+                        lambda_state.clone(),
+                    ),
+                ]),
+                fakecloud_iam::policy_evaluator::IamPolicyEvaluatorImpl::shared(iam_state.clone()),
+            )));
     if let Some(store) = cloudwatch_snapshot_store {
         cloudwatch_service = cloudwatch_service.with_snapshot_store(store);
     }
     if let Some(h) = cloudwatch_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("cloudwatch", h);
     }
-    registry.register(Arc::new(cloudwatch_service));
+    let cloudwatch_service = Arc::new(cloudwatch_service);
+    registry.register(cloudwatch_service.clone());
+    // CloudWatch evaluates alarms every period whether or not anyone looks at
+    // them: re-evaluate on a timer so time-driven transitions (data ageing
+    // out, a suppressor's wait period ending) happen and act on their own.
+    tokio::spawn(
+        cloudwatch_service
+            .clone()
+            .run_alarm_evaluator(std::time::Duration::from_secs(10)),
+    );
     let app_autoscaling_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

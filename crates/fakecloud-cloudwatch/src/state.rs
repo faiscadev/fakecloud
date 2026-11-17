@@ -102,6 +102,29 @@ pub struct CloudWatchState {
     #[serde(default)]
     pub resource_metrics_configurations:
         BTreeMap<String, BTreeMap<String, ResourceMetricsConfiguration>>,
+    /// Time-ordered index over `metrics` for alarm evaluation (a cache).
+    #[serde(skip)]
+    pub(crate) series_index: crate::series_index::SeriesIndex,
+    /// Identifies this incarnation of the account's state: a reset or a
+    /// snapshot load makes a new one, so actions queued against the old
+    /// state are dropped instead of dispatched.
+    #[serde(skip, default = "next_epoch")]
+    pub(crate) epoch: u64,
+    /// Actions owed by state changes, in transition order, waiting for the
+    /// service's dispatcher. Every writer (API handlers, the cross-service
+    /// metrics delivery, the evaluation timer) queues here under the state
+    /// lock, and a reset drops them with the state.
+    #[serde(skip)]
+    pub(crate) pending_actions: Vec<crate::alarm_actions::AlarmNotification>,
+    /// Set when an evaluation changed alarm state that needs persisting.
+    #[serde(skip)]
+    pub(crate) evaluation_dirty: bool,
+}
+
+/// A process-unique [`CloudWatchState::epoch`].
+pub(crate) fn next_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One `OTelEnrichmentMetricSelector`: a namespace plus optional metric names
@@ -159,6 +182,7 @@ impl CloudWatchState {
     pub fn new(account_id: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
+            epoch: next_epoch(),
             ..Default::default()
         }
     }
@@ -364,6 +388,96 @@ pub struct MetricAlarm {
     /// `EvaluationInterval` in seconds (alarms using `EvaluationCriteria`).
     #[serde(default)]
     pub evaluation_interval: Option<i64>,
+    /// `StateReasonData`: the JSON reason the evaluator computed for the last
+    /// transition, or the value given to `SetAlarmState`.
+    #[serde(default)]
+    pub state_reason_data: Option<String>,
+    /// `StateTransitionedTimestamp`: when `StateValue` last changed. `None` on
+    /// snapshots written before it was tracked (rendered as
+    /// `state_updated_timestamp` then).
+    #[serde(default)]
+    pub state_transitioned_timestamp: Option<DateTime<Utc>>,
+    /// `EvaluationState`: set when the last evaluation could not compute the
+    /// alarm normally, absent otherwise.
+    #[serde(default)]
+    pub evaluation_state: Option<EvaluationState>,
+    /// When the alarm last left ALARM (what an `ActionsSuppressor`'s
+    /// extension period counts from).
+    #[serde(default)]
+    pub alarm_exit: AlarmExit,
+    /// A state forced by `SetAlarmState` holds until this time (one period
+    /// later), when the alarm is evaluated normally again.
+    #[serde(default)]
+    pub manual_hold_until: Option<DateTime<Utc>>,
+    /// The next period boundary, when time passing alone can change the
+    /// evaluation outcome. The evaluation timer skips the alarm until then.
+    /// Not persisted: after a restart every alarm is evaluated once.
+    #[serde(skip)]
+    pub next_evaluation_at: Option<DateTime<Utc>>,
+}
+
+/// When an alarm last left the ALARM state. `tracked` is false on alarms
+/// persisted before this was recorded; their exit time is then read from the
+/// alarm history.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct AlarmExit {
+    #[serde(default)]
+    pub tracked: bool,
+    #[serde(default)]
+    pub at: Option<DateTime<Utc>>,
+}
+
+impl AlarmExit {
+    /// A new alarm's (it has never been in ALARM).
+    pub fn new() -> Self {
+        AlarmExit {
+            tracked: true,
+            at: None,
+        }
+    }
+
+    /// Record a state change from `old` to `new` at `at`.
+    pub fn note(&mut self, old: AlarmState, new: AlarmState, at: DateTime<Utc>) {
+        if old == AlarmState::Alarm && new != AlarmState::Alarm {
+            self.at = Some(at);
+        }
+    }
+}
+
+/// The `EvaluationState` enum of a metric or log alarm.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EvaluationState {
+    PartialData,
+    EvaluationFailure,
+    EvaluationError,
+}
+
+impl EvaluationState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EvaluationState::PartialData => "PARTIAL_DATA",
+            EvaluationState::EvaluationFailure => "EVALUATION_FAILURE",
+            EvaluationState::EvaluationError => "EVALUATION_ERROR",
+        }
+    }
+}
+
+/// The `ActionsSuppressedBy` enum of a composite alarm.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActionsSuppressedBy {
+    WaitPeriod,
+    ExtensionPeriod,
+    Alarm,
+}
+
+impl ActionsSuppressedBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActionsSuppressedBy::WaitPeriod => "WaitPeriod",
+            ActionsSuppressedBy::ExtensionPeriod => "ExtensionPeriod",
+            ActionsSuppressedBy::Alarm => "Alarm",
+        }
+    }
 }
 
 /// A single `MetricDataQuery` entry in a `PutMetricAlarm` `Metrics` list.
@@ -471,6 +585,39 @@ pub struct CompositeAlarm {
     /// `ActionConfiguration`, kept in flat-key form.
     #[serde(default)]
     pub action_configuration: Option<FlatMembers>,
+    /// `StateReasonData`: the triggering alarms of the last rule transition,
+    /// or the value given to `SetAlarmState`.
+    #[serde(default)]
+    pub state_reason_data: Option<String>,
+    /// `StateTransitionedTimestamp`: when `StateValue` last changed.
+    #[serde(default)]
+    pub state_transitioned_timestamp: Option<DateTime<Utc>>,
+    /// Why the alarm's actions are currently suppressed by its
+    /// `ActionsSuppressor`, recomputed on every evaluation.
+    #[serde(default)]
+    pub actions_suppressed_by: Option<ActionsSuppressedBy>,
+    #[serde(default)]
+    pub actions_suppressed_reason: Option<String>,
+    /// Whether the current state came from `SetAlarmState`. AWS keeps it until
+    /// a child alarm changes state or the configuration is updated.
+    #[serde(default)]
+    pub state_manually_set: bool,
+    /// The state before the last transition while that transition's actions
+    /// are still owed (held back by the `ActionsSuppressor`).
+    #[serde(default)]
+    pub pending_action_from: Option<PreviousState>,
+    #[serde(default)]
+    pub alarm_exit: AlarmExit,
+}
+
+/// An alarm's state before a transition, as alarm notifications report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreviousState {
+    pub value: AlarmState,
+    pub reason: String,
+    #[serde(default)]
+    pub reason_data: Option<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// A log alarm: evaluates a scheduled CloudWatch Logs query's results against
@@ -511,6 +658,14 @@ pub struct LogAlarm {
     /// `ActionConfiguration`, kept in flat-key form.
     #[serde(default)]
     pub action_configuration: Option<FlatMembers>,
+    /// `StateReasonData` given to `SetAlarmState`.
+    #[serde(default)]
+    pub state_reason_data: Option<String>,
+    /// `StateTransitionedTimestamp`: when `StateValue` last changed.
+    #[serde(default)]
+    pub state_transitioned_timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub alarm_exit: AlarmExit,
 }
 
 /// An anomaly detection model on a metric (single-metric or metric-math).
