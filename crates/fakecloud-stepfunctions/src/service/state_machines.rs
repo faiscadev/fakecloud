@@ -69,6 +69,8 @@ impl StepFunctionsService {
             )?;
         }
 
+        // After the request's own checks, as AWS orders them.
+        self.validate_log_destination(&body["loggingConfiguration"])?;
         let sm = StateMachine {
             name: name.to_string(),
             arn: arn.clone(),
@@ -218,6 +220,7 @@ impl StepFunctionsService {
             .state_machines
             .get_mut(arn)
             .ok_or_else(|| state_machine_not_found(arn))?;
+        self.validate_log_destination(&body["loggingConfiguration"])?;
 
         if let Some(definition) = body["definition"].as_str() {
             validate_definition(definition)?;
@@ -667,4 +670,39 @@ fn publish_version(
     let creation_date = v.creation_date;
     state.state_machine_versions.insert(version_arn.clone(), v);
     (version_arn, creation_date)
+}
+
+impl StepFunctionsService {
+    /// A logging configuration that logs must name a log group that exists,
+    /// as recorded: `InvalidLoggingConfiguration` otherwise. Nothing to check
+    /// against without a CloudWatch Logs sender wired.
+    fn validate_log_destination(&self, logging: &Value) -> Result<(), AwsServiceError> {
+        if logging["level"].as_str().unwrap_or("OFF") == "OFF" {
+            return Ok(());
+        }
+        let Some(delivery) = &self.delivery else {
+            return Ok(());
+        };
+        let groups = logging["destinations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d["cloudWatchLogsLogGroup"]["logGroupArn"].as_str());
+        for arn in groups {
+            let missing = match crate::interpreter::log_group_from_arn(arn) {
+                Some((region, account, name)) => {
+                    delivery.log_group_exists(account, region, name) == Some(false)
+                }
+                None => true,
+            };
+            if missing {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidLoggingConfiguration",
+                    "Invalid Logging Configuration: Log Destination not found.",
+                ));
+            }
+        }
+        Ok(())
+    }
 }

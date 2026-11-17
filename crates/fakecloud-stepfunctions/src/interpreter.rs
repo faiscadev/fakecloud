@@ -1290,6 +1290,10 @@ async fn run_map_iterations(
 ) -> Result<MapResults, MapRunError> {
     let map_run_arn = children.map(|c| c.map_run_arn.as_str());
     let child_type = map_child_type(state_def);
+    // A map run's children log under their root state machine's configuration.
+    let child_logging = children
+        .and_then(|_| root_logging_configuration(shared_state, execution_arn))
+        .map(Arc::new);
     let jsonata = crate::jsonata::is_jsonata(state_def);
     let input_path = state_def["InputPath"].as_str();
 
@@ -1469,6 +1473,7 @@ async fn run_map_iterations(
         let reg = registry.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
+        let child_logging = child_logging.clone();
         // Iterations start in item order, so what a failing run leaves pending is
         // the items at the end. A permit is held until the iteration has finished.
         let permit = semaphore
@@ -1540,6 +1545,12 @@ async fn run_map_iterations(
                             Ok(output) => succeed_execution(&state, &child.arn, output),
                             Err((error, cause)) => fail_execution(&state, &child.arn, error, cause),
                         }
+                        deliver_execution_logs(
+                            &state,
+                            &child.arn,
+                            delivery.as_ref(),
+                            child_logging.as_deref(),
+                        );
                         // A child stopped on its own did not succeed, whatever
                         // its states went on to return.
                         match aborted_with(&state, &child.arn) {
@@ -1851,6 +1862,26 @@ fn finish_map_run(
     }
     mr.stop_date = Some(Utc::now());
     true
+}
+
+/// The logging configuration of the state machine `execution_arn` runs, or for
+/// a map run's child (whose state machine is `<machine>/<label>`) its root
+/// machine's.
+fn root_logging_configuration(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Option<Value> {
+    let accounts = shared_state.read();
+    let state = accounts.by_arn(execution_arn)?;
+    let machine_arn = &state.executions.get(execution_arn)?.state_machine_arn;
+    let root = machine_arn
+        .split_once('/')
+        .map_or(machine_arn.as_str(), |(root, _)| root);
+    state
+        .state_machines
+        .get(root)?
+        .logging_configuration
+        .clone()
 }
 
 /// The error and cause an execution was stopped with, if it was stopped.

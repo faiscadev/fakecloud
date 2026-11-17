@@ -2770,6 +2770,10 @@ impl fakecloud_core::delivery::CloudwatchLogsDelivery for RecordedLogs {
             .lock()
             .push((log_group_name.to_string(), log_stream_name.to_string()));
     }
+
+    fn log_group_exists(&self, _account_id: &str, _region: &str, _log_group_name: &str) -> bool {
+        true
+    }
 }
 
 /// An execution logs under its state machine's logging configuration, and a
@@ -2803,8 +2807,46 @@ fn execution_logs_go_to_the_named_log_group() {
         .build()
         .unwrap()
         .block_on(fut);
+    let delivered = logs.0.lock().clone();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(delivered[0].0, "sfn-logged");
+    // `states/<machine>/<hour>/00000000` for a STANDARD execution.
+    let stream: Vec<&str> = delivered[0].1.split('/').collect();
     assert_eq!(
-        logs.0.lock().clone(),
-        [("sfn-logged".to_string(), "exec-1".to_string())]
+        (stream[0], stream[1], stream[3]),
+        ("states", "test", "00000000")
     );
+    assert_eq!(stream[2].split('-').count(), 4, "{delivered:?}");
+}
+
+/// Without execution data, an event's input, output and a Task's parameters
+/// stay out of the log, as recorded; its other details stay in, keys sorted.
+#[test]
+fn log_lines_leave_out_execution_data_unless_asked() {
+    let state = make_state();
+    let arn = arn_for("redacted");
+    create_execution(&state, &arn, None);
+    let accounts = state.read();
+    let exec = accounts.by_arn(&arn).unwrap().executions.get(&arn).unwrap();
+    let event = crate::state::HistoryEvent {
+        id: 5,
+        event_type: "TaskScheduled".to_string(),
+        timestamp: Utc::now(),
+        previous_event_id: 4,
+        details: json!({
+            "resourceType": "lambda",
+            "resource": "invoke",
+            "region": "us-east-1",
+            "parameters": "{\"secret\":1}",
+        }),
+    };
+    let line = log_message(exec, &event, false);
+    assert!(
+        line.starts_with(
+            r#"{"details":{"region":"us-east-1","resource":"invoke","resourceType":"lambda"},"redrive_count":"0","id":"5","type":"TaskScheduled","previous_event_id":"4","event_timestamp":""#
+        ),
+        "{line}"
+    );
+    let with_data = log_message(exec, &event, true);
+    assert!(with_data.contains("parameters"), "{with_data}");
 }
