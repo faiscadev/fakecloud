@@ -104,6 +104,51 @@ pub(crate) fn validate_restart_policy(
     Ok(())
 }
 
+/// Fargate's range for `startTimeout` and `stopTimeout`, in seconds.
+pub(crate) const FARGATE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 2..=120;
+
+/// Register-time validation of a container definition's `startTimeout` and
+/// `stopTimeout`: whole seconds that fit the model's 32-bit integer and are
+/// not negative, and 2-120 seconds when the task definition requires
+/// Fargate (as the task definition parameters guide documents). `Err`
+/// carries the `ClientException` message.
+pub(crate) fn validate_container_timeouts(
+    container_definition: &serde_json::Value,
+    fargate: bool,
+) -> Result<(), String> {
+    for key in ["startTimeout", "stopTimeout"] {
+        let Some(value) = container_definition.get(key).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let Some(secs) = value
+            .as_i64()
+            .filter(|s| *s >= 0 && *s <= i64::from(i32::MAX))
+        else {
+            return Err(format!(
+                "{key} must be a non-negative integer number of seconds"
+            ));
+        };
+        if fargate && !FARGATE_TIMEOUT_RANGE.contains(&secs) {
+            return Err(format!(
+                "{key} must be between {} and {} seconds for tasks that require FARGATE",
+                FARGATE_TIMEOUT_RANGE.start(),
+                FARGATE_TIMEOUT_RANGE.end()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A validated timeout member (`startTimeout`/`stopTimeout`) of a container
+/// definition, `None` when unset or out of the model's range.
+pub(crate) fn timeout_secs(container_definition: &serde_json::Value, key: &str) -> Option<u32> {
+    container_definition
+        .get(key)?
+        .as_i64()
+        .filter(|s| *s >= 0 && *s <= i64::from(i32::MAX))
+        .map(|s| s as u32)
+}
+
 /// Why an exited container is not restarted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoRestart {
@@ -184,6 +229,18 @@ impl RestartTracker {
 
 /// Whether a dependent waiting on `condition` gives up on an upstream that
 /// started at `upstream_started` and has `upstream_start_timeout` seconds.
+///
+/// AWS documents no default for `startTimeout`. The task definition
+/// parameters guide ("Container timeouts",
+/// <https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html>)
+/// says only: "If a `startTimeout` value is specified for `containerB` and
+/// it doesn't reach the desired status within that time, then `containerA`
+/// doesn't start", and states a 30 second default for `stopTimeout` alone.
+/// The API reference (`ContainerDefinition.startTimeout`) adds that the
+/// agent's `ECS_CONTAINER_START_TIMEOUT` "is enforced independently from
+/// this start timeout value": that variable bounds the container runtime's
+/// start call, not dependency resolution. So without a `startTimeout` there
+/// is no time limit, which is also how the ECS agent resolves dependencies.
 pub(crate) fn dependency_timed_out(
     condition: DependsOnCondition,
     upstream_start_timeout: Option<u32>,
@@ -261,6 +318,32 @@ mod tests {
         assert!(ok(json!({"enabled": true, "ignoredExitCodes": fifty_one})).is_err());
         assert!(ok(json!({"enabled": true, "ignoredExitCodes": ["1"]})).is_err());
         assert!(validate_restart_policy(&json!({})).is_ok());
+    }
+
+    #[test]
+    fn container_timeouts_are_validated() {
+        let check = |v: serde_json::Value, fargate| validate_container_timeouts(&v, fargate);
+        assert!(check(json!({}), true).is_ok());
+        assert!(check(json!({"startTimeout": 0, "stopTimeout": 600}), false).is_ok());
+        assert!(check(json!({"startTimeout": -1}), false).is_err());
+        assert!(check(json!({"stopTimeout": 4294967296_i64}), false).is_err());
+        assert!(check(json!({"stopTimeout": "30"}), false).is_err());
+        assert!(check(json!({"startTimeout": 2, "stopTimeout": 120}), true).is_ok());
+        assert!(check(json!({"startTimeout": 1}), true).is_err());
+        assert!(check(json!({"stopTimeout": 121}), true).is_err());
+        assert_eq!(
+            timeout_secs(&json!({"stopTimeout": 45}), "stopTimeout"),
+            Some(45)
+        );
+        // Out of range values never wrap around into a short timeout.
+        assert_eq!(
+            timeout_secs(&json!({"stopTimeout": 4294967326_i64}), "stopTimeout"),
+            None
+        );
+        assert_eq!(
+            timeout_secs(&json!({"stopTimeout": -5}), "stopTimeout"),
+            None
+        );
     }
 
     #[test]

@@ -558,9 +558,8 @@ impl EcsService {
             (task_id, account, task.clone())
         };
         if let Some(rt) = &self.runtime {
-            rt.stop_task(&task_id, &reason).await;
+            rt.stop_task(&self.state, &account, &task_id, &reason).await;
         }
-        let _ = account;
         Ok(AwsResponse::ok_json(json!({
             "task": task_to_json(&task_snapshot),
         })))
@@ -1002,6 +1001,43 @@ pub(super) mod multi_container_tests {
             task_set_arn: None,
         };
         acct.tasks.insert(id.into(), task);
+    }
+
+    /// A stopping task (DEACTIVATING / STOPPING / DEPROVISIONING) is no
+    /// longer in a service's runningCount, but still blocks DeleteCluster and
+    /// keeps a deleted service draining, as on ECS.
+    #[test]
+    fn stopping_tasks_leave_running_count_but_stay_live() {
+        let svc = fresh_service();
+        for (id, status) in [("a", "RUNNING"), ("b", "STOPPING"), ("c", "STOPPED")] {
+            insert_task(&svc, id, "prod");
+            let mut accounts = svc.state.write();
+            let t = accounts
+                .get_mut("000000000000")
+                .unwrap()
+                .tasks
+                .get_mut(id)
+                .unwrap();
+            t.last_status = status.into();
+            t.started_by = Some("ecs-svc/web".into());
+        }
+        let accounts = svc.state.read();
+        let st = accounts.get("000000000000").unwrap();
+        let mut json = json!({});
+        crate::service::helpers::recompute_service_counts(st, "web", "prod", &mut json);
+        assert_eq!(json["runningCount"], 1);
+        assert_eq!(json["pendingCount"], 0);
+        assert_eq!(
+            crate::service::helpers::cluster_active_task_count(st, "prod"),
+            2
+        );
+        assert!(crate::service::helpers::service_has_live_tasks(
+            st, "web", "prod"
+        ));
+        for s in ["DEACTIVATING", "STOPPING", "DEPROVISIONING", "ACTIVATING"] {
+            assert!(crate::service::helpers::task_status_is_live(s), "{s}");
+        }
+        assert!(!crate::service::helpers::task_status_is_live("STOPPED"));
     }
 
     #[test]

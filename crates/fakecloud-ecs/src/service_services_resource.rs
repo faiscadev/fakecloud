@@ -843,8 +843,11 @@ impl EcsService {
             for id in stop_ids {
                 let rt2 = rt.clone();
                 let id_clone = id.clone();
+                let state = self.state.clone();
+                let account = account.clone();
                 tokio::spawn(async move {
-                    rt2.stop_task(&id_clone, "ECS service scale-down").await;
+                    rt2.stop_task(&state, &account, &id_clone, "ECS service scale-down")
+                        .await;
                 });
             }
         } else {
@@ -981,7 +984,8 @@ impl EcsService {
                 }
             }
             if let Some(rt) = &self.runtime {
-                rt.stop_task(id, "ECS service deletion").await;
+                rt.stop_task(&self.state, &request.account_id, id, "ECS service deletion")
+                    .await;
             }
         }
 

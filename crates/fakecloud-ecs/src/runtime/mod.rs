@@ -72,9 +72,7 @@ pub enum RuntimeError {
     Wait(String),
 }
 
-/// `(container_name, docker_container_id, stop_timeout_secs)` of one running
-/// task container.
-type TaskContainerHandle = (String, String, u32);
+use stopping::{TaskContainerHandle, TaskTeardown};
 
 /// Docker/Podman executor for ECS tasks.
 pub struct EcsRuntime {
@@ -98,12 +96,19 @@ pub struct EcsRuntime {
     /// untouched and lets `docker pull` succeed against fakecloud ECR
     /// without a prior `aws ecr get-login-password | docker login`.
     docker_config: Option<Arc<TempDir>>,
-    /// Tracks per-task lists of `(container_name, docker_container_id,
-    /// stop_timeout_secs)` so `stop_task` can stop every container backing a
-    /// task with its own `stopTimeout` — multi-container task definitions
-    /// launch one docker container per `containerDefinitions` entry, all of
-    /// which must be torn down on stop.
+    /// Tracks per-task container handles so `stop_task` can stop every
+    /// container backing a task with its own `stopTimeout`, in `dependsOn`
+    /// order — multi-container task definitions launch one docker container
+    /// per `containerDefinitions` entry, all of which must be torn down on
+    /// stop.
     containers: RwLock<std::collections::HashMap<String, Vec<TaskContainerHandle>>>,
+    /// Per-task network teardown captured when a task starts stopping (see
+    /// [`stopping`]), so it completes even once the task record is gone.
+    teardowns: parking_lot::Mutex<std::collections::HashMap<String, TaskTeardown>>,
+    /// Per-task "execution finished" signals: set once the background
+    /// execution has finalized the task (STOPPED or failed).
+    task_done:
+        parking_lot::Mutex<std::collections::HashMap<String, tokio::sync::watch::Receiver<bool>>>,
     /// Cross-service delivery bus — emits `aws.ecs` EventBridge events
     /// on task state transitions when wired. `None` if the server started
     /// without EventBridge configured (or for unit tests).
@@ -156,6 +161,7 @@ mod lb;
 mod monitoring;
 pub(crate) mod restart;
 mod secrets;
+mod stopping;
 pub(crate) use restart::RestartPolicy;
 mod task_creds;
 pub use task_creds::{task_credentials_token, AUTHORIZATION_TOKEN_ENV};
@@ -204,6 +210,8 @@ impl EcsRuntime {
             creds_helper_image: tokio::sync::Mutex::new(None),
             netns_holders: RwLock::new(std::collections::HashMap::new()),
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -236,6 +244,8 @@ impl EcsRuntime {
             creds_helper_image: tokio::sync::Mutex::new(None),
             netns_holders: RwLock::new(std::collections::HashMap::new()),
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -798,6 +808,19 @@ pub(crate) fn task_desired_stopped(
     }
 }
 
+/// The reason of a user-requested stop (`StopTask`, a scale-down, a
+/// deletion), which keeps stop code `UserInitiated` on the stopped task;
+/// `None` when the task stopped on its own.
+pub(crate) fn user_initiated_stop(
+    state: &SharedEcsState,
+    account_id: &str,
+    task_id: &str,
+) -> Option<Option<String>> {
+    let accounts = state.read();
+    let task = accounts.get(account_id)?.tasks.get(task_id)?;
+    (task.stop_code.as_deref() == Some("UserInitiated")).then(|| task.stopped_reason.clone())
+}
+
 /// The region a task runs in: the region its ARN names, else the ECS state's
 /// region.
 pub(super) fn task_region(state: &SharedEcsState, account_id: &str, task_id: &str) -> String {
@@ -960,16 +983,12 @@ fn build_container_plans(
             .filter(|_| log_driver_daemon)
             .and_then(|d| d.get("logConfiguration"))
             .and_then(parse_log_configuration);
-        let stop_timeout = def.as_ref().and_then(|d| {
-            d.get("stopTimeout")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32)
-        });
-        let start_timeout = def.as_ref().and_then(|d| {
-            d.get("startTimeout")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.min(u32::MAX as u64) as u32)
-        });
+        let stop_timeout = def
+            .as_ref()
+            .and_then(|d| restart::timeout_secs(d, "stopTimeout"));
+        let start_timeout = def
+            .as_ref()
+            .and_then(|d| restart::timeout_secs(d, "startTimeout"));
         let restart_policy = def.as_ref().and_then(restart::parse_restart_policy);
         let user = def
             .as_ref()
@@ -2411,6 +2430,8 @@ impl EcsRuntime {
             creds_helper_image: tokio::sync::Mutex::new(None),
             netns_holders: RwLock::new(std::collections::HashMap::new()),
             exec_sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            teardowns: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            task_done: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -2574,7 +2595,7 @@ mod tests {
         );
     }
 
-    fn make_task(task_id: &str) -> Task {
+    pub(super) fn make_task(task_id: &str) -> Task {
         Task {
             task_arn: Arn::new(
                 "ecs",
@@ -2794,7 +2815,7 @@ mod tests {
         );
     }
 
-    fn make_container(name: &str, essential: bool) -> crate::state::Container {
+    pub(super) fn make_container(name: &str, essential: bool) -> crate::state::Container {
         crate::state::Container {
             container_arn: format!(
                 "arn:aws:ecs:us-east-1:000000000000:container/default/abc/{name}"

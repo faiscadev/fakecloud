@@ -124,11 +124,21 @@ pub async fn cfn_stop_service_tasks(
         ids
     };
 
-    for id in &task_ids {
-        runtime.stop_task(id, "CloudFormation stack deletion").await;
-        let mut accounts = state.write();
-        if let Some(st) = accounts.get_mut(&account_id) {
-            st.tasks.remove(id);
-        }
+    // Tasks stop together. Each record is dropped only once its execution
+    // has finalized the task (load balancer targets and ENI released,
+    // awslogs forwarded), which reads the record.
+    let mut stops = tokio::task::JoinSet::new();
+    for id in task_ids {
+        let (state, runtime, account_id) = (state.clone(), runtime.clone(), account_id.clone());
+        stops.spawn(async move {
+            runtime
+                .stop_task_and_wait(&state, &account_id, &id, "CloudFormation stack deletion")
+                .await;
+            let mut accounts = state.write();
+            if let Some(st) = accounts.get_mut(&account_id) {
+                st.tasks.remove(&id);
+            }
+        });
     }
+    stops.join_all().await;
 }

@@ -323,3 +323,140 @@ async fn ecs_register_task_definition_validates_restart_policy() {
     assert!(policy.enabled());
     assert_eq!(policy.restart_attempt_period(), Some(60));
 }
+
+#[tokio::test]
+async fn ecs_register_task_definition_validates_container_timeouts() {
+    let server = TestServer::start().await;
+    let ecs = server.ecs_client().await;
+    let register = |fargate: bool, start: Option<i32>, stop: Option<i32>| {
+        let mut req = ecs
+            .register_task_definition()
+            .family("timeouts")
+            .container_definitions(
+                ContainerDefinition::builder()
+                    .name("app")
+                    .image(ALPINE)
+                    .set_start_timeout(start)
+                    .set_stop_timeout(stop)
+                    .build(),
+            );
+        if fargate {
+            req = req
+                .requires_compatibilities(aws_sdk_ecs::types::Compatibility::Fargate)
+                .network_mode(aws_sdk_ecs::types::NetworkMode::Awsvpc)
+                .cpu("256")
+                .memory("512");
+        }
+        req.send()
+    };
+    for (fargate, start, stop) in [
+        (false, Some(-1), None),
+        (false, None, Some(-5)),
+        (true, Some(1), None),
+        (true, None, Some(121)),
+    ] {
+        let err = register(fargate, start, stop)
+            .await
+            .expect_err("out-of-range timeout");
+        assert!(
+            err.into_service_error().is_client_exception(),
+            "fargate={fargate} start={start:?} stop={stop:?}"
+        );
+    }
+    register(true, Some(120), Some(2))
+        .await
+        .expect("Fargate range accepted");
+    register(false, Some(600), Some(600))
+        .await
+        .expect("EC2 has no upper bound");
+}
+
+/// The introspection force-stop requests the stop as StopTask does, so a
+/// container whose restart policy would restart it stays stopped, and it
+/// answers only once the task is STOPPED.
+#[tokio::test]
+async fn ecs_force_stop_is_not_undone_by_a_restart_policy() {
+    if !require_docker_or_skip("ecs_force_stop_is_not_undone_by_a_restart_policy") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let ecs = server.ecs_client().await;
+    ecs.create_cluster()
+        .cluster_name("force-stop-cluster")
+        .send()
+        .await
+        .unwrap();
+    ecs.register_task_definition()
+        .family("force-stop-family")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image(ALPINE)
+                .essential(true)
+                .command("sh")
+                .command("-c")
+                .command("sleep 3600")
+                .stop_timeout(2)
+                .restart_policy(
+                    ContainerRestartPolicy::builder()
+                        .enabled(true)
+                        .restart_attempt_period(60)
+                        .build()
+                        .expect("restart policy"),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = ecs
+        .run_task()
+        .cluster("force-stop-cluster")
+        .task_definition("force-stop-family")
+        .send()
+        .await
+        .expect("run_task")
+        .tasks()[0]
+        .task_arn()
+        .unwrap()
+        .to_string();
+    let task_id = arn.rsplit('/').next().unwrap().to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let task = describe(&ecs, "force-stop-cluster", &arn).await;
+        if task.last_status() == Some("RUNNING") {
+            break;
+        }
+        assert_ne!(
+            task.last_status(),
+            Some("STOPPED"),
+            "{:?}",
+            task.stopped_reason()
+        );
+        assert!(std::time::Instant::now() < deadline, "task never ran");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Let the container run past its 60s attempt period, so only the stop
+    // request keeps the restart policy from bringing it back.
+    tokio::time::sleep(Duration::from_secs(62)).await;
+
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(format!(
+            "{}/_fakecloud/ecs/tasks/{task_id}/force-stop",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .expect("force-stop")
+        .json()
+        .await
+        .expect("force-stop json");
+    assert_eq!(resp["lastStatus"], "STOPPED", "{resp}");
+
+    let task = describe(&ecs, "force-stop-cluster", &arn).await;
+    assert_eq!(task.last_status(), Some("STOPPED"));
+    assert_eq!(
+        task.stop_code(),
+        Some(&aws_sdk_ecs::types::TaskStopCode::UserInitiated)
+    );
+}

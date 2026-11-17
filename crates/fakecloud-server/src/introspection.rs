@@ -197,6 +197,7 @@ pub(crate) fn ecs_task_metadata_response(
                 created_at: Some(task.created_at.to_rfc3339()),
                 started_at: task.started_at.map(|d| d.to_rfc3339()),
                 exit_code: c.exit_code,
+                restart_count: c.restart_count,
             }
         })
         .collect();

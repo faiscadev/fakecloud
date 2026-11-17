@@ -1406,9 +1406,11 @@ pub(crate) fn recompute_service_counts(
     let mut pending = 0i32;
     for t in state.tasks.values() {
         if t.started_by.as_deref() == Some(service_tag.as_str()) && t.cluster_name == cluster_name {
+            // `runningCount` counts tasks in RUNNING only (a stopping task
+            // no longer is); `pendingCount` those on their way there.
             match t.last_status.as_str() {
                 "RUNNING" => running += 1,
-                "PENDING" | "PROVISIONING" => pending += 1,
+                "PENDING" | "PROVISIONING" | "ACTIVATING" => pending += 1,
                 _ => {}
             }
         }
@@ -1419,9 +1421,26 @@ pub(crate) fn recompute_service_counts(
     }
 }
 
+/// Whether a task `lastStatus` is one of the ECS task lifecycle states
+/// before STOPPED: PROVISIONING, PENDING, ACTIVATING, RUNNING, and the
+/// stopping ones (DEACTIVATING, STOPPING, DEPROVISIONING), during which the
+/// task still holds its resources.
+pub(crate) fn task_status_is_live(last_status: &str) -> bool {
+    matches!(
+        last_status,
+        "PROVISIONING"
+            | "PENDING"
+            | "ACTIVATING"
+            | "RUNNING"
+            | "DEACTIVATING"
+            | "STOPPING"
+            | "DEPROVISIONING"
+    )
+}
+
 /// True while a service still owns any task that has not reached STOPPED
-/// (RUNNING / PENDING / PROVISIONING). Used to decide when a DRAINING
-/// (deleted) service has fully drained and may transition to INACTIVE.
+/// (including one still stopping). Used to decide when a DRAINING (deleted)
+/// service has fully drained and may transition to INACTIVE.
 pub(crate) fn service_has_live_tasks(
     state: &EcsState,
     service_name: &str,
@@ -1431,10 +1450,7 @@ pub(crate) fn service_has_live_tasks(
     state.tasks.values().any(|t| {
         t.started_by.as_deref() == Some(service_tag.as_str())
             && t.cluster_name == cluster_name
-            && matches!(
-                t.last_status.as_str(),
-                "RUNNING" | "PENDING" | "PROVISIONING"
-            )
+            && task_status_is_live(&t.last_status)
     })
 }
 
@@ -1448,13 +1464,7 @@ pub(crate) fn cluster_active_task_count(state: &EcsState, cluster_name: &str) ->
     state
         .tasks
         .values()
-        .filter(|t| {
-            t.cluster_name == cluster_name
-                && matches!(
-                    t.last_status.as_str(),
-                    "RUNNING" | "PENDING" | "PROVISIONING"
-                )
-        })
+        .filter(|t| t.cluster_name == cluster_name && task_status_is_live(&t.last_status))
         .count()
 }
 

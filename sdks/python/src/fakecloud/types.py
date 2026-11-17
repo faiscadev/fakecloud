@@ -2797,6 +2797,7 @@ class EcsTaskMetadataContainer:
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     exit_code: Optional[int] = None
+    restart_count: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadataContainer:
@@ -2812,6 +2813,7 @@ class EcsTaskMetadataContainer:
             created_at=data.get("createdAt"),
             started_at=data.get("startedAt"),
             exit_code=data.get("exitCode"),
+            restart_count=data.get("restartCount"),
         )
 
 

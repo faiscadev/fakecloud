@@ -160,6 +160,12 @@ pub(super) struct K8sTaskBackend {
     pod_config: K8sPodConfig,
     /// task_id -> Pod name, so StopTask/stop_all can find the Pod.
     pods: std::sync::Arc<RwLock<HashMap<String, String>>>,
+    /// Whether the API server runs native sidecars (restartable
+    /// initContainers, Kubernetes 1.29+), detected once at startup. An
+    /// older server drops the initContainer `restartPolicy`, which would
+    /// leave a long-running container blocking the Pod as a plain
+    /// initContainer.
+    native_sidecars: bool,
 }
 
 impl std::fmt::Debug for K8sTaskBackend {
@@ -178,9 +184,21 @@ impl K8sTaskBackend {
         let client = K8sClient::connect(env.namespace.clone())
             .await
             .map_err(|e| BackendInitError::Connect(e.to_string()))?;
+        let native_sidecars = match client.client().apiserver_version().await {
+            Ok(v) => supports_native_sidecars(&v.major, &v.minor),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not read the Kubernetes API server version; ECS container restart \
+                     policies use a Pod restartPolicy of Always instead of native sidecars"
+                );
+                false
+            }
+        };
         tracing::info!(
             namespace = %env.namespace,
             self_url = %env.self_url,
+            native_sidecars,
             "K8s ECS backend initialized"
         );
         Ok(Self {
@@ -193,6 +211,7 @@ impl K8sTaskBackend {
             pull_secret: env.pull_secret,
             pod_config,
             pods: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            native_sidecars,
         })
     }
 
@@ -531,6 +550,7 @@ impl EcsRuntime {
                 task_id,
                 &with_creds,
                 creds_init,
+                backend.native_sidecars,
             );
             pod_config.apply(&mut pod);
             (pod, map)
@@ -679,7 +699,7 @@ impl EcsRuntime {
         let started = build_running_list(&container_map);
         let mut restart_watches: HashMap<String, RestartWatch> = container_map
             .iter()
-            .filter(|e| e.restart_policy.is_some())
+            .filter(|e| e.restarted_by_pod)
             .map(|e| (e.original.clone(), RestartWatch::default()))
             .collect();
         let dependency_timeouts = init_dependency_timeouts(&resolved, &container_map);
@@ -723,12 +743,10 @@ impl EcsRuntime {
             let stopping = task_desired_stopped(state, account_id, task_id);
             let mut restarted = false;
             for entry in &container_map {
-                let (Some(policy), Some(watch)) = (
-                    entry.restart_policy.as_ref(),
-                    restart_watches.get_mut(&entry.original),
-                ) else {
+                let Some(watch) = restart_watches.get_mut(&entry.original) else {
                     continue;
                 };
+                let policy = entry.restart_policy.as_ref();
                 if watch.observe(policy, &finished_runs(&pod, &entry.k8s_name), stopping)
                     && marked_running
                 {
@@ -768,12 +786,26 @@ impl EcsRuntime {
                 backend.pods.write().remove(task_id);
                 return Err(RuntimeError::ContainerStart(reason));
             }
+            // A run-once initContainer that failed: under a Pod
+            // `restartPolicy: Always` the kubelet would retry it forever, so
+            // the task stops on the first failure, with the dependency's
+            // reason.
+            if let Some(reason) = failed_init_dependency(&pod, &container_map) {
+                mark_pull_stopped(state, account_id, task_id);
+                backend.client.delete_pod(&pod_name).await;
+                backend.pods.write().remove(task_id);
+                return Err(RuntimeError::ContainerStart(reason));
+            }
 
             if !marked_running && (phase == "Running" || phase == "Succeeded" || phase == "Failed")
             {
                 mark_running_multi(state, account_id, task_id, &started);
-                for (name, watch) in &restart_watches {
-                    set_restart_count(state, account_id, task_id, name, watch.restart_count);
+                // RestartCount is reported only for containers with a policy.
+                for entry in container_map.iter().filter(|e| e.restart_policy.is_some()) {
+                    let count = restart_watches
+                        .get(&entry.original)
+                        .map_or(0, |w| w.restart_count);
+                    set_restart_count(state, account_id, task_id, &entry.original, count);
                 }
                 // An awsvpc task's ENI (precreated at RunTask) attaches now;
                 // its ports are served by the Pod IP, which the load
@@ -851,6 +883,8 @@ impl EcsRuntime {
         stopped_externally: bool,
     ) -> Result<(), RuntimeError> {
         let backend = self.k8s.as_ref().expect("k8s backend");
+        // Leaves its target groups first (a StopTask already did).
+        self.begin_stopping(state, account_id, task_id);
 
         let (primary, stop_code) = task_outcome(&final_containers, stopped_externally);
 
@@ -897,6 +931,8 @@ impl EcsRuntime {
         };
 
         self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
+        let region = super::task_region(state, account_id, task_id);
+        self.deprovision(state, account_id, &region, task_id);
         finalize_stopped_multi(
             state,
             account_id,
@@ -907,8 +943,6 @@ impl EcsRuntime {
             final_stop_code,
             final_reason.clone(),
         );
-        let region = super::task_region(state, account_id, task_id);
-        self.deregister_lb_targets(state, account_id, &region, task_id);
         let reason_msg = final_reason.unwrap_or_else(|| format!("Exit code {primary}"));
         self.emit_state_change(
             state,
@@ -972,8 +1006,16 @@ pub(super) struct ContainerMapEntry {
     original: String,
     k8s_name: String,
     essential: bool,
-    /// The container's restart policy when the Pod restarts it.
+    /// The container's restart policy (never set on a run-once
+    /// initContainer).
     restart_policy: Option<super::RestartPolicy>,
+    /// Whether the kubelet restarts the container when it exits (a native
+    /// sidecar, or any long-running container of a Pod with
+    /// `restartPolicy: Always`).
+    restarted_by_pod: bool,
+    /// For a run-once initContainer, the strictest `dependsOn` condition it
+    /// is depended on with (`SUCCESS` over `COMPLETE`).
+    init_condition: Option<DependsOnCondition>,
 }
 
 fn build_running_list(map: &[ContainerMapEntry]) -> Vec<RunningContainer> {
@@ -1089,6 +1131,40 @@ fn init_running_for(
     (now - started).to_std().ok()
 }
 
+/// Under a Pod `restartPolicy: Always`, the stop reason for a run-once
+/// initContainer (a `COMPLETE`/`SUCCESS` dependency) that exited non-zero.
+/// The kubelet retries such an initContainer instead of failing the Pod, so
+/// the task would otherwise never start; under `Never` the Pod fails and
+/// the task stops through its exit codes.
+fn failed_init_dependency(pod: &Pod, map: &[ContainerMapEntry]) -> Option<String> {
+    let restarts_init =
+        pod.spec.as_ref().and_then(|s| s.restart_policy.as_deref()) == Some("Always");
+    if !restarts_init {
+        return None;
+    }
+    map.iter().find_map(|e| {
+        let condition = e.init_condition?;
+        let run = finished_runs(pod, &e.k8s_name)
+            .into_iter()
+            .find(|r| r.exit_code != 0)?;
+        Some(match condition {
+            DependsOnCondition::Success => format!(
+                "dependency on container {} ({}) failed: upstream exited with code {}",
+                e.original,
+                condition.as_aws_str(),
+                run.exit_code
+            ),
+            _ => format!(
+                "dependency on container {} ({}) exited with code {}; on Kubernetes a failed \
+                 initContainer does not let the task's other containers start",
+                e.original,
+                condition.as_aws_str(),
+                run.exit_code
+            ),
+        })
+    })
+}
+
 /// One finished run of a Pod container: its exit code and how long it ran.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FinishedRun {
@@ -1152,11 +1228,13 @@ struct RestartWatch {
 }
 
 impl RestartWatch {
-    /// Account for newly finished `runs`. Returns whether the restart count
-    /// changed.
+    /// Account for newly finished `runs`. `policy` is the container's restart
+    /// policy; a container without one (restarted only because the Pod's
+    /// `restartPolicy` is `Always`) is stopped, for ECS, by its first exit.
+    /// Returns whether the restart count changed.
     fn observe(
         &mut self,
-        policy: &super::RestartPolicy,
+        policy: Option<&super::RestartPolicy>,
         runs: &[FinishedRun],
         task_stopping: bool,
     ) -> bool {
@@ -1165,17 +1243,20 @@ impl RestartWatch {
             if !self.handled.insert(run.key.clone()) || self.exited.is_some() {
                 continue;
             }
-            match super::restart::restart_decision(
-                policy,
-                Some(run.exit_code),
-                run.ran_for,
-                task_stopping,
-            ) {
-                Ok(()) => {
-                    self.restart_count += 1;
-                    changed = true;
-                }
-                Err(_) => self.exited = Some(run.exit_code),
+            let restarted = policy.is_some_and(|policy| {
+                super::restart::restart_decision(
+                    policy,
+                    Some(run.exit_code),
+                    run.ran_for,
+                    task_stopping,
+                )
+                .is_ok()
+            });
+            if restarted {
+                self.restart_count += 1;
+                changed = true;
+            } else {
+                self.exited = Some(run.exit_code);
             }
         }
         changed
@@ -1216,19 +1297,26 @@ enum RestartLayout {
     None,
     /// Each becomes a native sidecar (an initContainer with
     /// `restartPolicy: Always`), restarted on its own, while the others
-    /// stay regular containers the kubelet never restarts.
+    /// stay regular containers the kubelet never restarts. Only used when
+    /// a regular container is essential: the kubelet ends the Pod (sidecars
+    /// included) once every regular container has exited, which on ECS
+    /// stops the task only if one of them is essential.
     Sidecars,
-    /// Every long-running container has one, so there would be no regular
-    /// container left beside sidecars: the Pod's own `restartPolicy` is
-    /// `Always`.
+    /// The Pod's own `restartPolicy` is `Always`, so the kubelet restarts
+    /// every long-running container; one without a restart policy is
+    /// stopped, for ECS, by its first exit. Used when every long-running
+    /// container has a policy, when the only containers without one are
+    /// non-essential, and when the cluster has no native sidecars.
     PodAlways,
 }
 
 /// The [`RestartLayout`] for a task's containers. Run-once initContainers
-/// (`COMPLETE`/`SUCCESS` targets) are never restarted.
+/// (`COMPLETE`/`SUCCESS` targets) are never restarted. `native_sidecars`:
+/// whether the cluster runs restartable initContainers (Kubernetes 1.29+).
 fn restart_layout(
     resolved: &[(ContainerPlan, Vec<(String, String)>)],
     init_targets: &HashSet<&str>,
+    native_sidecars: bool,
 ) -> RestartLayout {
     let long_running: Vec<&ContainerPlan> = resolved
         .iter()
@@ -1239,12 +1327,31 @@ fn restart_layout(
         .iter()
         .filter(|p| p.restart_policy.is_some())
         .count();
+    let essential_without_policy = long_running
+        .iter()
+        .any(|p| p.restart_policy.is_none() && p.essential);
     if with_policy == 0 {
         RestartLayout::None
-    } else if with_policy == long_running.len() {
-        RestartLayout::PodAlways
-    } else {
+    } else if native_sidecars && essential_without_policy {
         RestartLayout::Sidecars
+    } else {
+        RestartLayout::PodAlways
+    }
+}
+
+/// Whether an API server `major`/`minor` (as `/version` reports them, e.g.
+/// `1` / `29+`) runs native sidecars: restartable initContainers are on by
+/// default from Kubernetes 1.29.
+fn supports_native_sidecars(major: &str, minor: &str) -> bool {
+    let num = |s: &str| {
+        s.trim()
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u32>()
+            .ok()
+    };
+    match (num(major), num(minor)) {
+        (Some(major), Some(minor)) => major > 1 || (major == 1 && minor >= 29),
+        _ => false,
     }
 }
 
@@ -1260,10 +1367,13 @@ fn build_task_pod(
     task_id: &str,
     resolved: &[(ContainerPlan, Vec<(String, String)>)],
     creds_init: Option<&CredsInit>,
+    native_sidecars: bool,
 ) -> (Pod, Vec<ContainerMapEntry>) {
     // A container depended on with COMPLETE/SUCCESS runs to completion
     // first -> initContainer.
     let mut init_targets: HashSet<&str> = HashSet::new();
+    // The strictest condition each initContainer is depended on with.
+    let mut init_conditions: HashMap<&str, DependsOnCondition> = HashMap::new();
     for (plan, _) in resolved {
         for dep in &plan.depends_on {
             if matches!(
@@ -1271,6 +1381,12 @@ fn build_task_pod(
                 DependsOnCondition::Complete | DependsOnCondition::Success
             ) {
                 init_targets.insert(dep.container_name.as_str());
+                let cond = init_conditions
+                    .entry(dep.container_name.as_str())
+                    .or_insert(dep.condition);
+                if dep.condition == DependsOnCondition::Success {
+                    *cond = DependsOnCondition::Success;
+                }
             }
         }
     }
@@ -1287,16 +1403,24 @@ fn build_task_pod(
         init_containers.push(creds.container());
     }
 
-    let restart = restart_layout(resolved, &init_targets);
+    let restart = restart_layout(resolved, &init_targets, native_sidecars);
     for (idx, (plan, env)) in resolved.iter().enumerate() {
         let k8s_name = unique_dns_name(&plan.container_name, idx, &mut used_names);
         let is_init_target = init_targets.contains(plan.container_name.as_str());
+        let restarted_by_pod = !is_init_target
+            && match restart {
+                RestartLayout::None => false,
+                RestartLayout::Sidecars => plan.restart_policy.is_some(),
+                RestartLayout::PodAlways => true,
+            };
         map.push(ContainerMapEntry {
             original: plan.container_name.clone(),
             k8s_name: k8s_name.clone(),
             essential: plan.essential,
             // A run-once initContainer is never restarted.
             restart_policy: plan.restart_policy.clone().filter(|_| !is_init_target),
+            restarted_by_pod,
+            init_condition: init_conditions.get(plan.container_name.as_str()).copied(),
         });
         let mut container = build_container(&k8s_name, plan, env, ecr_host, ecr_port, &mut volumes);
         if is_init_target {
@@ -1584,6 +1708,7 @@ mod tests {
             "task-1",
             resolved,
             None,
+            true,
         )
     }
 
@@ -1814,11 +1939,11 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].exit_code, 1);
         assert_eq!(runs[0].ran_for, Duration::from_secs(70));
-        assert!(watch.observe(&policy, &runs, false));
+        assert!(watch.observe(Some(&policy), &runs, false));
         assert_eq!(watch.restart_count, 1);
         // The kubelet restarted it: the same run now shows as lastState.
         let pod = pod_with_status("app", Some(terminated_at("c1", 1, 70)), None);
-        assert!(!watch.observe(&policy, &finished_runs(&pod, "app"), false));
+        assert!(!watch.observe(Some(&policy), &finished_runs(&pod, "app"), false));
         assert_eq!(watch.restart_count, 1);
         assert_eq!(watch.exited, None);
         // The next run exits 0, which the policy ignores: stopped for ECS.
@@ -1827,7 +1952,7 @@ mod tests {
             Some(terminated_at("c1", 1, 70)),
             Some(terminated_at("c2", 0, 120)),
         );
-        assert!(!watch.observe(&policy, &finished_runs(&pod, "app"), false));
+        assert!(!watch.observe(Some(&policy), &finished_runs(&pod, "app"), false));
         assert_eq!(watch.restart_count, 1);
         assert_eq!(watch.exited, Some(0));
     }
@@ -1836,9 +1961,112 @@ mod tests {
     fn restart_watch_stops_a_container_that_exits_too_early() {
         let mut watch = RestartWatch::default();
         let pod = pod_with_status("app", None, Some(terminated_at("c1", 2, 10)));
-        assert!(!watch.observe(&restart_policy(60), &finished_runs(&pod, "app"), false));
+        assert!(!watch.observe(
+            Some(&restart_policy(60)),
+            &finished_runs(&pod, "app"),
+            false
+        ));
         assert_eq!(watch.exited, Some(2));
         assert_eq!(watch.restart_count, 0);
+    }
+
+    /// Under a Pod restartPolicy of Always, a container without a policy is
+    /// stopped, for ECS, by its first exit even though the kubelet restarts
+    /// it.
+    #[test]
+    fn restart_watch_without_policy_stops_on_first_exit() {
+        let mut watch = RestartWatch::default();
+        let pod = pod_with_status("log", None, Some(terminated_at("c1", 0, 900)));
+        assert!(!watch.observe(None, &finished_runs(&pod, "log"), false));
+        assert_eq!(watch.exited, Some(0));
+        assert_eq!(watch.restart_count, 0);
+    }
+
+    #[test]
+    fn non_essential_regular_containers_never_end_a_pod_of_sidecars() {
+        // The only container without a policy is non-essential: as regular
+        // containers they would end the Pod (and the essential sidecar)
+        // when the logger exits, so the Pod restarts everything instead.
+        let mut app = plan("app", true);
+        app.restart_policy = Some(restart_policy(60));
+        let logger = plan("logger", false);
+        let (pod, map) = build(&[(app, vec![]), (logger, vec![])]);
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
+        assert!(spec.init_containers.is_none());
+        assert_eq!(spec.containers.len(), 2);
+        assert!(map.iter().all(|e| e.restarted_by_pod));
+        let logger = map.iter().find(|e| e.original == "logger").unwrap();
+        assert!(logger.restart_policy.is_none());
+    }
+
+    #[test]
+    fn without_native_sidecars_the_pod_restarts_everything() {
+        let app = plan("app", true);
+        let mut agent = plan("agent", false);
+        agent.restart_policy = Some(restart_policy(60));
+        let resolved = vec![(app, vec![]), (agent, vec![])];
+        let (pod, _) = build_task_pod(
+            "p",
+            "fc",
+            "fakecloud-1",
+            None,
+            "fakecloud.fc.svc",
+            4566,
+            "task-1",
+            &resolved,
+            None,
+            false,
+        );
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
+        assert!(spec.init_containers.is_none());
+        assert!(spec.containers.iter().all(|c| c.restart_policy.is_none()));
+    }
+
+    #[test]
+    fn native_sidecars_need_kubernetes_1_29() {
+        assert!(supports_native_sidecars("1", "29"));
+        assert!(supports_native_sidecars("1", "31+"));
+        assert!(supports_native_sidecars("2", "0"));
+        assert!(!supports_native_sidecars("1", "28"));
+        assert!(!supports_native_sidecars("1", "28+"));
+        assert!(!supports_native_sidecars("", ""));
+    }
+
+    #[test]
+    fn failed_run_once_dependency_stops_a_pod_that_would_retry_it() {
+        let mut app = plan("app", true);
+        app.restart_policy = Some(restart_policy(60));
+        app.depends_on = vec![DependsOn {
+            container_name: "migrate".to_string(),
+            condition: DependsOnCondition::Success,
+        }];
+        let (built, map) = build(&[(plan("migrate", false), vec![]), (app, vec![])]);
+        assert_eq!(
+            map.iter()
+                .find(|e| e.original == "migrate")
+                .unwrap()
+                .init_condition,
+            Some(DependsOnCondition::Success)
+        );
+        let mut pod = Pod {
+            spec: built.spec.clone(),
+            status: Some(PStatus {
+                init_container_statuses: Some(vec![Status {
+                    name: "migrate".to_string(),
+                    last_state: Some(terminated_at("c1", 3, 1)),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let reason = failed_init_dependency(&pod, &map).expect("fails on first failure");
+        assert!(reason.contains("migrate") && reason.contains("SUCCESS") && reason.contains('3'));
+        // Under restartPolicy Never the Pod fails by itself.
+        pod.spec.as_mut().unwrap().restart_policy = Some("Never".into());
+        assert!(failed_init_dependency(&pod, &map).is_none());
     }
 
     #[test]
@@ -2070,6 +2298,7 @@ mod tests {
             "task-1",
             &resolved,
             Some(&creds),
+            true,
         );
         let spec = pod.spec.unwrap();
         let inits = spec.init_containers.unwrap();
@@ -2157,6 +2386,7 @@ mod tests {
             "task-1",
             &[(plan(task_creds::K8S_INIT_CONTAINER, true), vec![])],
             Some(&creds),
+            true,
         );
         assert_eq!(
             map[0].k8s_name,

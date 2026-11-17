@@ -442,18 +442,42 @@ impl ResetState {
     /// Reset ECS in `account` (every account for `None`), stopping the
     /// containers of the tasks it drops.
     fn reset_ecs(&self, account: Option<&str>, teardown: &mut Teardown) {
-        let tasks = take_and_reset(&mut self.ecs.write(), account, |s| {
-            s.tasks.keys().cloned().collect()
-        });
+        let rows = |s: &fakecloud_ecs::EcsState| -> Vec<(String, String)> {
+            s.tasks
+                .keys()
+                .map(|id| (s.account_id.clone(), id.clone()))
+                .collect()
+        };
+        // While the records still exist, start stopping every task: desired
+        // status STOPPED (so no restart policy brings a container back),
+        // load balancer targets deregistered, and its ENI captured for
+        // release once the containers are gone.
+        if let Some(rt) = &self.ecs_runtime {
+            let ecs = self.ecs.read();
+            let live: Vec<(String, String)> = match account {
+                None => ecs.iter().flat_map(|(_, s)| rows(s)).collect(),
+                Some(a) => ecs.get(a).map(rows).unwrap_or_default(),
+            };
+            drop(ecs);
+            for (acct, task) in &live {
+                rt.begin_stopping(&self.ecs, acct, task);
+            }
+        }
+        let tasks = take_and_reset(&mut self.ecs.write(), account, rows);
         if let Some(rt) = self.ecs_runtime.clone() {
             if !tasks.is_empty() {
-                // Each `stop_task` waits out its containers' stop timeout:
-                // stop them all at once.
+                // Stop them all at once, each waiting until its containers
+                // are gone and its network is released, so nothing reset
+                // can race a recreate under the same name or host port.
+                let ecs = self.ecs.clone();
                 teardown.push(async move {
                     let mut stops = tokio::task::JoinSet::new();
-                    for task in tasks {
-                        let rt = rt.clone();
-                        stops.spawn(async move { rt.stop_task(&task, "fakecloud reset").await });
+                    for (acct, task) in tasks {
+                        let (rt, ecs) = (rt.clone(), ecs.clone());
+                        stops.spawn(async move {
+                            rt.stop_task_and_wait(&ecs, &acct, &task, "fakecloud reset")
+                                .await
+                        });
                     }
                     stops.join_all().await;
                 });

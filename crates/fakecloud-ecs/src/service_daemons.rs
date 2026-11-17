@@ -36,9 +36,13 @@ impl EcsService {
             })?
             .clone();
         for cd in &containers {
-            crate::runtime::restart::validate_restart_policy(cd).map_err(|msg| {
-                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ClientException", msg)
-            })?;
+            // Daemons run on managed instances, so the Fargate timeout range
+            // doesn't apply.
+            crate::runtime::restart::validate_restart_policy(cd)
+                .and_then(|()| crate::runtime::restart::validate_container_timeouts(cd, false))
+                .map_err(|msg| {
+                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ClientException", msg)
+                })?;
         }
         let task_role_arn = body
             .get("taskRoleArn")
@@ -552,8 +556,11 @@ impl EcsService {
             if let Some(rt) = &runtime {
                 let rt2 = rt.clone();
                 let id_clone = id.clone();
+                let state = self.state.clone();
+                let account = account.clone();
                 tokio::spawn(async move {
-                    rt2.stop_task(&id_clone, "ECS daemon update").await;
+                    rt2.stop_task(&state, &account, &id_clone, "ECS daemon update")
+                        .await;
                 });
             }
         }
@@ -653,8 +660,11 @@ impl EcsService {
             if let Some(rt) = &runtime {
                 let rt2 = rt.clone();
                 let id_clone = id.clone();
+                let state = self.state.clone();
+                let account = account.clone();
                 tokio::spawn(async move {
-                    rt2.stop_task(&id_clone, "ECS daemon deletion").await;
+                    rt2.stop_task(&state, &account, &id_clone, "ECS daemon deletion")
+                        .await;
                 });
             }
         }

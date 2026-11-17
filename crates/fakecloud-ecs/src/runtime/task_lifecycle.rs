@@ -1,6 +1,7 @@
 //! `EcsRuntime` `task_lifecycle` family — extracted from service.rs by audit-2026-05-19.
 
 use super::restart::RestartTracker;
+use super::stopping::{self, TaskContainerHandle};
 use super::*;
 
 /// One `dependsOn[]` gate the launch loop waits on.
@@ -118,8 +119,10 @@ impl EcsRuntime {
     /// exits.
     pub fn run_task(self: Arc<Self>, state: SharedEcsState, task_id: String, account_id: String) {
         let rt = self.clone();
+        let done = self.track_task_execution(&task_id);
         tokio::spawn(async move {
-            if let Err(err) = rt.run_task_inner(&state, &task_id, &account_id).await {
+            let result = rt.run_task_inner(&state, &task_id, &account_id).await;
+            if let Err(err) = result {
                 tracing::warn!(%err, task = %task_id, "ecs task execution failed");
                 // Also surface on stderr so nextest's captured-output for a
                 // failed E2E shows the reason instead of just "empty logs".
@@ -128,6 +131,10 @@ impl EcsRuntime {
                 // holders of the task's containers behind.
                 rt.remove_netns_holders(&task_id).await;
                 rt.abort_execs(Some(&task_id));
+                // Its ENI (precreated at RunTask) and any target it reached
+                // go with it.
+                let region = task_region(&state, &account_id, &task_id);
+                rt.finish_teardown(&state, &account_id, &region, &task_id);
                 finalize_failure(&state, &account_id, &task_id, &err.to_string());
                 rt.emit_state_change(
                     &state,
@@ -140,6 +147,7 @@ impl EcsRuntime {
                 // terminal status instead of a stale PENDING/RUNNING row.
                 rt.persist_snapshot().await;
             }
+            rt.task_execution_finished(&task_id, &done);
         });
     }
 
@@ -502,11 +510,7 @@ impl EcsRuntime {
                 .write()
                 .entry(task_id.to_string())
                 .or_default()
-                .push((
-                    rp.plan.container_name.clone(),
-                    container_id.clone(),
-                    stop_timeout_secs(&rp.plan),
-                ));
+                .push(TaskContainerHandle::new(&rp.plan, container_id.clone()));
             started.push(RunningContainer {
                 name: rp.plan.container_name.clone(),
                 container_id,
@@ -526,14 +530,14 @@ impl EcsRuntime {
         // kill. Mirrors the k8s backend, which observes a 404 from the
         // StopTask-deleted Pod and finalizes the same way.
         if task_desired_stopped(state, account_id, task_id) {
-            for (rc, rp) in started.iter().zip(&resolved_plans).rev() {
-                let grace = stop_timeout_secs(&rp.plan);
-                let _ = self
-                    .cli_output(
-                        ["stop", "--time", &grace.to_string(), &rc.container_id],
-                        stop_call_timeout(grace),
-                    )
-                    .await;
+            self.begin_stopping(state, account_id, task_id);
+            let handles: Vec<TaskContainerHandle> = started
+                .iter()
+                .zip(&resolved_plans)
+                .map(|(rc, rp)| TaskContainerHandle::new(&rp.plan, rc.container_id.clone()))
+                .collect();
+            stopping::stop_in_waves(self.container_cli(), handles).await;
+            for rc in &started {
                 let _ = self
                     .cli_output(["rm", "-f", &rc.container_id], CLI_CALL_TIMEOUT)
                     .await;
@@ -552,6 +556,7 @@ impl EcsRuntime {
                     ..rc.clone()
                 })
                 .collect();
+            self.deprovision(state, account_id, &region, task_id);
             finalize_stopped_multi(
                 state,
                 account_id,
@@ -562,7 +567,6 @@ impl EcsRuntime {
                 "UserInitiated",
                 Some("Task stopped during launch".into()),
             );
-            self.deregister_lb_targets(state, account_id, &region, task_id);
             self.emit_state_change(
                 state,
                 account_id,
@@ -613,11 +617,15 @@ impl EcsRuntime {
             .wait_for_task_exit_with_health(state, account_id, task_id, &started, &mut restarts)
             .await?;
 
+        // The task is stopping: ECS sets its desired status to STOPPED and
+        // takes it out of its target groups before stopping the rest.
+        self.begin_stopping(state, account_id, task_id);
+
         // Stop and reap any sidecars still running. Best-effort — failures
         // here shouldn't keep the task from transitioning to STOPPED.
         let mut final_containers = started.clone();
-        // Reverse launch order: dependents stop before their dependencies.
-        for (i, rc) in started.iter().enumerate().rev() {
+        let mut still_running_idx: Vec<usize> = Vec::new();
+        for (i, rc) in started.iter().enumerate() {
             if Some(i) == wait_outcome.exited_index {
                 final_containers[i].exit_code = Some(wait_outcome.exit_code);
                 continue;
@@ -654,23 +662,27 @@ impl EcsRuntime {
                 _ => false,
             };
             if still_running {
-                let grace = stop_timeout_secs(&resolved_plans[i].plan);
-                let _ = self
-                    .cli_output(
-                        ["stop", "--time", &grace.to_string(), &rc.container_id],
-                        stop_call_timeout(grace),
-                    )
-                    .await;
-                let wait_out = self
-                    .cli_output(["wait", &rc.container_id], CLI_CALL_TIMEOUT)
-                    .await;
-                if let Ok(out) = wait_out {
-                    let code: i64 = String::from_utf8_lossy(&out.stdout)
-                        .trim()
-                        .parse()
-                        .unwrap_or(-1);
-                    final_containers[i].exit_code = Some(code);
-                }
+                still_running_idx.push(i);
+            }
+        }
+        // Stragglers stop in `dependsOn` order, independent ones together.
+        let stragglers: Vec<TaskContainerHandle> = still_running_idx
+            .iter()
+            .map(|&i| {
+                TaskContainerHandle::new(&resolved_plans[i].plan, started[i].container_id.clone())
+            })
+            .collect();
+        stopping::stop_in_waves(self.container_cli(), stragglers).await;
+        for &i in &still_running_idx {
+            let wait_out = self
+                .cli_output(["wait", &started[i].container_id], CLI_CALL_TIMEOUT)
+                .await;
+            if let Ok(out) = wait_out {
+                let code: i64 = String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(-1);
+                final_containers[i].exit_code = Some(code);
             }
         }
 
@@ -731,6 +743,13 @@ impl EcsRuntime {
         // the awslogs group/stream has been materialised.
         self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
         let exit_code = wait_outcome.exit_code;
+        // A StopTask (or scale-down) keeps its UserInitiated stop code and
+        // reason, as on ECS, rather than the container exit it caused.
+        let (stop_code, stopped_reason) = match user_initiated_stop(state, account_id, task_id) {
+            Some(reason) => ("UserInitiated", reason),
+            None => (wait_outcome.stop_code, None),
+        };
+        self.deprovision(state, account_id, &region, task_id);
         finalize_stopped_multi(
             state,
             account_id,
@@ -738,16 +757,18 @@ impl EcsRuntime {
             &final_containers,
             exit_code,
             &captured,
-            wait_outcome.stop_code,
-            None,
+            stop_code,
+            stopped_reason.clone(),
         );
-        self.deregister_lb_targets(state, account_id, &region, task_id);
         self.emit_state_change(
             state,
             account_id,
             task_id,
             "STOPPED",
-            Some((wait_outcome.stop_code, format!("Exit code {}", exit_code))),
+            Some((
+                stop_code,
+                stopped_reason.unwrap_or_else(|| format!("Exit code {}", exit_code)),
+            )),
         );
         // Persist the terminal STOPPED transition + captured exit codes so a
         // restart reflects the completed task instead of a stale RUNNING row.
@@ -1035,45 +1056,6 @@ impl EcsRuntime {
         });
     }
 
-    /// Kill every container behind a task with the configured stop
-    /// timeout. Returns true if at least one container was killed. Called
-    /// synchronously from `StopTask`; the wait loop in `run_task_inner`
-    /// observes the exits and transitions the task to `STOPPED`.
-    pub async fn stop_task(&self, task_id: &str, reason: &str) -> bool {
-        if let Some(k) = &self.k8s {
-            tracing::info!(task = %task_id, reason = %reason, "ecs task stop requested (k8s)");
-            return k.stop_task(task_id).await;
-        }
-        // Its ExecuteCommand commands end with it, as Session Manager
-        // sessions do when ECS stops the task.
-        self.abort_execs(Some(task_id));
-        let containers = self.containers.read().get(task_id).cloned();
-        let Some(list) = containers else {
-            return false;
-        };
-        if list.is_empty() {
-            return false;
-        }
-        // `docker stop` sends SIGTERM then SIGKILL after the container's
-        // `stopTimeout`. As on ECS, StopTask returns while the containers
-        // are still stopping (the wait loop in `run_task_inner` observes the
-        // exits), and they stop in reverse launch order: the launch order is
-        // the `dependsOn` order, which ECS reverses for shutdown.
-        let cli = self.container_cli();
-        tokio::spawn(async move {
-            for (_name, id, grace) in list.iter().rev() {
-                let _ = cli
-                    .output(
-                        ["stop", "--time", &grace.to_string(), id],
-                        stop_call_timeout(*grace),
-                    )
-                    .await;
-            }
-        });
-        tracing::info!(task = %task_id, reason = %reason, "ecs task stop requested");
-        true
-    }
-
     /// Kill every running container the runtime owns. Called on reset /
     /// shutdown so docker state matches fakecloud state after a fresh
     /// boot.
@@ -1087,7 +1069,7 @@ impl EcsRuntime {
             .containers
             .read()
             .values()
-            .flat_map(|list| list.iter().map(|(_, id, _)| id.clone()))
+            .flat_map(|list| list.iter().map(|c| c.container_id.clone()))
             .collect();
         for id in ids {
             let _ = self.cli_output(["kill", &id], CLI_CALL_TIMEOUT).await;

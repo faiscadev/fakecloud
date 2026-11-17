@@ -297,7 +297,14 @@ mod tests {
                 .unwrap();
         }
         let pids = exec_pids(&dir, 2);
-        rt.stop_task("t1", "test").await;
+        let state: crate::state::SharedEcsState = Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                "000000000000",
+                "us-east-1",
+                "http://localhost:4566",
+            ),
+        ));
+        rt.stop_task(&state, "000000000000", "t1", "test").await;
         assert_eq!(rt.running_execs("t1"), 0);
         assert_eq!(rt.running_execs("t2"), 1);
         assert!(

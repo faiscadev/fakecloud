@@ -107,6 +107,11 @@ impl EcsService {
             })
             .unwrap_or_default();
         validate_resource_requirements(&container_definitions, &requires_compatibilities)?;
+        let fargate = requires_compatibilities.iter().any(|c| c == "FARGATE");
+        for cd in &container_definitions {
+            crate::runtime::restart::validate_container_timeouts(cd, fargate)
+                .map_err(client_exception)?;
+        }
         // Compatibilities reflect what the task definition is compatible with.
         // We always claim EC2 and FARGATE since we execute via Docker either
         // way — callers with stricter requirements set `requiresCompatibilities`.
