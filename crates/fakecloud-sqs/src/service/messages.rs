@@ -561,183 +561,13 @@ impl SqsService {
             }
         }
 
-        // MessageRetentionPeriod expiry: remove messages older than the retention period
-        let retention_seconds: i64 = queue
-            .attributes
-            .get("MessageRetentionPeriod")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(345600); // default 4 days
-        queue
-            .messages
-            .retain(|m| (now - m.created_at).num_seconds() < retention_seconds);
-        queue
-            .inflight
-            .retain(|m| (now - m.created_at).num_seconds() < retention_seconds);
-
-        // Return expired inflight messages
-        let mut returned = Vec::new();
-        queue.inflight.retain(|m| {
-            if let Some(visible_at) = m.visible_at {
-                if visible_at <= now {
-                    returned.push(m.clone());
-                    return false;
-                }
-            }
-            true
-        });
-        // Once a message's visibility window lapses and it becomes visible
-        // again, its prior receipt handle is invalidated — real SQS at-least-
-        // once semantics: a stale handle must not act on a message that may
-        // now be (re)delivered to another consumer. Without this, a late
-        // DeleteMessage carrying the OLD handle still resolves via
-        // `receipt_handle_map` and deletes the redelivered copy. Pruning the
-        // map entry here also bounds its growth under redelivery churn (each
-        // redelivery would otherwise append another handle that never leaves).
-        // For FIFO queues, push returned messages to the FRONT to maintain order
-        if is_fifo {
-            for mut m in returned.into_iter().rev() {
-                queue.receipt_handle_map.remove(&m.message_id);
-                m.receipt_handle = None;
-                m.visible_at = None;
-                queue.messages.push_front(m);
-            }
-        } else {
-            for mut m in returned {
-                queue.receipt_handle_map.remove(&m.message_id);
-                m.receipt_handle = None;
-                m.visible_at = None;
-                queue.messages.push_back(m);
-            }
-        }
-
-        let redrive_policy = queue.redrive_policy.clone();
-
-        let mut received = Vec::new();
-        let mut dlq_messages = Vec::new();
-
-        if is_fifo {
-            // FIFO: deliver messages in order, respecting group locking.
-            // Groups that already have inflight messages are skipped.
-            // Multiple messages from the same group CAN be delivered in one batch.
-            let mut remaining = VecDeque::new();
-
-            // Build set of groups that have pre-existing inflight messages
-            let inflight_groups: std::collections::HashSet<String> = queue
-                .inflight
-                .iter()
-                .filter_map(|m| m.message_group_id.clone())
-                .collect();
-
-            while let Some(mut msg) = queue.messages.pop_front() {
-                if let Some(visible_at) = msg.visible_at {
-                    if visible_at > now {
-                        remaining.push_back(msg);
-                        continue;
-                    }
-                }
-
-                let group = msg.message_group_id.as_deref().unwrap_or("").to_string();
-
-                // Skip groups that already have inflight messages from previous receives
-                if inflight_groups.contains(&group) {
-                    remaining.push_back(msg);
-                    continue;
-                }
-
-                if received.len() < max_messages {
-                    msg.receive_count += 1;
-                    if msg.first_received_at.is_none() {
-                        msg.first_received_at = Some(chrono::Utc::now().timestamp_millis());
-                    }
-                    if let Some(ref rp) = redrive_policy {
-                        if msg.receive_count > rp.max_receive_count {
-                            dlq_messages.push((rp.dead_letter_target_arn.clone(), msg));
-                            continue;
-                        }
-                    }
-                    let new_handle = uuid::Uuid::new_v4().to_string();
-                    queue
-                        .receipt_handle_map
-                        .entry(msg.message_id.clone())
-                        .or_default()
-                        .push(new_handle.clone());
-                    msg.receipt_handle = Some(new_handle);
-                    msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
-                    received.push(msg);
-                } else {
-                    remaining.push_back(msg);
-                    break;
-                }
-            }
-
-            while let Some(m) = queue.messages.pop_front() {
-                remaining.push_back(m);
-            }
-            queue.messages = remaining;
-        } else {
-            // Standard queue with Fair Queues support:
-            // When messages have MessageGroupId, prioritize groups with fewer
-            // in-flight messages to prevent noisy neighbor starvation.
-
-            // Count in-flight messages per group
-            let mut inflight_per_group: HashMap<String, usize> = HashMap::new();
-            for m in &queue.inflight {
-                if let Some(ref group) = m.message_group_id {
-                    *inflight_per_group.entry(group.clone()).or_default() += 1;
-                }
-            }
-
-            // Collect all visible messages
-            let mut visible: Vec<SqsMessage> = Vec::new();
-            let mut remaining = VecDeque::new();
-            while let Some(msg) = queue.messages.pop_front() {
-                if let Some(visible_at) = msg.visible_at {
-                    if visible_at > now {
-                        remaining.push_back(msg);
-                        continue;
-                    }
-                }
-                visible.push(msg);
-            }
-
-            // Sort by fairness: messages from groups with fewer in-flight messages come first.
-            // Messages without a group ID are treated as having 0 in-flight (highest priority).
-            visible.sort_by_key(|m| {
-                m.message_group_id
-                    .as_ref()
-                    .and_then(|g| inflight_per_group.get(g).copied())
-                    .unwrap_or(0)
-            });
-
-            // Pick up to max_messages from the sorted list
-            for mut msg in visible {
-                if received.len() < max_messages {
-                    msg.receive_count += 1;
-                    if msg.first_received_at.is_none() {
-                        msg.first_received_at = Some(chrono::Utc::now().timestamp_millis());
-                    }
-                    if let Some(ref rp) = redrive_policy {
-                        if msg.receive_count > rp.max_receive_count {
-                            dlq_messages.push((rp.dead_letter_target_arn.clone(), msg));
-                            continue;
-                        }
-                    }
-                    let new_handle = uuid::Uuid::new_v4().to_string();
-                    queue
-                        .receipt_handle_map
-                        .entry(msg.message_id.clone())
-                        .or_default()
-                        .push(new_handle.clone());
-                    msg.receipt_handle = Some(new_handle);
-                    msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
-                    received.push(msg);
-                } else {
-                    remaining.push_back(msg);
-                }
-            }
-
-            queue.messages = remaining;
-        }
+        // Retention expiry, expired-inflight return, FIFO group locking /
+        // fair-queue ordering, receive counts and receipt handles: shared with
+        // the Lambda event source mapping poller (`receive.rs`).
+        let crate::receive::TakenMessages {
+            messages: mut received,
+            dead_letters: dlq_messages,
+        } = queue.take_receivable(max_messages, visibility_timeout, now, &|_| false);
 
         // Capture queue-level encryption settings BEFORE the DLQ path
         // re-borrows `state.queues` mutably to push into the DLQ.
@@ -779,22 +609,10 @@ impl SqsService {
             // messages to the front of the queue (preserving order), undo the
             // receive-count bump and the receipt handle we minted, then error.
             if let Some(e) = decrypt_err {
-                let restored: Vec<SqsMessage> = received
-                    .drain(..)
-                    .map(|mut m| {
-                        m.visible_at = None;
-                        m.receive_count = m.receive_count.saturating_sub(1);
-                        if let Some(handle) = m.receipt_handle.take() {
-                            if let Some(list) = queue.receipt_handle_map.get_mut(&m.message_id) {
-                                list.retain(|h| h != &handle);
-                            }
-                        }
-                        m
-                    })
-                    .collect();
-                for m in restored.into_iter().rev() {
-                    queue.messages.push_front(m);
-                }
+                queue.restore_taken(std::mem::take(&mut received));
+                // Messages the receive found past `maxReceiveCount` are
+                // already out of the queue; they still reach their DLQ.
+                state.route_dead_letters(&queue_arn, dlq_messages);
                 return Err(e);
             }
         }
@@ -805,52 +623,12 @@ impl SqsService {
         // mirror the at-rest form so a later ChangeMessageVisibility
         // / inflight-expiry round-trip can re-decrypt without
         // corrupting anything.
-        for msg in &received {
-            queue.inflight.push(msg.clone());
-        }
+        queue.commit_taken(&received);
 
         // Move messages to DLQ — also with at-rest bodies untouched,
         // since the DLQ may have its own SSE settings and a downstream
-        // receive call decrypts what's there. If the redrive target ARN
-        // doesn't resolve to a known queue (DLQ deleted, ARN typo), the
-        // message is returned to the source queue instead of being
-        // dropped — real SQS never destroys a message over a
-        // misconfigured redrive target.
-        for (dlq_arn, mut msg) in dlq_messages.into_iter() {
-            msg.receipt_handle = None;
-            msg.visible_at = None;
-            if let Some(dlq) = state.queues.values_mut().find(|q| q.arn == dlq_arn) {
-                // A message that lands in the DLQ starts a fresh receive
-                // history there: AWS resets ApproximateReceiveCount when a
-                // message is moved to its dead-letter queue. Carrying the
-                // source-queue count over would immediately re-redrive the
-                // message on its first receive from a DLQ that has its own
-                // redrive policy (count already past maxReceiveCount).
-                msg.receive_count = 0;
-                msg.first_received_at = None;
-                dlq.messages.push_back(msg);
-            } else {
-                tracing::warn!(
-                    queue = %queue_arn,
-                    dlq_arn = %dlq_arn,
-                    "redrive target queue not found; returning message to source queue"
-                );
-                if let Some(source) = state.queues.values_mut().find(|q| q.arn == queue_arn) {
-                    // Reset the receive history before returning the message.
-                    // It re-enters the source with `receive_count` still past
-                    // `maxReceiveCount` (that is what triggered the redrive) and
-                    // `visible_at = None` (immediately visible), so without this
-                    // the very next ReceiveMessage would re-redrive it, hit the
-                    // same unresolvable target, and spin in a hot loop. Resetting
-                    // gives the consumer a fresh `maxReceiveCount` attempts —
-                    // the message is reprocessed rather than tight-looping, and
-                    // is still never destroyed.
-                    msg.receive_count = 0;
-                    msg.first_received_at = None;
-                    source.messages.push_back(msg);
-                }
-            }
-        }
+        // receive call decrypts what's there.
+        state.route_dead_letters(&queue_arn, dlq_messages);
 
         // Now swap response bodies in to plaintext.
         if !plaintext_bodies.is_empty() {

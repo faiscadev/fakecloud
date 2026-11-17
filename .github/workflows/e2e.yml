@@ -564,7 +564,7 @@ jobs:
       # MqEngine::image (FAKECLOUD_MQ_ACTIVEMQ_IMAGE / _RABBITMQ_IMAGE).
       - name: Pre-pull broker images
         run: |
-          for img in apache/activemq-classic rabbitmq:3.13-alpine; do
+          for img in apache/activemq-classic rabbitmq:3.13-alpine public.ecr.aws/lambda/python:3.12; do
             for i in 1 2 3; do
               if docker pull "$img"; then break; fi
               echo "docker pull $img attempt $i failed; retrying"; sleep $((i * 5))
@@ -577,9 +577,11 @@ jobs:
       - name: Build fakecloud
         run: cargo build --bin fakecloud
 
-      # Run ONLY the two broker E2E tests: the data-plane round-trips
-      # (mq_dataplane: ActiveMQ STOMP + RabbitMQ AMQP) and the CFN provisioner
-      # (cloudformation_mq: cfn_provisions_mq_broker_and_configuration). FAKECLOUD_
+      # Run ONLY the broker E2E tests: the data-plane round-trips
+      # (mq_dataplane: ActiveMQ STOMP + RabbitMQ AMQP), the CFN provisioner
+      # (cloudformation_mq: cfn_provisions_mq_broker_and_configuration) and the
+      # Lambda event source mappings consuming a real broker
+      # (lambda_mq_event_source: ActiveMQ + RabbitMQ). FAKECLOUD_
       # E2E_MQ_BROKER=1 flips them from skip to run; CI=1 makes a missing docker a
       # hard failure rather than a silent skip. --retries 2 reruns only a failed
       # test (up to 2 extra times) to ride out cold-pull / first-connection flake;
@@ -590,7 +592,7 @@ jobs:
           CI: "1"
         run: |
           cargo nextest run -P ci -p fakecloud-e2e --retries 2 \
-            -E 'test(activemq_broker_delivers_a_message_over_stomp) + test(rabbitmq_broker_speaks_amqp) + test(cfn_provisions_mq_broker_and_configuration)'
+            -E 'test(activemq_broker_delivers_a_message_over_stomp) + test(rabbitmq_broker_speaks_amqp) + test(cfn_provisions_mq_broker_and_configuration) + test(activemq_mapping_invokes_the_function_and_acks_only_what_succeeds) + test(rabbitmq_mapping_invokes_the_function_and_requeues_what_fails)'
 
       - name: Broker container diagnostics
         if: always()

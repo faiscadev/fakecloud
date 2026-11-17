@@ -264,7 +264,7 @@ pub struct EventSourceMapping {
     #[serde(default)]
     pub tags: BTreeMap<String, String>,
     /// `LastProcessingResult` as the source's poller last reported it
-    /// (`OK`, `PROBLEM: ...`); `None` until it has processed anything,
+    /// (`OK`, `PROBLEM: ...`; set by the Kafka and Amazon MQ pollers); `None` until it has processed anything,
     /// which reads as `No records processed`.
     #[serde(default)]
     pub last_processing_result: Option<String>,
