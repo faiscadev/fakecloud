@@ -1116,6 +1116,7 @@ pub(crate) fn spawn_service_tasks(
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: gpu_sharing_strategy_of(def),
+                restart_count: None,
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {
@@ -1311,6 +1312,7 @@ pub(crate) fn spawn_daemon_tasks(
                 managed_agents: None,
                 image_digest: None,
                 gpu_sharing_strategy: gpu_sharing_strategy_of(def),
+                restart_count: None,
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {
@@ -1404,9 +1406,11 @@ pub(crate) fn recompute_service_counts(
     let mut pending = 0i32;
     for t in state.tasks.values() {
         if t.started_by.as_deref() == Some(service_tag.as_str()) && t.cluster_name == cluster_name {
+            // `runningCount` counts tasks in RUNNING only (a stopping task
+            // no longer is); `pendingCount` those on their way there.
             match t.last_status.as_str() {
                 "RUNNING" => running += 1,
-                "PENDING" | "PROVISIONING" => pending += 1,
+                "PENDING" | "PROVISIONING" | "ACTIVATING" => pending += 1,
                 _ => {}
             }
         }
@@ -1417,9 +1421,63 @@ pub(crate) fn recompute_service_counts(
     }
 }
 
+/// Stop code ECS gives tasks the service scheduler stops (scale-down,
+/// service deletion).
+pub(crate) const SERVICE_SCHEDULER_STOP_CODE: &str = "ServiceSchedulerInitiated";
+
+/// The `stoppedReason` ECS gives a task the service scheduler stops:
+/// "Scaling activity initiated by (deployment <id>)", naming the service's
+/// primary deployment.
+pub(crate) fn scheduler_stop_reason(
+    state: &EcsState,
+    cluster_name: &str,
+    service_name: &str,
+) -> String {
+    let deployment = state
+        .services
+        .get(&EcsState::service_key(cluster_name, service_name))
+        .and_then(|svc| {
+            svc.deployments
+                .iter()
+                .find(|d| d.status == "PRIMARY")
+                .or_else(|| svc.deployments.first())
+        })
+        .map(|d| d.deployment_id.clone());
+    match deployment {
+        Some(id) => format!("Scaling activity initiated by (deployment {id})"),
+        None => "Scaling activity initiated by (service scheduler)".to_string(),
+    }
+}
+
+/// Record a service-scheduler stop on `task` (desired STOPPED, stoppingAt,
+/// `ServiceSchedulerInitiated` with `reason`).
+pub(crate) fn mark_scheduler_stop(task: &mut crate::state::Task, reason: &str) {
+    task.desired_status = "STOPPED".into();
+    task.stopping_at = Some(Utc::now());
+    task.stop_code = Some(SERVICE_SCHEDULER_STOP_CODE.into());
+    task.stopped_reason = Some(reason.to_string());
+}
+
+/// Whether a task `lastStatus` is one of the ECS task lifecycle states
+/// before STOPPED: PROVISIONING, PENDING, ACTIVATING, RUNNING, and the
+/// stopping ones (DEACTIVATING, STOPPING, DEPROVISIONING), during which the
+/// task still holds its resources.
+pub(crate) fn task_status_is_live(last_status: &str) -> bool {
+    matches!(
+        last_status,
+        "PROVISIONING"
+            | "PENDING"
+            | "ACTIVATING"
+            | "RUNNING"
+            | "DEACTIVATING"
+            | "STOPPING"
+            | "DEPROVISIONING"
+    )
+}
+
 /// True while a service still owns any task that has not reached STOPPED
-/// (RUNNING / PENDING / PROVISIONING). Used to decide when a DRAINING
-/// (deleted) service has fully drained and may transition to INACTIVE.
+/// (including one still stopping). Used to decide when a DRAINING (deleted)
+/// service has fully drained and may transition to INACTIVE.
 pub(crate) fn service_has_live_tasks(
     state: &EcsState,
     service_name: &str,
@@ -1429,10 +1487,7 @@ pub(crate) fn service_has_live_tasks(
     state.tasks.values().any(|t| {
         t.started_by.as_deref() == Some(service_tag.as_str())
             && t.cluster_name == cluster_name
-            && matches!(
-                t.last_status.as_str(),
-                "RUNNING" | "PENDING" | "PROVISIONING"
-            )
+            && task_status_is_live(&t.last_status)
     })
 }
 
@@ -1446,13 +1501,7 @@ pub(crate) fn cluster_active_task_count(state: &EcsState, cluster_name: &str) ->
     state
         .tasks
         .values()
-        .filter(|t| {
-            t.cluster_name == cluster_name
-                && matches!(
-                    t.last_status.as_str(),
-                    "RUNNING" | "PENDING" | "PROVISIONING"
-                )
-        })
+        .filter(|t| t.cluster_name == cluster_name && task_status_is_live(&t.last_status))
         .count()
 }
 

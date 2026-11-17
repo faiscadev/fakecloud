@@ -14,7 +14,14 @@ fakecloud-persistence = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
+crc32c = { workspace = true }
+flate2 = { workspace = true }
+hmac = { workspace = true }
 http = { workspace = true }
+lz4_flex = { workspace = true }
+sha2 = { workspace = true }
+snap = { workspace = true }
+zstd = { workspace = true }
 parking_lot = { workspace = true }
 percent-encoding = { workspace = true }
 serde = { workspace = true }

@@ -728,6 +728,58 @@ async fn function_version_quota_per_provider_is_enforced() {
     );
 }
 
+#[tokio::test]
+async fn capacity_providers_are_taggable_by_arn() {
+    let svc = LambdaService::new(make_state());
+    create_provider(&svc, "cp1").await;
+    let tags_path = format!("/2017-03-31/tags/{CP_ARN}");
+    call(
+        &svc,
+        request(
+            Method::POST,
+            &tags_path,
+            &json!({"Tags": {"team": "compute"}}),
+        ),
+    )
+    .await
+    .unwrap();
+    let listed = call(&svc, request(Method::GET, &tags_path, &Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(listed["Tags"], json!({"team": "compute"}));
+    let err = call(
+        &svc,
+        request(Method::POST, &tags_path, &json!({"Tags": {"aws:x": "v"}})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterValueException");
+
+    let missing =
+        format!("/2017-03-31/tags/arn:aws:lambda:us-east-1:{ACCOUNT}:capacity-provider:nope");
+    let err = call(&svc, request(Method::GET, &missing, &Value::Null))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    // A create's tags are validated before anything is stored.
+    let body = json!({
+        "CapacityProviderName": "cp2",
+        "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+        "PermissionsConfig": {
+            "CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/operator"
+        },
+        "Tags": {"bad#": "v"},
+    });
+    let err = call(
+        &svc,
+        request(Method::POST, "/2025-11-30/capacity-providers", &body),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "ValidationException");
+}
+
 #[test]
 fn iam_actions_for_managed_instances_include_pass_capacity_provider() {
     let svc = LambdaService::new(make_state());

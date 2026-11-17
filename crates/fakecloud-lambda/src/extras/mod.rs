@@ -56,10 +56,10 @@ fn body(req: &AwsRequest) -> Value {
 
 /// Extract the function name from a Lambda function ARN, ignoring any
 /// trailing `:version` / `:alias` qualifier. Returns `None` for ARNs
-/// that name a different resource type (event-source mapping,
-/// code-signing config, layer, …) — Lambda only supports tags on
-/// function ARNs in this implementation, so non-function ARNs are
-/// rejected by callers as `InvalidParameterValueException`.
+/// that name a different resource type (event source mapping,
+/// code-signing config, layer, ...); the tagging operations resolve an
+/// event source mapping ARN through [`tag_target`] instead and refuse the
+/// rest as `InvalidParameterValueException`.
 fn function_name_from_arn(arn: &str) -> Option<String> {
     let rest = fakecloud_aws::arn::arn_resource(arn, "lambda")?;
     let mut parts = rest.splitn(5, ':');
@@ -77,6 +77,107 @@ fn function_name_from_arn(arn: &str) -> Option<String> {
             .unwrap_or(name_with_qualifier)
             .to_string(),
     )
+}
+
+/// What a tagging operation's `Resource` ARN names: a function (tags on
+/// aliases and versions land on the function), an event source mapping
+/// (`...:event-source-mapping:<uuid>`), a code signing config
+/// (`...:code-signing-config:csc-<id>`) or a capacity provider
+/// (`...:capacity-provider:<name>`), the taggable resources of the model's
+/// `TaggableResource`.
+enum TagTarget {
+    Function(String),
+    EventSourceMapping(String),
+    CodeSigningConfig(String),
+    CapacityProvider { name: String, arn: String },
+}
+
+fn tag_target(arn: &str) -> Result<TagTarget, AwsServiceError> {
+    if let Some(name) = function_name_from_arn(arn) {
+        return Ok(TagTarget::Function(name));
+    }
+    let target = fakecloud_aws::arn::arn_resource(arn, "lambda").and_then(|rest| {
+        let mut parts = rest.splitn(4, ':');
+        let (_region, _account) = (parts.next()?, parts.next()?);
+        let kind = parts.next()?;
+        let id = parts.next().filter(|id| !id.is_empty())?.to_string();
+        match kind {
+            "event-source-mapping" => Some(TagTarget::EventSourceMapping(id)),
+            "code-signing-config" => Some(TagTarget::CodeSigningConfig(id)),
+            "capacity-provider" => Some(TagTarget::CapacityProvider {
+                name: id,
+                arn: arn.to_string(),
+            }),
+            _ => None,
+        }
+    });
+    target.ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValueException",
+            format!(
+                "Resource ARN is not a Lambda function, event source mapping, code signing \
+                 config or capacity provider: {arn}"
+            ),
+        )
+    })
+}
+
+fn tag_target_not_found(target: &TagTarget) -> AwsServiceError {
+    match target {
+        TagTarget::Function(name) => AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("Function not found: {name}"),
+        ),
+        TagTarget::EventSourceMapping(uuid) => AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!(
+                "The resource you requested does not exist. (Service: Lambda, Status Code: 404, Request ID: {uuid})"
+            ),
+        ),
+        TagTarget::CodeSigningConfig(id) => not_found("CodeSigningConfig", id),
+        TagTarget::CapacityProvider { arn, .. } => crate::capacity::provider_not_found(arn),
+    }
+}
+
+/// The tags of the resource `target` names.
+fn target_tags_mut<'a>(
+    state: &'a mut LambdaState,
+    target: &TagTarget,
+) -> Result<&'a mut std::collections::BTreeMap<String, String>, AwsServiceError> {
+    match target {
+        TagTarget::Function(name) => state.functions.get_mut(name).map(|f| &mut f.tags),
+        TagTarget::EventSourceMapping(uuid) => state
+            .event_source_mappings
+            .get_mut(uuid)
+            .map(|m| &mut m.tags),
+        TagTarget::CodeSigningConfig(id) => {
+            state.code_signing_configs.get_mut(id).map(|c| &mut c.tags)
+        }
+        TagTarget::CapacityProvider { name, .. } => {
+            state.capacity_providers.get_mut(name).map(|c| &mut c.tags)
+        }
+    }
+    .ok_or_else(|| tag_target_not_found(target))
+}
+
+fn target_tags<'a>(
+    state: &'a LambdaState,
+    target: &TagTarget,
+) -> Result<&'a std::collections::BTreeMap<String, String>, AwsServiceError> {
+    match target {
+        TagTarget::Function(name) => state.functions.get(name).map(|f| &f.tags),
+        TagTarget::EventSourceMapping(uuid) => {
+            state.event_source_mappings.get(uuid).map(|m| &m.tags)
+        }
+        TagTarget::CodeSigningConfig(id) => state.code_signing_configs.get(id).map(|c| &c.tags),
+        TagTarget::CapacityProvider { name, .. } => {
+            state.capacity_providers.get(name).map(|c| &c.tags)
+        }
+    }
+    .ok_or_else(|| tag_target_not_found(target))
 }
 
 /// Parse a raw query string into key/value pairs preserving repeats.
@@ -1200,7 +1301,11 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
-        let new_tags: Vec<(String, String)> = body
+        // `Tags` is a required member.
+        if body.get("Tags").is_none_or(Value::is_null) {
+            return Err(null_member("tags"));
+        }
+        let new_tags: std::collections::BTreeMap<String, String> = body
             .get("Tags")
             .and_then(|v| v.as_object())
             .map(|m| {
@@ -1209,27 +1314,19 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
-            )
-        })?;
+        // The model constraints are input validation, checked before the
+        // resource is looked up.
+        crate::tagging::validate_tag_shapes(&new_tags)?;
+        let target = tag_target(resource_arn)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let func = state.functions.get_mut(&name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {name}"),
-            )
-        })?;
-        // Single source of truth: per-function `tags`. `GetFunction`,
-        // `ListTagsForResource`, and `UntagResource` all read here.
-        for (k, v) in new_tags {
-            func.tags.insert(k, v);
-        }
+        // Single source of truth: the resource's own `tags`.
+        // `GetFunction`, `ListTags`, and `UntagResource` all read here.
+        let tags = target_tags_mut(state, &target)?;
+        // The reserved prefix, and the per-resource limit on the tags the
+        // resource would end up with.
+        crate::tagging::validate_tags_added(tags, &new_tags)?;
+        tags.extend(new_tags);
         empty()
     }
 
@@ -1271,24 +1368,18 @@ impl LambdaService {
                 }
             }
         }
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
-            )
-        })?;
+        // `TagKeys` is a required member, each a model `TagKey`; keys in
+        // the reserved `aws:` namespace cannot be removed either.
+        if keys.is_empty() {
+            return Err(null_member("tagKeys"));
+        }
+        crate::tagging::validate_tag_keys(&keys)?;
+        let target = tag_target(resource_arn)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let func = state.functions.get_mut(&name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {name}"),
-            )
-        })?;
+        let tags = target_tags_mut(state, &target)?;
         for k in &keys {
-            func.tags.remove(k);
+            tags.remove(k);
         }
         empty()
     }
@@ -1299,24 +1390,10 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
-            )
-        })?;
+        let target = tag_target(resource_arn)?;
         let region = region.to_string();
         self.with_state_read(account_id, &region, |state| {
-            let func = state.functions.get(&name).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!("Function not found: {name}"),
-                )
-            })?;
-            let tags: serde_json::Map<String, Value> = func
-                .tags
+            let tags: serde_json::Map<String, Value> = target_tags(state, &target)?
                 .iter()
                 .map(|(k, v)| (k.clone(), Value::String(v.clone())))
                 .collect();
@@ -1369,6 +1446,10 @@ impl LambdaService {
             .event_source_mappings
             .get_mut(uuid)
             .ok_or_else(|| not_found("EventSourceMapping", uuid))?;
+        // The per-source settings (Kafka configs, scaling, provisioned
+        // pollers, logging) are checked against the mapping's source and
+        // its fixed-at-creation members first: a refusal changes nothing.
+        crate::esm_config::apply_update(esm, &body)?;
         if let Some(b) = body["BatchSize"].as_i64() {
             esm.batch_size = b;
         }

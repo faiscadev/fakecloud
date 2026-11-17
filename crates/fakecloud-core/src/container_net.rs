@@ -449,6 +449,86 @@ fn podman_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     PODMAN_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// What the engine *server* behind a CLI is, as far as a probe could tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineServer {
+    /// Docker Engine.
+    Docker,
+    /// A server that answered and is not Docker Engine: Podman (through its
+    /// own CLI, `podman --remote`, or a Docker CLI on its compat socket) or
+    /// anything else that names neither.
+    NotDocker,
+    /// The server didn't answer (failed, timed out, `null`): unknown, and
+    /// not remembered, so a later probe asks again.
+    Unknown,
+}
+
+/// Process-global memo of definitive [`docker_server`] answers, keyed by CLI.
+static DOCKER_SERVER_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, EngineServer>>,
+> = std::sync::OnceLock::new();
+
+/// Whether the engine *server* behind `cli` is Docker Engine, asked of the
+/// server itself (`version --format '{{json .Server}}'`), not of the client.
+/// A Docker CLI pointed at Podman's Docker-compatible socket (Podman Desktop's
+/// `DOCKER_HOST`) prints `Docker version ...` from `--version` but its server
+/// reports the `Podman Engine` component, so [`is_podman`] reads it as Docker
+/// while this reads it as [`EngineServer::NotDocker`]. Use it before relying
+/// on a Docker-only server feature (a log driver Podman lacks, say).
+///
+/// Bounded by [`CLI_PROBE_TIMEOUT`]. `Docker` and `NotDocker` are memoized
+/// per CLI (a server that answers but names neither engine is `NotDocker`,
+/// so a shim isn't re-asked on every launch); `Unknown` is not, so a daemon
+/// that comes up later is asked again. Blocking: from async code use
+/// [`docker_server_async`].
+pub fn docker_server(cli: &str) -> EngineServer {
+    let cache =
+        DOCKER_SERVER_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&cached) = cache.lock().unwrap().get(cli) {
+        return cached;
+    }
+    let answer = if name_indicates_podman(cli) {
+        EngineServer::NotDocker
+    } else {
+        bounded_output(cli, &["version", "--format", "{{json .Server}}"])
+            .map_or(EngineServer::Unknown, |out| {
+                classify_server_version_output(&out)
+            })
+    };
+    if answer != EngineServer::Unknown {
+        cache.lock().unwrap().insert(cli.to_string(), answer);
+    }
+    answer
+}
+
+/// [`docker_server`] for async callers (the probe runs on the blocking pool).
+pub async fn docker_server_async(cli: &str) -> EngineServer {
+    let owned = cli.to_string();
+    tokio::task::spawn_blocking(move || docker_server(&owned))
+        .await
+        .unwrap_or(EngineServer::Unknown)
+}
+
+/// Classify `<cli> version --format '{{json .Server}}'`: Podman's compat API
+/// names its component `Podman Engine`; Docker Engine names `Engine` with a
+/// `Docker Engine - ...` / `Docker Desktop ...` platform. An empty or `null`
+/// answer means no server answered (`Unknown`); any other answer naming
+/// neither engine is `NotDocker`.
+pub fn classify_server_version_output(stdout: &str) -> EngineServer {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return EngineServer::Unknown;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("podman") || lower.contains("buildah") {
+        EngineServer::NotDocker
+    } else if lower.contains("\"engine\"") || lower.contains("docker") {
+        EngineServer::Docker
+    } else {
+        EngineServer::NotDocker
+    }
+}
+
 /// True when `cli` drives podman -- including podman installed *as* `docker`.
 ///
 /// The file name alone can't answer that: the `podman-docker` package
@@ -1015,6 +1095,34 @@ mod tests {
         assert_eq!(classify_info_output("{}"), None);
     }
 
+    #[test]
+    fn server_version_classifies_the_engine_server_not_the_client() {
+        // Docker CLI against Podman's compat socket: the server is Podman.
+        assert_eq!(
+            classify_server_version_output(
+                r#"{"Platform":{"Name":""},"Components":[{"Name":"Podman Engine","Version":"5.2.3"}],"Version":"5.2.3","ApiVersion":"1.41"}"#
+            ),
+            EngineServer::NotDocker
+        );
+        assert_eq!(
+            classify_server_version_output(
+                r#"{"Platform":{"Name":"Docker Engine - Community"},"Components":[{"Name":"Engine","Version":"27.3.1"}],"Version":"27.3.1"}"#
+            ),
+            EngineServer::Docker
+        );
+        // No server answered.
+        assert_eq!(
+            classify_server_version_output("null\n"),
+            EngineServer::Unknown
+        );
+        assert_eq!(classify_server_version_output(""), EngineServer::Unknown);
+        // A server that answered but names neither engine (a shim).
+        assert_eq!(
+            classify_server_version_output(r#"{"Version":"1.0","ApiVersion":"1.41"}"#),
+            EngineServer::NotDocker
+        );
+    }
+
     #[cfg(unix)]
     use crate::test_support::fake_cli;
 
@@ -1028,6 +1136,50 @@ mod tests {
         );
         assert!(is_podman(&cli));
         assert_eq!(probe_engine(&cli), Some(ContainerEngine::Podman));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_server_caches_definitive_answers_and_retries_unknown() {
+        // Each probe appends to a counter file, so we can see whether the
+        // answer came from the cache.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("probes").display().to_string();
+        let runs = |suffix: &str| {
+            std::fs::read_to_string(format!("{base}.{suffix}"))
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+
+        // A server that never answers: Unknown, and asked again next time.
+        let (_d1, down) = fake_cli("docker", &format!("echo x >> {base}.down\nexit 1\n"));
+        assert_eq!(docker_server(&down), EngineServer::Unknown);
+        let first = runs("down");
+        assert!(first > 0);
+        assert_eq!(docker_server(&down), EngineServer::Unknown);
+        assert!(runs("down") > first, "an Unknown answer must not be cached");
+
+        // Docker Engine: the second answer comes from the cache.
+        let (_d2, docker) = fake_cli(
+            "docker",
+            &format!(
+                "echo x >> {base}.docker\necho '{{\"Components\":[{{\"Name\":\"Engine\"}}]}}'\n"
+            ),
+        );
+        assert_eq!(docker_server(&docker), EngineServer::Docker);
+        let first = runs("docker");
+        assert_eq!(docker_server(&docker), EngineServer::Docker);
+        assert_eq!(runs("docker"), first);
+
+        // A shim whose server names neither engine: NotDocker, cached too.
+        let (_d3, shim) = fake_cli(
+            "docker",
+            &format!("echo x >> {base}.shim\necho '{{\"Version\":\"1.0\"}}'\n"),
+        );
+        assert_eq!(docker_server(&shim), EngineServer::NotDocker);
+        let first = runs("shim");
+        assert_eq!(docker_server(&shim), EngineServer::NotDocker);
+        assert_eq!(runs("shim"), first);
     }
 
     #[cfg(unix)]

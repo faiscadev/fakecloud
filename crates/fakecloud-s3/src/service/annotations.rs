@@ -184,6 +184,7 @@ impl S3Service {
         // never the object's metadata or its other annotations.
         self.store
             .put_annotation(
+                account_id,
                 bucket,
                 key,
                 obj.version_id.as_deref(),
@@ -320,7 +321,7 @@ impl S3Service {
         // is still a 204, the same way DeleteObject is.
         if obj.annotations.contains_key(&name) {
             self.store
-                .delete_annotation(bucket, key, obj.version_id.as_deref(), &name)
+                .delete_annotation(account_id, bucket, key, obj.version_id.as_deref(), &name)
                 .map_err(super::persistence_error)?;
             obj.annotations.remove(&name);
         }

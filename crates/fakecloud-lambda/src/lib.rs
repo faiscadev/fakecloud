@@ -1,5 +1,6 @@
 pub mod capacity;
 pub(crate) mod durable;
+pub mod esm_config;
 pub mod event_source;
 pub mod eventstream;
 pub mod extras;
@@ -10,6 +11,7 @@ pub mod resource_policy;
 pub mod runtime;
 pub(crate) mod service;
 pub(crate) mod state;
+pub mod tagging;
 pub mod vpc;
 pub(crate) mod workflows;
 

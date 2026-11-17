@@ -432,20 +432,14 @@ impl ApiGatewayV2Service {
             return;
         };
 
-        let log_group_name = settings
-            .destination_arn
-            .split(":log-group:")
-            .nth(1)
-            .map(|s| {
-                if let Some(prefix) = s.strip_suffix(":*") {
-                    prefix.to_string()
-                } else {
-                    s.to_string()
-                }
-            });
-
-        let Some(log_group_name) = log_group_name else {
-            return;
+        // `arn:aws:logs:<region>:<account>:log-group:<name>[:*]`: the group
+        // lives where its ARN says.
+        let parts: Vec<&str> = settings.destination_arn.split(':').collect();
+        let (log_region, log_account, log_group_name) = match parts.as_slice() {
+            ["arn", _, "logs", region, account, "log-group", name, ..] => {
+                (region.to_string(), account.to_string(), name.to_string())
+            }
+            _ => return,
         };
 
         let request_time = chrono::Utc::now()
@@ -500,8 +494,8 @@ impl ApiGatewayV2Service {
         let log_stream_name = format!("{}/{}", api_id, stage);
 
         delivery.put_log_events(
-            &req.account_id,
-            &req.region,
+            &log_account,
+            &log_region,
             &log_group_name,
             &log_stream_name,
             &[(timestamp, log_line)],

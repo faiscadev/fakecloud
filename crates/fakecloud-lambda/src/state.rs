@@ -239,12 +239,35 @@ pub struct EventSourceMapping {
     /// which has no event source ARN.
     #[serde(default)]
     pub self_managed_event_source: Option<serde_json::Value>,
-    /// `SelfManagedKafkaEventSourceConfig` (consumer group id).
+    /// `SelfManagedKafkaEventSourceConfig` (consumer group id, schema
+    /// registry, consumption mode).
     #[serde(default)]
     pub self_managed_kafka_event_source_config: Option<serde_json::Value>,
+    /// `AmazonManagedKafkaEventSourceConfig` (consumer group id, schema
+    /// registry) of an Amazon MSK source.
+    #[serde(default)]
+    pub amazon_managed_kafka_event_source_config: Option<serde_json::Value>,
     /// `DocumentDBEventSourceConfig` (database, collection, full document).
     #[serde(default)]
     pub document_db_event_source_config: Option<serde_json::Value>,
+    /// `ScalingConfig` (`MaximumConcurrency`, Amazon SQS sources).
+    #[serde(default)]
+    pub scaling_config: Option<serde_json::Value>,
+    /// `ProvisionedPollerConfig` (minimum / maximum pollers, poller group).
+    #[serde(default)]
+    pub provisioned_poller_config: Option<serde_json::Value>,
+    /// `LoggingConfig` (`SystemLogLevel`, Kafka sources).
+    #[serde(default)]
+    pub logging_config: Option<serde_json::Value>,
+    /// Tags set by CreateEventSourceMapping's `Tags` or TagResource on the
+    /// mapping's `EventSourceMappingArn`.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    /// `LastProcessingResult` as the source's poller last reported it
+    /// (`OK`, `PROBLEM: ...`); `None` until it has processed anything,
+    /// which reads as `No records processed`.
+    #[serde(default)]
+    pub last_processing_result: Option<String>,
 }
 
 /// A recorded Lambda invocation from cross-service delivery.
@@ -469,6 +492,10 @@ pub struct CodeSigningConfig {
     pub allowed_publishers: Vec<String>,
     pub untrusted_artifact_action: String,
     pub last_modified: DateTime<Utc>,
+    /// `CreateCodeSigningConfig`'s `Tags`, then `TagResource` /
+    /// `UntagResource` on the config's ARN.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1043,7 +1070,13 @@ mod tests {
                 source_access_configurations: Vec::new(),
                 self_managed_event_source: None,
                 self_managed_kafka_event_source_config: None,
+                amazon_managed_kafka_event_source_config: None,
                 document_db_event_source_config: None,
+                scaling_config: None,
+                provisioned_poller_config: None,
+                logging_config: None,
+                tags: Default::default(),
+                last_processing_result: None,
             },
         );
         legacy.layers.insert(

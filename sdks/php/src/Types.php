@@ -3263,6 +3263,7 @@ final class EcsTaskMetadataContainer
         public readonly ?string $createdAt,
         public readonly ?string $startedAt,
         public readonly ?int $exitCode,
+        public readonly ?int $restartCount = null,
     ) {}
 
     public static function fromArray(array $data): self
@@ -3279,6 +3280,7 @@ final class EcsTaskMetadataContainer
             $data['createdAt'] ?? null,
             $data['startedAt'] ?? null,
             isset($data['exitCode']) ? (int) $data['exitCode'] : null,
+            isset($data['restartCount']) ? (int) $data['restartCount'] : null,
         );
     }
 }

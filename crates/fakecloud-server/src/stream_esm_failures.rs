@@ -416,45 +416,66 @@ impl DiscardedBatch<'_> {
 
     /// Describe the batch to `destination`.
     pub(crate) fn send(&self, bus: &Arc<DeliveryBus>, destination: &str) {
-        let service = destination.split(':').nth(2).unwrap_or_default();
-        let body = self.record(service == "s3").to_string();
-        match service {
-            // Lambda writes a mapping's failure record with the function's
-            // execution role, an identity of the account.
-            "sqs" => bus.send_to_sqs(
-                fakecloud_core::delivery::DeliverySender::Identity { arn: None },
-                destination,
-                &body,
-                &HashMap::new(),
-            ),
-            "sns" => bus.publish_to_sns(destination, &body, None),
-            "s3" => {
-                let bucket = destination.rsplit(':').next().unwrap_or_default();
-                let now = Utc::now();
-                let key = format!(
-                    "aws/lambda/{}/{}/{}/{}-{}",
-                    self.mapping_uuid,
-                    self.shard_id,
-                    now.format("%Y/%m/%d"),
-                    now.format("%Y-%m-%dT%H.%M.%S"),
-                    uuid::Uuid::new_v4()
-                );
-                let account_id = self.function_arn.split(':').nth(4).unwrap_or_default();
-                if let Err(err) = bus.put_object_to_s3(
-                    account_id,
-                    bucket,
-                    &key,
-                    body.into_bytes(),
-                    Some("application/octet-stream"),
-                ) {
-                    tracing::warn!(destination, %err, "stream mapping OnFailure: S3 refused the record");
-                }
+        deliver_failure_record(
+            bus,
+            destination,
+            self.function_arn,
+            self.mapping_uuid,
+            self.shard_id,
+            |with_payload| self.record(with_payload),
+        );
+    }
+}
+
+/// Send a mapping's OnFailure record to `destination` (SQS, SNS or S3).
+/// `record(with_payload)` builds it; an S3 record carries the batch's event
+/// and lands under `aws/lambda/<mapping>/<shard or partition>/<date>/`.
+pub(crate) fn deliver_failure_record(
+    bus: &Arc<DeliveryBus>,
+    destination: &str,
+    function_arn: &str,
+    mapping_uuid: &str,
+    partition: &str,
+    record: impl Fn(bool) -> Value,
+) {
+    let service = destination.split(':').nth(2).unwrap_or_default();
+    let body = record(service == "s3").to_string();
+    match service {
+        // Lambda writes a mapping's failure record with the function's
+        // execution role, an identity of the account.
+        "sqs" => bus.send_to_sqs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            destination,
+            &body,
+            &HashMap::new(),
+        ),
+        "sns" => bus.publish_to_sns(destination, &body, None),
+        "s3" => {
+            let bucket = destination.rsplit(':').next().unwrap_or_default();
+            let now = Utc::now();
+            let key = format!(
+                "aws/lambda/{}/{}/{}/{}-{}",
+                mapping_uuid,
+                partition,
+                now.format("%Y/%m/%d"),
+                now.format("%Y-%m-%dT%H.%M.%S"),
+                uuid::Uuid::new_v4()
+            );
+            let account_id = function_arn.split(':').nth(4).unwrap_or_default();
+            if let Err(err) = bus.put_object_to_s3(
+                account_id,
+                bucket,
+                &key,
+                body.into_bytes(),
+                Some("application/octet-stream"),
+            ) {
+                tracing::warn!(destination, %err, "event source mapping OnFailure: S3 refused the record");
             }
-            _ => tracing::warn!(
-                destination,
-                "stream mapping OnFailure: unsupported destination"
-            ),
         }
+        _ => tracing::warn!(
+            destination,
+            "event source mapping OnFailure: unsupported destination"
+        ),
     }
 }
 

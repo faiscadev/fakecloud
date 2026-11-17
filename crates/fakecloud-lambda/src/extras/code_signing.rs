@@ -32,6 +32,15 @@ impl LambdaService {
             return Err(null_member("allowedPublishers"));
         }
         check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+        let tags: std::collections::BTreeMap<String, String> = body["Tags"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        crate::tagging::validate_tags(&tags)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         let id = new_csc_id();
@@ -62,6 +71,7 @@ impl LambdaService {
                 .unwrap_or("Warn")
                 .to_string(),
             last_modified: Utc::now(),
+            tags,
         };
         state.code_signing_configs.insert(id, csc.clone());
         ok(json!({"CodeSigningConfig": code_signing_json(&csc)}))

@@ -199,7 +199,7 @@ impl S3Service {
         }
         *tags = merged;
         if let TaggedResource::Bucket(bucket) = &resource {
-            self.persist_bucket_tags(bucket, tags)?;
+            self.persist_bucket_tags(account_id, bucket, tags)?;
         }
         Ok(no_content())
     }
@@ -220,7 +220,7 @@ impl S3Service {
             tags.remove(key);
         }
         if let TaggedResource::Bucket(bucket) = &resource {
-            self.persist_bucket_tags(bucket, tags)?;
+            self.persist_bucket_tags(account_id, bucket, tags)?;
         }
         Ok(no_content())
     }
@@ -229,19 +229,20 @@ impl S3Service {
     /// `DeleteBucketTagging` do, so both APIs survive a restart alike.
     fn persist_bucket_tags(
         &self,
+        account_id: &str,
         bucket: &str,
         tags: &BTreeMap<String, String>,
     ) -> Result<(), AwsServiceError> {
         if tags.is_empty() {
             return self
                 .store
-                .delete_bucket_subresource(bucket, BucketSubresource::Tags)
+                .delete_bucket_subresource(account_id, bucket, BucketSubresource::Tags)
                 .map_err(super::persistence_error);
         }
         let snap = TagsSnapshot { tags: tags.clone() };
         let payload = super::toml_or_internal_error(&snap)?;
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Tags, &payload)
             .map_err(super::persistence_error)
     }
 }

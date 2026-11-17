@@ -347,6 +347,66 @@ pub(crate) fn lambda_passed_capacity_provider(iam_action: &str, body: &[u8]) -> 
         .map(str::to_string)
 }
 
+/// The IAM resource of a tagging operation on `arn`: the ARN itself, with a
+/// function's qualifier dropped (tags are the function's, not a version's or
+/// alias's). `*` for an input that is not a Lambda ARN, which the handler
+/// refuses anyway.
+pub(crate) fn tagged_resource_iam_arn(arn: &str) -> String {
+    if fakecloud_aws::arn::arn_resource(arn, "lambda").is_none() {
+        return "*".to_string();
+    }
+    let parts: Vec<&str> = arn.splitn(8, ':').collect();
+    if parts.get(5) == Some(&"function") && parts.len() > 7 {
+        return parts[..7].join(":");
+    }
+    arn.to_string()
+}
+
+/// The resource a create that carries `Tags` needs `lambda:TagResource` on:
+/// the function / capacity provider it names, or, for an event source
+/// mapping or code signing config whose identifier is only assigned on
+/// creation, any resource of that type in the caller's account and region.
+/// `None` when the request sets no tags.
+fn tag_on_create_resource(
+    primary: &fakecloud_core::auth::IamAction,
+    request: &AwsRequest,
+) -> Option<String> {
+    if !matches!(
+        primary.action,
+        "CreateFunction"
+            | "CreateEventSourceMapping"
+            | "CreateCodeSigningConfig"
+            | "CreateCapacityProvider"
+    ) {
+        return None;
+    }
+    let body: Value = serde_json::from_slice(&request.body).ok()?;
+    let has_tags = match body.get("Tags") {
+        Some(Value::Object(m)) => !m.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        _ => false,
+    };
+    if !has_tags {
+        return None;
+    }
+    let regional = |resource: &str| {
+        fakecloud_aws::arn::Arn::regional("lambda", &request.region, &request.account_id, resource)
+            .to_string()
+    };
+    Some(match primary.action {
+        "CreateFunction" => primary.resource.clone(),
+        "CreateEventSourceMapping" => regional("event-source-mapping:*"),
+        "CreateCodeSigningConfig" => regional("code-signing-config:*"),
+        _ => match body.get("CapacityProviderName").and_then(Value::as_str) {
+            Some(name) => regional(&format!(
+                "capacity-provider:{}",
+                crate::capacity::name_from_reference(name, &request.region)
+            )),
+            None => "*".to_string(),
+        },
+    })
+}
+
 /// Strip an ARN, partial ARN, or trailing `:qualifier` from a Lambda
 /// `FunctionName` input down to the bare function name used as the
 /// state map key. AWS Lambda accepts four forms in URL path slots and
@@ -870,6 +930,7 @@ impl CreateFunctionInput {
                     .collect()
             })
             .unwrap_or_default();
+        crate::tagging::validate_tags(&tags)?;
 
         let environment: BTreeMap<String, String> = body["Environment"]["Variables"]
             .as_object()
@@ -2349,6 +2410,14 @@ impl AwsService for LambdaService {
                     })
                     .unwrap_or_else(|| "*".to_string())
             }
+            // Tagging operations are evaluated against the resource their
+            // `Resource` ARN names (function, event source mapping, code
+            // signing config, capacity provider), so policies scoped to it
+            // apply.
+            "TagResource" | "UntagResource" | "ListTags" => resource_name
+                .as_deref()
+                .map(tagged_resource_iam_arn)
+                .unwrap_or_else(|| "*".to_string()),
             // Layer operations are evaluated against `*` too, so dispatch
             // takes the principal's own account as the resource account and
             // never applies (or needs) a resource policy for them. Access to
@@ -2387,6 +2456,16 @@ impl AwsService for LambdaService {
                 service: "lambda",
                 action: "PassCapacityProvider",
                 resource: arn,
+            });
+        }
+        // Tagging on create also needs `lambda:TagResource` on the new
+        // resource (the Service Authorization Reference lists it as a
+        // dependent action of each of these creates).
+        if let Some(resource) = tag_on_create_resource(&out[0], request) {
+            out.push(fakecloud_core::auth::IamAction {
+                service: "lambda",
+                action: "TagResource",
+                resource,
             });
         }
         out

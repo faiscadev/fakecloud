@@ -121,7 +121,7 @@ pub(crate) fn validate(
 
 /// The settings CreateEventSourceMapping and UpdateEventSourceMapping both
 /// take, against their `@length` / `@range` / enum constraints.
-pub(crate) fn validate_settings(body: &Value) -> Result<(), AwsServiceError> {
+pub fn validate_settings(body: &Value) -> Result<(), AwsServiceError> {
     use crate::service::{check_optional_enum, check_optional_int_range};
     crate::extras::check_optional_len("FunctionName", body["FunctionName"].as_str(), 1, 256)?;
     crate::extras::check_optional_len("KMSKeyArn", body["KMSKeyArn"].as_str(), 0, 10000)?;
@@ -141,7 +141,12 @@ pub(crate) fn validate_settings(body: &Value) -> Result<(), AwsServiceError> {
     ] {
         check_optional_int_range(field, body[field].as_i64(), min, max)?;
     }
-    Ok(())
+    crate::esm_config::validate_shapes(body)
+}
+
+/// Whether `arn` satisfies the model's `Arn` pattern.
+pub(crate) fn satisfies_arn_pattern(arn: &str) -> bool {
+    parse(arn).is_some()
 }
 
 /// Every check CreateEventSourceMapping makes of its request before
@@ -155,7 +160,7 @@ pub fn validate_create(
     lookup: Option<&dyn EventSourceLookup>,
 ) -> Result<Vec<String>, AwsServiceError> {
     validate_settings(body)?;
-    validate_kafka_consumption_mode(body)?;
+    crate::tagging::validate_tags(&crate::esm_config::tags(body))?;
     match body["EventSourceArn"].as_str() {
         Some(event_source_arn) => {
             crate::extras::check_len("EventSourceArn", event_source_arn, 0, 10000)?;
@@ -171,24 +176,6 @@ pub fn validate_create(
         .ok_or_else(|| invalid_parameter("FunctionName is required".to_string()))?;
     check_function_region(function_name, region)?;
     filter_patterns(body)
-}
-
-/// `SelfManagedKafkaEventSourceConfig.ConsumptionMode` is `Stream` (the
-/// default) or `Queue`. It is fixed at creation: `UpdateEventSourceMapping`
-/// never rewrites the stored Kafka config.
-fn validate_kafka_consumption_mode(body: &Value) -> Result<(), AwsServiceError> {
-    match body
-        .get("SelfManagedKafkaEventSourceConfig")
-        .and_then(|c| c.get("ConsumptionMode"))
-    {
-        None | Some(Value::Null) => Ok(()),
-        Some(Value::String(m)) if m == "Stream" || m == "Queue" => Ok(()),
-        Some(other) => Err(invalid_parameter(format!(
-            "1 validation error detected: Value {other} at \
-             'selfManagedKafkaEventSourceConfig.consumptionMode' failed to satisfy \
-             constraint: Member must satisfy enum value set: [Stream, Queue]"
-        ))),
-    }
 }
 
 /// An event source mapping invokes a function of its own region; a function

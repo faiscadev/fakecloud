@@ -51,9 +51,9 @@ impl S3Service {
                 b.mfa_delete = Some(mfa);
             }
         }
-        let meta = bucket_meta_snapshot(b);
+        let meta = bucket_meta_snapshot(account_id, b);
         self.store
-            .put_bucket_meta(bucket, &meta)
+            .put_bucket_meta(account_id, bucket, &meta)
             .map_err(crate::service::persistence_error)?;
         Ok(AwsResponse {
             status: StatusCode::OK,

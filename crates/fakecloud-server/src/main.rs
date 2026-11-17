@@ -16,6 +16,7 @@ mod admin_elasticache_artifacts;
 mod admin_lambda_artifacts;
 mod appas_hooks;
 mod cli;
+mod cloudwatch_alarm_hooks;
 mod dns;
 mod dynamodb_streams_lambda_poller;
 mod ec2_imds;
@@ -24,6 +25,7 @@ mod firehose_topology;
 mod glue_external;
 mod imds;
 mod introspection;
+mod kafka_lambda_poller;
 mod kinesis_lambda_firehose_poller;
 mod lambda_delivery;
 mod lambda_runtime_api;
@@ -488,6 +490,8 @@ async fn main() {
     // into their own SSM / Secrets Manager services below.
     let ssm_state_for_codebuild = ssm_state.clone();
     let secretsmanager_state_for_codebuild = secretsmanager_state.clone();
+    // The Kafka event source mapping poller reads SASL credentials.
+    let secretsmanager_state_for_kafka_poller = secretsmanager_state.clone();
     let s3_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -1368,6 +1372,9 @@ async fn main() {
     );
     let eb_delivery_for_sfn_deferred =
         fakecloud_eventbridge::delivery::DeferredEventBridgeDelivery::new();
+    // CloudWatch Logs delivery for Step Functions execution logging and API
+    // Gateway access logs, bound to the Logs service once it is built below.
+    let logs_delivery = fakecloud_core::delivery::DeferredCloudwatchLogsDelivery::new();
     // Step Functions delivery (EventBridge/Scheduler can start executions)
     let sfn_delivery_for_eb: Arc<dyn fakecloud_core::delivery::StepFunctionsDelivery> = {
         // Build a full delivery bus for the SFN interpreter so task states
@@ -1386,7 +1393,8 @@ async fn main() {
         let mut sfn_interpreter_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_for_sfn_delivery)
-            .with_eventbridge(Arc::new(eb_delivery_for_sfn_deferred.clone()));
+            .with_eventbridge(Arc::new(eb_delivery_for_sfn_deferred.clone()))
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
         if let Some(ref ld) = lambda_delivery {
             sfn_interpreter_bus = sfn_interpreter_bus.with_lambda(ld.clone());
         }
@@ -2258,6 +2266,7 @@ async fn main() {
     let ssm_state_for_fail = ssm_state.clone();
     let ssm_state_for_policy_events = ssm_state.clone();
     let ssm_state_for_session_inject = ssm_state.clone();
+    let ssm_state_for_alarm_actions = ssm_state.clone();
     let mut ssm_service = SsmService::new(ssm_state)
         .with_secretsmanager(secretsmanager_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
@@ -2497,6 +2506,7 @@ async fn main() {
         cfn_snapshot_hooks.insert("logs", h);
     }
     let logs_service = Arc::new(logs_service);
+    logs_delivery.set(logs_service.clone());
     registry.register(logs_service.clone());
     let kms_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -2761,42 +2771,55 @@ async fn main() {
                 persistence_config.s3_cache_bytes,
             ));
             shared_body_cache = Some(cache.clone());
-            let disk = fakecloud_persistence::s3::DiskS3Store::new(s3_root, cache);
+            // Buckets of the flat pre-account layout belong to the default
+            // account unless their metadata names the account that created them.
+            let disk = fakecloud_persistence::s3::DiskS3Store::new(s3_root, cache)
+                .with_default_account(cli.account_id.clone());
             match <fakecloud_persistence::s3::DiskS3Store as fakecloud_persistence::S3Store>::load(
                 &disk,
             ) {
-                Ok(snapshot) => {
-                    let bucket_count = snapshot.buckets.len();
-                    let object_count: usize =
-                        snapshot.buckets.values().map(|b| b.objects.len()).sum();
-                    // Report each bucket the sidecar layer cannot read into the
-                    // store's refusal set. Its objects loaded fine, so nothing
-                    // below this layer knows the bucket is unusable -- and a name
-                    // absent from both memory and that set is one CreateBucket
-                    // clears the directory of, objects included.
-                    let mut refused = |bucket: &str, _err: &str| {
-                        <fakecloud_persistence::s3::DiskS3Store as fakecloud_persistence::S3Store>::
-                            mark_bucket_load_refused(&disk, bucket);
-                    };
-                    let hydrated = match fakecloud_s3::persistence::hydrate_s3_state_reporting(
-                        snapshot,
-                        &cli.account_id,
-                        &cli.region,
-                        &mut refused,
-                    ) {
-                        Ok(h) => h,
-                        Err(err) => fatal_exit(format_args!(
-                            "failed to hydrate s3 persistence snapshot: {err}"
-                        )),
-                    };
-                    {
-                        let account_id = hydrated.account_id.clone();
-                        let mut mas = s3_state.write();
-                        *mas.get_or_create(&account_id) = hydrated;
+                Ok(accounts_map) => {
+                    let mut total_buckets = 0;
+                    let mut total_objects = 0;
+                    let account_count = accounts_map.len();
+
+                    for (account_id, snapshot) in accounts_map {
+                        let bucket_count = snapshot.buckets.len();
+                        let object_count: usize =
+                            snapshot.buckets.values().map(|b| b.objects.len()).sum();
+                        total_buckets += bucket_count;
+                        total_objects += object_count;
+
+                        // Report each bucket the sidecar layer cannot read into the
+                        // store's refusal set. Its objects loaded fine, so nothing
+                        // below this layer knows the bucket is unusable -- and a name
+                        // absent from both memory and that set is one CreateBucket
+                        // clears the directory of, objects included.
+                        let mut refused = |bucket: &str, _err: &str| {
+                            <fakecloud_persistence::s3::DiskS3Store as fakecloud_persistence::S3Store>::
+                                mark_bucket_load_refused(&disk, &account_id, bucket);
+                        };
+                        let hydrated = match fakecloud_s3::persistence::hydrate_s3_state_reporting(
+                            snapshot,
+                            &account_id,
+                            &cli.region,
+                            &mut refused,
+                        ) {
+                            Ok(h) => h,
+                            Err(err) => fatal_exit(format_args!(
+                                "failed to hydrate s3 persistence snapshot for account {}: {err}",
+                                account_id
+                            )),
+                        };
+                        {
+                            let mut mas = s3_state.write();
+                            *mas.get_or_create(&account_id) = hydrated;
+                        }
                     }
                     tracing::info!(
-                        buckets = bucket_count,
-                        objects = object_count,
+                        buckets = total_buckets,
+                        objects = total_objects,
+                        accounts = account_count,
                         "loaded s3 persistence snapshot",
                     );
                 }
@@ -2822,7 +2845,11 @@ async fn main() {
     if let Some(ref cache) = shared_body_cache {
         // Share the cache between the S3Store and S3State so read_body honors
         // the persistent LRU on every read site, not just open_object_body.
-        s3_state.write().default_mut().set_body_cache(cache.clone());
+        // Every account hydrated above gets it, not only the default one:
+        // they were created before the default account held it to inherit.
+        for (_, account) in s3_state.write().iter_mut() {
+            account.set_body_cache(cache.clone());
+        }
     }
     registry.register(Arc::new(
         S3Service::with_store(s3_state.clone(), delivery_for_s3, s3_store.clone())
@@ -4801,7 +4828,9 @@ async fn main() {
                                 ));
                             }
                             let account_count = snapshot.accounts.accounts.len();
-                            *cloudwatch_state.write() = snapshot.accounts;
+                            let mut accounts = snapshot.accounts;
+                            accounts.migrate_loaded();
+                            *cloudwatch_state.write() = accounts;
                             tracing::info!(
                                 accounts = account_count,
                                 "loaded cloudwatch persistence snapshot"
@@ -4823,15 +4852,55 @@ async fn main() {
         } else {
             None
         };
+    // Alarm actions: SNS topics and Lambda functions through the shared
+    // deliveries, EC2 instance actions through the EC2 service, OpsItems
+    // through the SSM service.
+    let delivery_for_cloudwatch_alarms = {
+        let mut bus = DeliveryBus::new().with_sns(sns_delivery.clone());
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
     let mut cloudwatch_service =
-        fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
+        fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone())
+            .with_delivery(delivery_for_cloudwatch_alarms)
+            .with_ec2_actions(Arc::new(cloudwatch_alarm_hooks::Ec2AlarmActions::new(
+                sfn_registry_handle.clone(),
+            )))
+            .with_ops_item_actions(Arc::new(
+                cloudwatch_alarm_hooks::SsmOpsItemAlarmActions::new(
+                    sfn_registry_handle.clone(),
+                    ssm_state_for_alarm_actions,
+                ),
+            ))
+            .with_action_authorizer(Arc::new(cloudwatch_alarm_hooks::AlarmActionPolicies::new(
+                fakecloud_core::auth::MultiResourcePolicyProvider::shared(vec![
+                    fakecloud_sns::resource_policy::SnsResourcePolicyProvider::shared(
+                        sns_state.clone(),
+                    ),
+                    fakecloud_lambda::resource_policy::LambdaResourcePolicyProvider::shared(
+                        lambda_state.clone(),
+                    ),
+                ]),
+                fakecloud_iam::policy_evaluator::IamPolicyEvaluatorImpl::shared(iam_state.clone()),
+            )));
     if let Some(store) = cloudwatch_snapshot_store {
         cloudwatch_service = cloudwatch_service.with_snapshot_store(store);
     }
     if let Some(h) = cloudwatch_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("cloudwatch", h);
     }
-    registry.register(Arc::new(cloudwatch_service));
+    let cloudwatch_service = Arc::new(cloudwatch_service);
+    registry.register(cloudwatch_service.clone());
+    // CloudWatch evaluates alarms every period whether or not anyone looks at
+    // them: re-evaluate on a timer so time-driven transitions (data ageing
+    // out, a suppressor's wait period ending) happen and act on their own.
+    tokio::spawn(
+        cloudwatch_service
+            .clone()
+            .run_alarm_evaluator(std::time::Duration::from_secs(10)),
+    );
     let app_autoscaling_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -5274,7 +5343,8 @@ async fn main() {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery_for_sfn)
-            .with_eventbridge(eb_delivery.clone());
+            .with_eventbridge(eb_delivery.clone())
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
@@ -5421,16 +5491,18 @@ async fn main() {
         };
     let mut apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone())
         .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone());
-    if let Some(ref ld) = lambda_delivery {
+    {
         let cognito_jwt_verifier: Arc<dyn fakecloud_core::delivery::CognitoJwtVerifier> = Arc::new(
             fakecloud_cognito::StateBackedJwtVerifier::new(cognito_state.clone()),
         );
-        let delivery_for_apigw = Arc::new(
-            DeliveryBus::new()
-                .with_lambda(ld.clone())
-                .with_cognito_jwt_verifier(cognito_jwt_verifier),
-        );
-        apigw_service = apigw_service.with_delivery(delivery_for_apigw);
+        // Access logs reach CloudWatch Logs whether or not Lambda runs here.
+        let mut delivery_for_apigw = DeliveryBus::new()
+            .with_cognito_jwt_verifier(cognito_jwt_verifier)
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
+        if let Some(ref ld) = lambda_delivery {
+            delivery_for_apigw = delivery_for_apigw.with_lambda(ld.clone());
+        }
+        apigw_service = apigw_service.with_delivery(Arc::new(delivery_for_apigw));
     }
     if let Some(store) = apigw_snapshot_store {
         apigw_service = apigw_service.with_snapshot_store(store);
@@ -7628,7 +7700,8 @@ async fn main() {
         let mut sfn_interpreter_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_for_sfn)
-            .with_eventbridge(eb_delivery.clone());
+            .with_eventbridge(eb_delivery.clone())
+            .with_cloudwatch_logs(Arc::new(logs_delivery.clone()));
         if let Some(ref ld) = lambda_delivery {
             sfn_interpreter_bus = sfn_interpreter_bus.with_lambda(ld.clone());
         }
@@ -7724,6 +7797,17 @@ async fn main() {
     )));
     let kinesis_lambda_firehose_poller = Arc::new(kinesis_lambda_firehose_poller);
     tokio::spawn(kinesis_lambda_firehose_poller.clone().run());
+    let mut kafka_lambda_poller = kafka_lambda_poller::KafkaLambdaPoller::new(
+        lambda_invocations_state.clone(),
+        kafka_state.clone(),
+        secretsmanager_state_for_kafka_poller,
+    )
+    .with_kms_hook(kms_hook_for_services.clone())
+    .with_failure_destinations(stream_failure_destinations.clone());
+    if let Some(ref ld) = lambda_delivery {
+        kafka_lambda_poller = kafka_lambda_poller.with_lambda_delivery(ld.clone());
+    }
+    tokio::spawn(Arc::new(kafka_lambda_poller).run());
     let mut dynamodb_streams_poller =
         DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone())
             .with_failure_destinations(stream_failure_destinations);
@@ -11258,21 +11342,29 @@ async fn main() {
                                     "StartedAt": t.started_at.map(|d| d.to_rfc3339()),
                                     "StoppedAt": t.stopped_at.map(|d| d.to_rfc3339()),
                                     "AvailabilityZone": "us-east-1a",
-                                    "Containers": t.containers.iter().map(|c| serde_json::json!({
-                                        "DockerId": c.runtime_id,
-                                        "Name": c.name,
-                                        "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
-                                        "Image": c.image,
-                                        "ImageID": c.image_digest,
-                                        "Ports": c.network_bindings,
-                                        "Labels": {},
-                                        "DesiredStatus": c.last_status,
-                                        "KnownStatus": c.last_status,
-                                        "ExitCode": c.exit_code,
-                                        "Health": {
-                                            "status": c.health_status.as_deref().unwrap_or("UNKNOWN"),
-                                        },
-                                    })).collect::<Vec<_>>(),
+                                    "Containers": t.containers.iter().map(|c| {
+                                        let mut container = serde_json::json!({
+                                            "DockerId": c.runtime_id,
+                                            "Name": c.name,
+                                            "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
+                                            "Image": c.image,
+                                            "ImageID": c.image_digest,
+                                            "Ports": c.network_bindings,
+                                            "Labels": {},
+                                            "DesiredStatus": c.last_status,
+                                            "KnownStatus": c.last_status,
+                                            "ExitCode": c.exit_code,
+                                            "Health": {
+                                                "status": c.health_status.as_deref().unwrap_or("UNKNOWN"),
+                                            },
+                                        });
+                                        // Task metadata v4 reports `RestartCount`
+                                        // only for containers with a restart policy.
+                                        if let Some(count) = c.restart_count {
+                                            container["RestartCount"] = serde_json::json!(count);
+                                        }
+                                        container
+                                    }).collect::<Vec<_>>(),
                                 });
                                 return (axum::http::StatusCode::OK, axum::Json(body));
                             }
@@ -11302,18 +11394,24 @@ async fn main() {
                                     "Revision": t.revision,
                                     "DesiredStatus": t.desired_status,
                                     "KnownStatus": t.last_status,
-                                    "Containers": t.containers.iter().map(|c| serde_json::json!({
-                                        "DockerId": c.runtime_id,
-                                        "Name": c.name,
-                                        "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
-                                        "Image": c.image,
-                                        "ImageID": c.image_digest,
-                                        "Ports": c.network_bindings,
-                                        "Labels": {},
-                                        "DesiredStatus": c.last_status,
-                                        "KnownStatus": c.last_status,
-                                        "ExitCode": c.exit_code,
-                                    })).collect::<Vec<_>>(),
+                                    "Containers": t.containers.iter().map(|c| {
+                                        let mut container = serde_json::json!({
+                                            "DockerId": c.runtime_id,
+                                            "Name": c.name,
+                                            "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
+                                            "Image": c.image,
+                                            "ImageID": c.image_digest,
+                                            "Ports": c.network_bindings,
+                                            "Labels": {},
+                                            "DesiredStatus": c.last_status,
+                                            "KnownStatus": c.last_status,
+                                            "ExitCode": c.exit_code,
+                                        });
+                                        if let Some(count) = c.restart_count {
+                                            container["RestartCount"] = serde_json::json!(count);
+                                        }
+                                        container
+                                    }).collect::<Vec<_>>(),
                                 });
                                 return (axum::http::StatusCode::OK, axum::Json(body));
                             }
@@ -11335,9 +11433,12 @@ async fn main() {
                     let ec = ec.clone();
                     let rt = rt.clone();
                     async move {
+                        // Requested like StopTask (so a restart policy doesn't
+                        // bring the containers back), and answered once the
+                        // task is STOPPED.
                         if let Some(runtime) = rt {
                             runtime
-                                .stop_task(&task_id, "IntrospectionForceStop")
+                                .force_stop_task(&ec, &task_id, "IntrospectionForceStop")
                                 .await;
                         }
                         let accounts = ec.read();

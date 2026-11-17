@@ -75,6 +75,8 @@ impl ResourceProvisioner {
         }
 
         let cfg = parse_lambda_function_props(props, &self.region)?;
+        fakecloud_lambda::tagging::validate_tags(&cfg.tags)
+            .map_err(|e| lambda_handler_error(&e))?;
         self.validate_lambda_execution_role(&cfg.role)?;
         let function_arn =
             fakecloud_lambda::function_arn(&self.region, &self.account_id, &function_name);
@@ -325,6 +327,8 @@ impl ResourceProvisioner {
         let props = &resource.properties;
         let function_name = existing.physical_id.clone();
         let cfg = parse_lambda_function_props(props, &self.region)?;
+        fakecloud_lambda::tagging::validate_tags(&cfg.tags)
+            .map_err(|e| lambda_handler_error(&e))?;
         self.validate_lambda_execution_role(&cfg.role)?;
 
         let new_code_zip = if cfg.code_zip.is_some() {
@@ -584,7 +588,7 @@ impl ResourceProvisioner {
         &self,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        let props = &resource.properties;
+        let props = &coerce_event_source_mapping_scalars(&resource.properties)?;
         let function_name = parse_lambda_function_name(
             props
                 .get("FunctionName")
@@ -600,6 +604,9 @@ impl ResourceProvisioner {
         )
         .map_err(|e| lambda_handler_error(&e))?;
         let cfg = parse_lambda_event_source_mapping_props(props)?;
+        let uuid = Uuid::new_v4().to_string();
+        let source_configs = fakecloud_lambda::esm_config::create_configs(props, &uuid)
+            .map_err(|e| lambda_handler_error(&e))?;
 
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
@@ -608,6 +615,11 @@ impl ResourceProvisioner {
                 "Function {function_name} does not exist yet — retry once it has been provisioned"
             ));
         }
+        fakecloud_lambda::esm_config::check_consumer_group_unique(
+            &source_configs,
+            state.event_source_mappings.values(),
+        )
+        .map_err(|e| lambda_handler_error(&e))?;
         // An ARN (e.g. an alias's, from `Ref` on an AWS::Lambda::Alias) keeps
         // its qualifier, as CreateEventSourceMapping keeps it, so the mapping
         // invokes that alias.
@@ -615,7 +627,6 @@ impl ResourceProvisioner {
             Some(arn) if arn.starts_with("arn:") => arn.to_string(),
             _ => fakecloud_lambda::function_arn(&self.region, &self.account_id, &function_name),
         };
-        let uuid = Uuid::new_v4().to_string();
         let esm = EventSourceMapping {
             uuid: uuid.clone(),
             function_arn,
@@ -645,8 +656,14 @@ impl ResourceProvisioner {
             queues: cfg.queues,
             source_access_configurations: cfg.source_access_configurations,
             self_managed_event_source: cfg.self_managed_event_source,
-            self_managed_kafka_event_source_config: cfg.self_managed_kafka_event_source_config,
+            self_managed_kafka_event_source_config: source_configs.self_managed_kafka,
+            amazon_managed_kafka_event_source_config: source_configs.amazon_managed_kafka,
             document_db_event_source_config: cfg.document_db_event_source_config,
+            scaling_config: source_configs.scaling,
+            provisioned_poller_config: source_configs.provisioned_poller,
+            logging_config: source_configs.logging,
+            tags: fakecloud_lambda::esm_config::tags(props),
+            last_processing_result: None,
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))
@@ -660,7 +677,10 @@ impl ResourceProvisioner {
         existing: &StackResource,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        let cfg = parse_lambda_event_source_mapping_props(&resource.properties)?;
+        let props = coerce_event_source_mapping_scalars(&resource.properties)?;
+        let cfg = parse_lambda_event_source_mapping_props(&props)?;
+        let tags = fakecloud_lambda::esm_config::tags(&props);
+        fakecloud_lambda::tagging::validate_tags(&tags).map_err(|e| lambda_handler_error(&e))?;
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
         let esm = state
@@ -672,6 +692,21 @@ impl ResourceProvisioner {
                     existing.physical_id
                 )
             })?;
+        // A setting the template no longer declares is removed, which the
+        // Lambda API spells as an empty structure. The Kafka configs keep
+        // their fixed-at-creation consumer group either way.
+        let mut settings = props.clone();
+        if let Some(obj) = settings.as_object_mut() {
+            for key in ["ScalingConfig", "ProvisionedPollerConfig", "LoggingConfig"] {
+                obj.entry(key)
+                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            }
+        }
+        fakecloud_lambda::event_source::validate_settings(&settings)
+            .and_then(|()| fakecloud_lambda::esm_config::apply_update(esm, &settings))
+            .map_err(|e| lambda_handler_error(&e))?;
+        // The template's Tags are the mapping's tags.
+        esm.tags = tags;
         esm.batch_size = cfg.batch_size;
         esm.enabled = cfg.enabled;
         esm.state = if cfg.enabled {
@@ -1463,6 +1498,13 @@ impl ResourceProvisioner {
         new_def: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
         let props = &new_def.properties;
+        // Tags are desired state: an absent Tags property clears them.
+        let tags: std::collections::BTreeMap<String, String> =
+            lambda_cfn_tag_map(props.get("Tags"))
+                .into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_string())))
+                .collect();
+        fakecloud_lambda::tagging::validate_tags(&tags).map_err(|e| lambda_handler_error(&e))?;
         let body = serde_json::json!({
             "CapacityProviderScalingConfig": props
                 .get("CapacityProviderScalingConfig")
@@ -1477,11 +1519,6 @@ impl ResourceProvisioner {
             &body,
         )
         .map_err(|e| e.to_string())?;
-        // Tags are desired state: an absent Tags property clears them.
-        let tags = lambda_cfn_tag_map(props.get("Tags"))
-            .into_iter()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_string())))
-            .collect();
         if let Some(stored) = self
             .lambda_state
             .write()
@@ -1528,6 +1565,118 @@ impl ResourceProvisioner {
             _ => None,
         }
     }
+}
+
+/// AWS::Lambda::EventSourceMapping properties with the integer, number and
+/// boolean members a `Ref` / `Fn::Sub` resolved to strings (`"5"`,
+/// `"1700000000"`, `"False"`) turned back into numbers and booleans, as
+/// CloudFormation converts them before calling Lambda (booleans
+/// case-insensitively). A value that is not one (`"abc"`, `"1.0"` for an
+/// integer, `"yes"` for a boolean) fails the resource with Lambda's
+/// validation error rather than falling back to the default.
+fn coerce_event_source_mapping_scalars(
+    props: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    const INTEGERS: &[&[&str]] = &[
+        &["BatchSize"],
+        &["MaximumBatchingWindowInSeconds"],
+        &["ParallelizationFactor"],
+        &["MaximumRecordAgeInSeconds"],
+        &["MaximumRetryAttempts"],
+        &["TumblingWindowInSeconds"],
+        &["ScalingConfig", "MaximumConcurrency"],
+        &["ProvisionedPollerConfig", "MinimumPollers"],
+        &["ProvisionedPollerConfig", "MaximumPollers"],
+    ];
+    const NUMBERS: &[&[&str]] = &[&["StartingPositionTimestamp"]];
+    const BOOLEANS: &[&[&str]] = &[&["Enabled"], &["BisectBatchOnFunctionError"]];
+    fn slot<'a>(value: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
+        path.iter().try_fold(value, |v, key| v.get_mut(*key))
+    }
+    fn integer(value: &Value) -> Option<Value> {
+        match value {
+            Value::Number(n) => match n.as_i64() {
+                Some(i) => Some(Value::from(i)),
+                // An integral float (`60.0`) is still an integer.
+                None => n
+                    .as_f64()
+                    .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15)
+                    .map(|f| Value::from(f as i64)),
+            },
+            Value::String(s) => s.trim().parse::<i64>().ok().map(Value::from),
+            _ => None,
+        }
+    }
+    fn number(value: &Value) -> Option<Value> {
+        match value {
+            Value::Number(_) => Some(value.clone()),
+            Value::String(s) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            _ => None,
+        }
+    }
+    fn boolean(value: &Value) -> Option<Value> {
+        match value {
+            Value::Bool(_) => Some(value.clone()),
+            Value::String(s) if s.trim().eq_ignore_ascii_case("true") => Some(Value::Bool(true)),
+            Value::String(s) if s.trim().eq_ignore_ascii_case("false") => Some(Value::Bool(false)),
+            _ => None,
+        }
+    }
+    let mut props = props.clone();
+    for (paths, coerce, expected) in [
+        (
+            INTEGERS,
+            integer as fn(&Value) -> Option<Value>,
+            "an integer",
+        ),
+        (NUMBERS, number, "a number"),
+        (BOOLEANS, boolean, "a boolean"),
+    ] {
+        for path in paths {
+            let Some(v) = slot(&mut props, path) else {
+                continue;
+            };
+            if v.is_null() {
+                continue;
+            }
+            match coerce(v) {
+                Some(coerced) => *v = coerced,
+                None => {
+                    let shown = match &*v {
+                        Value::String(s) => format!("'{s}'"),
+                        other => other.to_string(),
+                    };
+                    let member = path
+                        .iter()
+                        .map(|p| {
+                            let mut c = p.chars();
+                            c.next()
+                                .map(|f| f.to_lowercase().chain(c).collect::<String>())
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    return Err(lambda_handler_error(
+                        &fakecloud_core::service::AwsServiceError::aws_error(
+                            http::StatusCode::BAD_REQUEST,
+                            "ValidationException",
+                            format!(
+                                "1 validation error detected: Value {shown} at '{member}' \
+                                 failed to satisfy constraint: Member must be {expected}"
+                            ),
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(props)
 }
 
 /// A Lambda API refusal as the CloudFormation resource handler reports it in

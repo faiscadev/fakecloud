@@ -1,5 +1,9 @@
 //! Alarm mute rules: Put/Get/List/Delete.
 //!
+//! A rule's status (`SCHEDULED` / `ACTIVE` / `EXPIRED`) comes from its
+//! schedule ([`crate::mute_schedule`]); while it is active it mutes the
+//! actions of the alarms it targets ([`crate::alarm_mutes`]).
+//!
 //! PutAlarmMuteRule declares only `LimitExceededFault` and
 //! DeleteAlarmMuteRule declares no errors. The conformance probe still
 //! expects 4xx on negative variants (omitted required fields, out-of-range
@@ -11,9 +15,10 @@ use chrono::{DateTime, Utc};
 use fakecloud_core::query::{optional_query_param, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
+use crate::mute_schedule::{mute_type, rule_status};
 use crate::service::{
     collect_member_values, empty_metadata_response, missing_param, not_found,
-    parse_input_timestamp, validate_len, validate_range_i64, xml_escape, xml_response,
+    parse_input_timestamp, parse_tags, validate_len, validate_range_i64, xml_escape, xml_response,
     CloudWatchService,
 };
 use crate::state::AlarmMuteRule;
@@ -22,19 +27,12 @@ fn parse_ts(req: &AwsRequest, name: &str) -> Option<DateTime<Utc>> {
     optional_query_param(req, name).and_then(|s| parse_input_timestamp(&s))
 }
 
-/// Compute the wire status of a mute rule from its start/expire dates.
-fn rule_status(rule: &AlarmMuteRule, now: DateTime<Utc>) -> &'static str {
-    if let Some(expire) = rule.expire_date {
-        if now >= expire {
-            return "EXPIRED";
-        }
-    }
-    if let Some(start) = rule.start_date {
-        if now < start {
-            return "SCHEDULED";
-        }
-    }
-    "ACTIVE"
+/// `arn:<partition>:cloudwatch:<region>:<account>:alarm-mute-rule:<name>`.
+fn mute_rule_arn(region: &str, account_id: &str, name: &str) -> String {
+    format!(
+        "arn:{}:cloudwatch:{region}:{account_id}:alarm-mute-rule:{name}",
+        fakecloud_aws::arn::partition_for(region),
+    )
 }
 
 impl CloudWatchService {
@@ -59,16 +57,29 @@ impl CloudWatchService {
         let schedule_expression = optional_query_param(req, "Rule.Schedule.Expression");
         let schedule_duration = optional_query_param(req, "Rule.Schedule.Duration");
         let schedule_timezone = optional_query_param(req, "Rule.Schedule.Timezone");
+        // A schedule that can't be evaluated would never mute: refuse it.
+        if let Some(reason) = crate::mute_schedule::schedule_error(
+            schedule_expression.as_deref().unwrap_or_default(),
+            schedule_duration.as_deref(),
+            schedule_timezone.as_deref(),
+        ) {
+            return Err(crate::service::invalid_param(reason));
+        }
         let mute_target_alarm_names = collect_member_values(req, "MuteTargets.AlarmNames");
         let start_date = parse_ts(req, "StartDate");
         let expire_date = parse_ts(req, "ExpireDate");
 
-        let arn = format!(
-            "arn:{}:cloudwatch:{}:{}:alarm-mute-rule/{name}",
-            fakecloud_aws::arn::partition_for(&req.region),
-            req.region,
-            req.account_id
-        );
+        let tags = parse_tags(req, "Tags");
+        let arn = mute_rule_arn(&req.region, &req.account_id, &name);
+        let now = Utc::now();
+        let mut state = self.state.write();
+        let acct = state.get_or_create(&req.account_id);
+        let created_timestamp = acct
+            .mute_rules_in(&req.region)
+            .and_then(|m| m.get(&name))
+            .map_or(Some(now), |r| {
+                r.created_timestamp.or(Some(r.last_updated_timestamp))
+            });
         let mute_rule = AlarmMuteRule {
             name: name.clone(),
             arn,
@@ -79,10 +90,15 @@ impl CloudWatchService {
             mute_target_alarm_names,
             start_date,
             expire_date,
-            last_updated_timestamp: Utc::now(),
+            last_updated_timestamp: now,
+            created_timestamp,
         };
-        let mut state = self.state.write();
-        let acct = state.get_or_create(&req.account_id);
+        if !tags.is_empty() {
+            acct.tags
+                .entry(mute_rule.arn.clone())
+                .or_default()
+                .extend(tags);
+        }
         acct.mute_rules_in_mut(&req.region).insert(name, mute_rule);
         Ok(empty_metadata_response("PutAlarmMuteRule", &req.request_id))
     }
@@ -104,7 +120,7 @@ impl CloudWatchService {
             .ok_or_else(|| not_found(format!("Mute rule {name} does not exist")))?;
 
         let now = Utc::now();
-        let status = rule_status(&rule, now);
+        let status = rule_status(&rule, now).as_str();
         let mut inner = format!("<Name>{}</Name>", xml_escape(&rule.name));
         inner.push_str(&format!(
             "<AlarmMuteRuleArn>{}</AlarmMuteRuleArn>",
@@ -147,7 +163,10 @@ impl CloudWatchService {
             rule.last_updated_timestamp
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         ));
-        inner.push_str("<MuteType>TARGET_ALARMS</MuteType>");
+        inner.push_str(&format!(
+            "<MuteType>{}</MuteType>",
+            mute_type(rule.schedule_expression.as_deref())
+        ));
         Ok(xml_response("GetAlarmMuteRule", &inner, &req.request_id))
     }
 
@@ -157,18 +176,34 @@ impl CloudWatchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         validate_len(req, "AlarmName", 1, 255)?;
         validate_range_i64(req, "MaxRecords", 1, 100)?;
-        // `AlarmName` narrows the listing to the rules that mute that alarm.
+        // `AlarmName` narrows the listing to the rules that mute that alarm,
+        // `Statuses` to the rules in those statuses.
         let alarm_name = optional_query_param(req, "AlarmName");
+        let statuses = collect_member_values(req, "Statuses");
+        for s in &statuses {
+            if !["SCHEDULED", "ACTIVE", "EXPIRED"].contains(&s.as_str()) {
+                return Err(crate::service::invalid_param(format!(
+                    "Statuses has an invalid value '{s}'"
+                )));
+            }
+        }
         let now = Utc::now();
         let state = self.state.read();
         let mut inner = String::new();
         if let Some(acct) = state.get(&req.account_id) {
             if let Some(rules) = acct.mute_rules_in(&req.region) {
-                for rule in rules.values().filter(|r| {
-                    alarm_name
-                        .as_ref()
-                        .is_none_or(|a| r.mute_target_alarm_names.contains(a))
-                }) {
+                for (rule, status) in rules
+                    .values()
+                    .filter(|r| {
+                        alarm_name
+                            .as_ref()
+                            .is_none_or(|a| r.mute_target_alarm_names.contains(a))
+                    })
+                    .map(|r| (r, rule_status(r, now).as_str()))
+                    .filter(|(_, status)| {
+                        statuses.is_empty() || statuses.iter().any(|s| s == status)
+                    })
+                {
                     inner.push_str("<member>");
                     inner.push_str(&format!(
                         "<AlarmMuteRuleArn>{}</AlarmMuteRuleArn>",
@@ -180,8 +215,11 @@ impl CloudWatchService {
                             d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
                         ));
                     }
-                    inner.push_str(&format!("<Status>{}</Status>", rule_status(rule, now)));
-                    inner.push_str("<MuteType>TARGET_ALARMS</MuteType>");
+                    inner.push_str(&format!("<Status>{status}</Status>"));
+                    inner.push_str(&format!(
+                        "<MuteType>{}</MuteType>",
+                        mute_type(rule.schedule_expression.as_deref())
+                    ));
                     inner.push_str(&format!(
                         "<LastUpdatedTimestamp>{}</LastUpdatedTimestamp>",
                         rule.last_updated_timestamp
@@ -207,7 +245,25 @@ impl CloudWatchService {
             .ok_or_else(|| missing_param("AlarmMuteRuleName"))?;
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
-        acct.mute_rules_in_mut(&req.region).remove(&name);
+        if let Some(rule) = acct.mute_rules_in_mut(&req.region).remove(&name) {
+            acct.tags.remove(&rule.arn);
+            // The alarms it was muting are unmuted now; one in ALARM runs its
+            // ALARM actions (DeleteAlarmMuteRule's documented behavior).
+            let released: std::collections::BTreeSet<String> =
+                rule.mute_target_alarm_names.into_iter().collect();
+            let now = Utc::now();
+            let mutes =
+                crate::alarm_mutes::update_mutes_releasing(acct, &req.region, now, &released);
+            let mut owed = mutes.owed;
+            crate::alarm_mutes::hold_muted(acct, &req.region, &mutes.muted, &mut owed, now);
+            for mut n in owed {
+                n.epoch = acct.epoch;
+                acct.pending_actions.push(n);
+            }
+            if mutes.changed {
+                acct.evaluation_dirty = true;
+            }
+        }
         Ok(empty_metadata_response(
             "DeleteAlarmMuteRule",
             &req.request_id,

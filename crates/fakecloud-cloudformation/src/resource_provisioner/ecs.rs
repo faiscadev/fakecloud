@@ -58,14 +58,49 @@ impl ResourceProvisioner {
     }
 
     pub(super) fn delete_ecs_cluster(&self, physical_id: &str) -> Result<(), String> {
+        // Tasks still running in the cluster (with a container runtime) are
+        // stopped like a deleted service's: their stop begins while the
+        // services that place them behind load balancers still exist, their
+        // records stay until the stack delete drain has stopped them. Its
+        // services are scaled to zero first, so the scheduler can't backfill.
+        fakecloud_ecs::cfn_provision::cfn_drain_services(
+            &self.ecs_state,
+            &self.account_id,
+            physical_id,
+            None,
+        );
+        let running = match &self.ecs_runtime {
+            Some(runtime) => {
+                let ids = fakecloud_ecs::cfn_provision::cfn_live_tasks(
+                    &self.ecs_state,
+                    &self.account_id,
+                    physical_id,
+                    None,
+                );
+                fakecloud_ecs::cfn_provision::cfn_begin_stopping_tasks(
+                    &self.ecs_state,
+                    runtime,
+                    &self.account_id,
+                    &ids,
+                );
+                ids
+            }
+            None => Vec::new(),
+        };
         let mut accounts = self.ecs_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.clusters.remove(physical_id);
         // Cascade: drop services + tasks tied to this cluster.
         state.services.retain(|_, s| s.cluster_name != physical_id);
-        state
-            .tasks
-            .retain(|_, t| t.cluster_arn.split('/').next_back() != Some(physical_id));
+        state.tasks.retain(|id, t| {
+            t.cluster_arn.split('/').next_back() != Some(physical_id) || running.contains(id)
+        });
+        drop(accounts);
+        if !running.is_empty() {
+            self.pending_container_teardowns
+                .lock()
+                .push(super::ContainerTeardownIntent::EcsTasks { task_ids: running });
+        }
         Ok(())
     }
 
@@ -469,6 +504,34 @@ impl ResourceProvisioner {
             return Ok(());
         };
         let key = format!("{cluster}/{service}");
+        // Scale the service to zero first, so the scheduler can't backfill
+        // the tasks stopped below while the record still exists.
+        fakecloud_ecs::cfn_provision::cfn_drain_services(
+            &self.ecs_state,
+            &self.account_id,
+            &cluster,
+            Some(&service),
+        );
+        // Start stopping the service's REAL tasks while the service record
+        // still exists: their load balancer targets are found through it.
+        let task_ids = match &self.ecs_runtime {
+            Some(runtime) => {
+                let ids = fakecloud_ecs::cfn_provision::cfn_live_tasks(
+                    &self.ecs_state,
+                    &self.account_id,
+                    &cluster,
+                    Some(&service),
+                );
+                fakecloud_ecs::cfn_provision::cfn_begin_stopping_tasks(
+                    &self.ecs_state,
+                    runtime,
+                    &self.account_id,
+                    &ids,
+                );
+                ids
+            }
+            None => Vec::new(),
+        };
         let removed = {
             let mut accounts = self.ecs_state.write();
             let state = accounts.get_or_create(&self.account_id);
@@ -486,13 +549,10 @@ impl ResourceProvisioner {
         // Queue stopping the REAL tasks (containers) the service was running so
         // the stack delete drain reaps them instead of leaking them. The task
         // records live separately from the service record removed above.
-        if removed && self.ecs_runtime.is_some() {
-            self.pending_container_teardowns.lock().push(
-                super::ContainerTeardownIntent::EcsService {
-                    cluster_name: cluster,
-                    service_name: service,
-                },
-            );
+        if removed && !task_ids.is_empty() {
+            self.pending_container_teardowns
+                .lock()
+                .push(super::ContainerTeardownIntent::EcsTasks { task_ids });
         }
         Ok(())
     }

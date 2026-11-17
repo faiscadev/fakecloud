@@ -766,7 +766,6 @@ struct LambdaEventSourceMappingProps {
     queues: Vec<String>,
     source_access_configurations: Vec<serde_json::Value>,
     self_managed_event_source: Option<serde_json::Value>,
-    self_managed_kafka_event_source_config: Option<serde_json::Value>,
     document_db_event_source_config: Option<serde_json::Value>,
 }
 
@@ -797,7 +796,14 @@ fn parse_lambda_event_source_mapping_props(
     let batch_size = props
         .get("BatchSize")
         .and_then(|v| v.as_i64())
-        .unwrap_or(10);
+        .unwrap_or_else(|| {
+            fakecloud_lambda::esm_config::default_batch_size(
+                &event_source_arn,
+                props
+                    .get("SelfManagedEventSource")
+                    .is_some_and(|v| v.is_object()),
+            )
+        });
     let enabled = props
         .get("Enabled")
         .and_then(|v| v.as_bool())
@@ -885,7 +891,6 @@ fn parse_lambda_event_source_mapping_props(
     let object = |key: &str| props.get(key).filter(|v| v.is_object()).cloned();
     let self_managed_event_source =
         object("SelfManagedEventSource").map(self_managed_event_source_to_api);
-    let self_managed_kafka_event_source_config = object("SelfManagedKafkaEventSourceConfig");
     let document_db_event_source_config = object("DocumentDBEventSourceConfig");
 
     Ok(LambdaEventSourceMappingProps {
@@ -909,7 +914,6 @@ fn parse_lambda_event_source_mapping_props(
         queues,
         source_access_configurations,
         self_managed_event_source,
-        self_managed_kafka_event_source_config,
         document_db_event_source_config,
     })
 }
@@ -1349,12 +1353,10 @@ pub enum ContainerTeardownIntent {
         incarnation: String,
         volume: Option<String>,
     },
-    /// `AWS::ECS::Service` -- stop the REAL tasks (containers) the service was
-    /// running. The cluster + service name locate the orphaned task records.
-    EcsService {
-        cluster_name: String,
-        service_name: String,
-    },
+    /// `AWS::ECS::Service` / `AWS::ECS::Cluster` -- stop the REAL tasks
+    /// (containers) the service or cluster was running, captured (and their
+    /// stop begun) before the service / cluster record was removed.
+    EcsTasks { task_ids: Vec<String> },
     /// `AWS::AutoScaling::AutoScalingGroup` -- terminate the REAL EC2 instances
     /// the group launched (captured before the group record was removed).
     AsgInstances { instance_ids: Vec<String> },

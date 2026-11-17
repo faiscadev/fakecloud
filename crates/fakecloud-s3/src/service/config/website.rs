@@ -219,7 +219,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.website_config = Some(body_str.clone());
         self.store
-            .put_bucket_subresource(bucket, BucketSubresource::Website, &body_str)
+            .put_bucket_subresource(account_id, bucket, BucketSubresource::Website, &body_str)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
@@ -260,7 +260,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         b.website_config = None;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Website)
+            .delete_bucket_subresource(account_id, bucket, BucketSubresource::Website)
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }

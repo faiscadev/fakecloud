@@ -664,7 +664,7 @@ async fn cloudwatch_alarm_mute_rules_and_contributors() {
     let listed = client.list_alarm_mute_rules().send().await.unwrap();
     assert!(listed.alarm_mute_rule_summaries().iter().any(|r| r
         .alarm_mute_rule_arn()
-        .is_some_and(|a| a.ends_with("/nightly"))));
+        .is_some_and(|a| a.ends_with(":alarm-mute-rule:nightly"))));
 
     let contributors = client
         .describe_alarm_contributors()

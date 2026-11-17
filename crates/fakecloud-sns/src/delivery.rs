@@ -32,22 +32,24 @@ impl SnsDeliveryImpl {
         message_group_id: Option<&str>,
         message_dedup_id: Option<&str>,
         attrs: BTreeMap<String, crate::state::MessageAttribute>,
-    ) {
+    ) -> Result<String, String> {
         // Resolve the target account from the topic ARN, record the
         // published message, and pull the per-topic subscriber list under
         // the write lock. We then drop the lock before doing any
         // blocking I/O (HTTP retries, lambda invocations, SQS push).
+        let not_found = || {
+            tracing::warn!(topic_arn, "SNS delivery target topic not found");
+            format!("Topic does not exist: {topic_arn}")
+        };
         let (subscribers, msg_id, endpoint) = {
             let mut accounts = self.state.write();
             // The topic lives in the account and region its ARN names.
             let Some(state) = accounts.by_arn_mut(topic_arn) else {
-                tracing::warn!(topic_arn, "SNS delivery target topic not found");
-                return;
+                return Err(not_found());
             };
 
             if !state.topics.contains_key(topic_arn) {
-                tracing::warn!(topic_arn, "SNS delivery target topic not found");
-                return;
+                return Err(not_found());
             }
 
             let msg_id = uuid::Uuid::new_v4().to_string();
@@ -87,12 +89,22 @@ impl SnsDeliveryImpl {
         };
 
         crate::service::fan_out_to_subscribers(&self.state, &self.delivery, &subscribers, &ctx);
+        Ok(msg_id)
     }
 }
 
 impl SnsDelivery for SnsDeliveryImpl {
     fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
-        self.fan_out(topic_arn, message, subject, None, None, BTreeMap::new());
+        let _ = self.fan_out(topic_arn, message, subject, None, None, BTreeMap::new());
+    }
+
+    fn try_publish_to_topic(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+    ) -> Result<String, String> {
+        self.fan_out(topic_arn, message, subject, None, None, BTreeMap::new())
     }
 
     fn publish_to_topic_with_attributes(
@@ -118,7 +130,7 @@ impl SnsDelivery for SnsDeliveryImpl {
                 )
             })
             .collect();
-        self.fan_out(topic_arn, message, subject, None, None, attrs);
+        let _ = self.fan_out(topic_arn, message, subject, None, None, attrs);
     }
 
     fn publish_to_topic_fifo(
@@ -129,7 +141,7 @@ impl SnsDelivery for SnsDeliveryImpl {
         message_group_id: Option<&str>,
         message_dedup_id: Option<&str>,
     ) {
-        self.fan_out(
+        let _ = self.fan_out(
             topic_arn,
             message,
             subject,

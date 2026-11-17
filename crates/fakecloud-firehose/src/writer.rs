@@ -336,18 +336,18 @@ mod tests {
 
     impl S3Store for BoundaryStore {
         forward! {
-            load() -> StoreResult<fakecloud_persistence::s3::S3State>;
-            put_bucket_meta(bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
-            put_bucket_subresource(bucket: &str, kind: BucketSubresource, payload: &str) -> StoreResult<()>;
-            delete_bucket_subresource(bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
-            delete_bucket(bucket: &str) -> StoreResult<()>;
-            put_object_meta(bucket: &str, key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<()>;
-            delete_object(bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
+            load() -> StoreResult<std::collections::BTreeMap<String, fakecloud_persistence::s3::S3State>>;
+            put_bucket_meta(account_id: &str, bucket: &str, meta: &BucketMeta) -> StoreResult<()>;
+            put_bucket_subresource(account_id: &str, bucket: &str, kind: BucketSubresource, payload: &str) -> StoreResult<()>;
+            delete_bucket_subresource(account_id: &str, bucket: &str, kind: BucketSubresource) -> StoreResult<()>;
+            delete_bucket(account_id: &str, bucket: &str) -> StoreResult<()>;
+            put_object_meta(account_id: &str, bucket: &str, key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<()>;
+            delete_object(account_id: &str, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
             open_object_body(body: &BodyRef) -> StoreResult<Bytes>;
-            mpu_create(bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
-            mpu_put_part(bucket: &str, upload_id: &str, part_number: u32, body: BodySource, etag: &str, checksum: Option<fakecloud_persistence::PartChecksum<'_>>) -> StoreResult<BodyRef>;
-            mpu_abort(bucket: &str, upload_id: &str) -> StoreResult<()>;
-            mpu_complete(bucket: &str, upload_id: &str, final_key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<BodyRef>;
+            mpu_create(account_id: &str, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
+            mpu_put_part(account_id: &str, bucket: &str, upload_id: &str, part_number: u32, body: BodySource, etag: &str, checksum: Option<fakecloud_persistence::PartChecksum<'_>>) -> StoreResult<BodyRef>;
+            mpu_abort(account_id: &str, bucket: &str, upload_id: &str) -> StoreResult<()>;
+            mpu_complete(account_id: &str, bucket: &str, upload_id: &str, final_key: &str, version: Option<&str>, meta: &ObjectMeta) -> StoreResult<BodyRef>;
         }
 
         fn spool_dir(&self) -> Option<PathBuf> {
@@ -359,19 +359,7 @@ mod tests {
 
         fn put_object(
             &self,
-            bucket: &str,
-            key: &str,
-            version: Option<&str>,
-            body: BodySource,
-            meta: &ObjectMeta,
-        ) -> StoreResult<BodyRef> {
-            if let Some(hook) = &self.commit {
-                hook()?;
-            }
-            self.disk.put_object(bucket, key, version, body, meta)
-        }
-        fn replace_object_body(
-            &self,
+            account_id: &str,
             bucket: &str,
             key: &str,
             version: Option<&str>,
@@ -382,7 +370,22 @@ mod tests {
                 hook()?;
             }
             self.disk
-                .replace_object_body(bucket, key, version, body, meta)
+                .put_object(account_id, bucket, key, version, body, meta)
+        }
+        fn replace_object_body(
+            &self,
+            account_id: &str,
+            bucket: &str,
+            key: &str,
+            version: Option<&str>,
+            body: BodySource,
+            meta: &ObjectMeta,
+        ) -> StoreResult<BodyRef> {
+            if let Some(hook) = &self.commit {
+                hook()?;
+            }
+            self.disk
+                .replace_object_body(account_id, bucket, key, version, body, meta)
         }
     }
 
@@ -460,6 +463,7 @@ mod tests {
             Arc::new(fakecloud_persistence::cache::BodyCache::new(1024)),
         );
         disk.put_bucket_meta(
+            ACCOUNT,
             "logs-bucket",
             &BucketMeta {
                 name: "logs-bucket".into(),
@@ -552,7 +556,7 @@ mod tests {
         assert!(s3.read().get(ACCOUNT).unwrap().buckets["logs-bucket"]
             .objects
             .is_empty());
-        assert!(store.load().unwrap().buckets["logs-bucket"]
+        assert!(store.load().unwrap()[ACCOUNT].buckets["logs-bucket"]
             .objects
             .is_empty());
     }
@@ -609,6 +613,7 @@ mod tests {
         );
         store
             .put_bucket_meta(
+                ACCOUNT,
                 "updated-bucket",
                 &BucketMeta {
                     name: "updated-bucket".into(),
@@ -668,7 +673,7 @@ mod tests {
         assert_eq!(decoded, b"first\nsecond\x00\xff");
         assert_eq!(object.size, bytes.len() as u64);
         drop(accounts);
-        let reloaded = disk(&tmp).load().unwrap();
+        let reloaded = disk(&tmp).load().unwrap().remove(ACCOUNT).unwrap();
         assert_eq!(
             reloaded.buckets["logs-bucket"]
                 .objects

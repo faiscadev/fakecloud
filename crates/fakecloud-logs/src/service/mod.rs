@@ -13,6 +13,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use crate::state::SharedLogsState;
 
 mod anomaly;
+mod cross_service;
 mod deliveries;
 mod destinations;
 mod exports;
@@ -91,6 +92,9 @@ pub struct LogsService {
     delivery_bus: Arc<DeliveryBus>,
     snapshot_store: Option<Arc<SegmentedLogsStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// A save of cross-service deliveries is already scheduled: deliveries
+    /// arriving meanwhile ride on it.
+    delivery_save_pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LogsService {
@@ -100,6 +104,7 @@ impl LogsService {
             delivery_bus,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            delivery_save_pending: Default::default(),
         }
     }
 
