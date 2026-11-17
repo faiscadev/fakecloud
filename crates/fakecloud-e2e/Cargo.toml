@@ -120,6 +120,9 @@ zip = { workspace = true }
 fakecloud-sdk = { path = "../fakecloud-sdk" }
 fakecloud-testkit = { path = "../fakecloud-testkit", features = ["sdk-clients"] }
 fakecloud-cognito = { workspace = true }
+# The STOMP / AMQP 0-9-1 broker clients, to produce to the real broker a Lambda
+# event source mapping consumes.
+fakecloud-mq = { workspace = true }
 tempfile = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }

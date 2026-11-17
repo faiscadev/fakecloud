@@ -1895,6 +1895,38 @@ async fn function_config_emits_state_reason_fields_when_populated() {
 }
 
 #[tokio::test]
+async fn event_source_mapping_batch_size_defaults_per_source() {
+    // `BatchSize` defaults to 10 for SQS and 100 for the other sources.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-fn").await;
+    for (arn, want) in [
+        ("arn:aws:sqs:us-east-1:123456789012:queue1", 10),
+        (
+            "arn:aws:mq:us-east-1:123456789012:broker:orders:b-1234",
+            100,
+        ),
+        ("arn:aws:kinesis:us-east-1:123456789012:stream/s", 100),
+    ] {
+        let mut body = json!({"FunctionName": "esm-fn", "EventSourceArn": arn});
+        if arn.contains(":mq:") {
+            body["Queues"] = json!(["orders"]);
+        }
+        if arn.contains(":kinesis:") {
+            body["StartingPosition"] = json!("LATEST");
+        }
+        let req = make_request(
+            Method::POST,
+            "/2015-03-31/event-source-mappings",
+            &body.to_string(),
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["BatchSize"], want, "{arn}");
+        assert_eq!(v["LastProcessingResult"], "No records processed");
+    }
+}
+
+#[tokio::test]
 async fn create_event_source_mapping_round_trips_advanced_fields() {
     // KMSKeyArn / MetricsConfig / DestinationConfig / MaximumRetryAttempts /
     // MaximumRecordAgeInSeconds / BisectBatchOnFunctionError /

@@ -76,6 +76,15 @@ impl MappingSource {
             _ => (1, 1, 200, 1, 2_000),
         }
     }
+
+    /// `BatchSize` when the caller sets none: 10 for SQS, 100 for every
+    /// other source (the `BatchSize` member's documented defaults).
+    pub fn default_batch_size(self) -> i64 {
+        match self {
+            Self::Sqs => 10,
+            _ => 100,
+        }
+    }
 }
 
 /// `BatchSize` when a mapping is created without one: 10 for Amazon SQS, 100

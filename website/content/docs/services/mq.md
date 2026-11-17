@@ -19,6 +19,11 @@ the live broker's authentication and a user-supplied configuration is applied to
 the running container, exactly the way RDS and ElastiCache back their control
 planes with real engines.
 
+A Lambda event source mapping on a broker ARN consumes the mapping's queue from
+that real broker and invokes the function with AWS's `aws:mq` / `aws:rmq` event,
+acknowledging a batch only after the function succeeds (see
+[Lambda](@/docs/services/lambda.md)).
+
 When no container runtime (Docker/Podman) is available, MQ degrades to a
 control-plane-only service: brokers still reach `RUNNING` through the in-memory
 lifecycle, but no real broker container is spawned.

@@ -39,6 +39,67 @@ struct Mapping {
     filter: FilterSet,
     report_batch_item_failures: bool,
     max_batching_window_seconds: i64,
+    /// Batches of this mapping that may be with the function at once:
+    /// `ScalingConfig.MaximumConcurrency`, else [`DEFAULT_MAX_CONCURRENCY`].
+    max_concurrency: usize,
+}
+
+/// Concurrent batches of a mapping without `ScalingConfig.MaximumConcurrency`:
+/// the five AWS starts an SQS mapping at (AWS then scales up with a sustained
+/// backlog, which is not modelled).
+const DEFAULT_MAX_CONCURRENCY: usize = 5;
+
+/// Batches in flight per mapping UUID.
+type InFlightCounts = Arc<parking_lot::Mutex<HashMap<String, usize>>>;
+
+/// One of a mapping's concurrency slots, held by a batch from the moment its
+/// messages are taken off the queue until its outcome is applied.
+struct InFlightSlot {
+    counts: InFlightCounts,
+    uuid: String,
+}
+
+impl InFlightSlot {
+    /// A free slot of `uuid`, when it has fewer than `cap` batches in flight.
+    fn reserve(counts: &InFlightCounts, uuid: &str, cap: usize) -> Option<Self> {
+        let mut guard = counts.lock();
+        let n = guard.entry(uuid.to_string()).or_insert(0);
+        if *n >= cap {
+            return None;
+        }
+        *n += 1;
+        Some(Self {
+            counts: counts.clone(),
+            uuid: uuid.to_string(),
+        })
+    }
+}
+
+impl Drop for InFlightSlot {
+    fn drop(&mut self) {
+        let mut guard = self.counts.lock();
+        if let Some(n) = guard.get_mut(&self.uuid) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                guard.remove(&self.uuid);
+            }
+        }
+    }
+}
+
+/// A batch taken off the queue and ready for the function.
+struct PreparedBatch {
+    payload: String,
+    message_ids: Vec<String>,
+}
+
+/// What one attempt to take a batch found.
+enum Taken {
+    Batch(PreparedBatch),
+    /// Messages were taken, but the filter dropped all of them.
+    AllFiltered,
+    /// Nothing to send now (empty queue, held batching window, KMS refusal).
+    Nothing,
 }
 
 /// Per-mapping batching window state. Tracks the timestamp of the
@@ -50,6 +111,7 @@ struct BatchingState {
 }
 
 /// SQS -> Lambda event source mapping poller.
+#[derive(Clone)]
 pub struct SqsLambdaPoller {
     sqs_state: SharedSqsState,
     lambda_state: SharedLambdaState,
@@ -66,6 +128,8 @@ pub struct SqsLambdaPoller {
     /// unrelated SQS API write, so a restart in the window re-delivered acked
     /// messages or reset DLQ progress (bug-audit 4.5).
     snapshot_hook: Option<SnapshotHook>,
+    /// Batches each mapping has with the function right now.
+    in_flight: InFlightCounts,
 }
 
 impl SqsLambdaPoller {
@@ -76,6 +140,7 @@ impl SqsLambdaPoller {
             lambda_delivery: None,
             kms_hook: None,
             snapshot_hook: None,
+            in_flight: Arc::default(),
         }
     }
 
@@ -108,11 +173,27 @@ impl SqsLambdaPoller {
         let mut batching = BatchingState::default();
         loop {
             interval.tick().await;
-            self.poll(&mut batching).await;
+            // Batches run detached, so a slow function never holds up the
+            // mapping's other concurrency slots or other mappings; each tick
+            // tops every mapping up to its concurrency again.
+            drop(self.start_batches(&mut batching).await);
         }
     }
 
+    /// One poll cycle that waits for every batch it started.
+    #[cfg(test)]
     async fn poll(&self, batching: &mut BatchingState) {
+        for handle in self.start_batches(batching).await {
+            handle.await.expect("batch task");
+        }
+    }
+
+    /// Start batches for every enabled SQS mapping; the handles of the
+    /// started batch tasks.
+    async fn start_batches(
+        &self,
+        batching: &mut BatchingState,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
         let mappings: Vec<Mapping> = {
             let lambda_accounts = self.lambda_state.read();
             lambda_accounts
@@ -135,29 +216,68 @@ impl SqsLambdaPoller {
                             max_batching_window_seconds: m
                                 .maximum_batching_window_in_seconds
                                 .unwrap_or(0),
+                            max_concurrency: m
+                                .scaling_config
+                                .as_ref()
+                                .and_then(|c| c.get("MaximumConcurrency"))
+                                .and_then(Value::as_u64)
+                                .map_or(DEFAULT_MAX_CONCURRENCY, |n| n.max(1) as usize),
                         })
                         .collect::<Vec<_>>()
                 })
                 .collect()
         };
 
+        let mut handles = Vec::new();
         if mappings.is_empty() {
-            return;
+            return handles;
         }
 
         let now = Utc::now();
 
         for mapping in mappings {
-            self.process_mapping(&mapping, batching, now).await;
+            handles.extend(self.process_mapping(&mapping, batching, now).await);
         }
+        handles
     }
 
+    /// Take batches off `mapping`'s queue and hand each to the function in
+    /// its own task, until the mapping has `max_concurrency` batches in
+    /// flight (`ScalingConfig.MaximumConcurrency`: the rest of the messages
+    /// stay in the queue) or the queue has nothing more to give.
     async fn process_mapping(
         &self,
         mapping: &Mapping,
         batching: &mut BatchingState,
         now: DateTime<Utc>,
-    ) {
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut handles = Vec::new();
+        while let Some(slot) =
+            InFlightSlot::reserve(&self.in_flight, &mapping.uuid, mapping.max_concurrency)
+        {
+            let batch = match self.take_batch(mapping, batching, now).await {
+                Taken::Batch(batch) => batch,
+                Taken::AllFiltered => continue,
+                Taken::Nothing => break,
+            };
+            let poller = self.clone();
+            let mapping = mapping.clone();
+            handles.push(tokio::spawn(async move {
+                poller.deliver(&mapping, batch).await;
+                drop(slot);
+            }));
+        }
+        handles
+    }
+
+    /// Take the next batch of `mapping`'s queue: its messages hidden for the
+    /// visibility timeout, opened, filtered, and shaped as the event.
+    async fn take_batch(
+        &self,
+        mapping: &Mapping,
+        batching: &mut BatchingState,
+        now: DateTime<Utc>,
+    ) -> Taken {
         // Pull up to BatchSize visible messages and immediately mark
         // them invisible for the queue's `VisibilityTimeout`. Real SQS
         // hides in-flight messages from other consumers (and from later
@@ -171,13 +291,13 @@ impl SqsLambdaPoller {
             let mut sqs_mas = self.sqs_state.write();
             // The queue lives in the account and region its ARN names.
             let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) else {
-                return;
+                return Taken::Nothing;
             };
             let acct = sqs.account_id.clone();
             let queue = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn);
             let queue = match queue {
                 Some(q) => q,
-                None => return,
+                None => return Taken::Nothing,
             };
 
             let visibility_timeout: i64 = queue.visibility_timeout_secs();
@@ -202,6 +322,19 @@ impl SqsLambdaPoller {
             let mut batch = Vec::new();
             let mut previous_visibility = Vec::new();
             let limit = mapping.batch_size.min(10) as usize;
+            // FIFO order: while a message group has a message in flight (or
+            // not yet visible), none of its later messages is handed out, so
+            // concurrent batches never reorder a group.
+            let blocked_groups: std::collections::HashSet<String> = if queue.is_fifo {
+                queue
+                    .messages
+                    .iter()
+                    .filter(|m| m.visible_at.is_some_and(|vis| vis > now))
+                    .filter_map(|m| m.message_group_id.clone())
+                    .collect()
+            } else {
+                Default::default()
+            };
 
             for msg in queue.messages.iter_mut() {
                 if batch.len() >= limit {
@@ -211,6 +344,13 @@ impl SqsLambdaPoller {
                     if vis > now {
                         continue;
                     }
+                }
+                if msg
+                    .message_group_id
+                    .as_ref()
+                    .is_some_and(|g| blocked_groups.contains(g))
+                {
+                    continue;
                 }
                 // Hide the message for the visibility window. The
                 // poller doesn't bump `receive_count` here because the
@@ -227,12 +367,14 @@ impl SqsLambdaPoller {
 
         if messages.is_empty() {
             batching.window_started_at.remove(&mapping.uuid);
-            return;
+            return Taken::Nothing;
         }
 
         // Honor MaximumBatchingWindowInSeconds: hold a partial batch
         // open until the window expires, then dispatch what we have.
-        // A full batch dispatches immediately regardless.
+        // A full batch dispatches immediately regardless. A held batch goes
+        // back to the queue as it was (visible again), so the next poll
+        // within the window can take it together with what arrived since.
         let limit = mapping.batch_size.min(10) as usize;
         if mapping.max_batching_window_seconds > 0 && messages.len() < limit {
             let window_start = batching
@@ -241,7 +383,11 @@ impl SqsLambdaPoller {
                 .or_insert(now);
             let elapsed = now.signed_duration_since(*window_start).num_seconds();
             if elapsed < mapping.max_batching_window_seconds {
-                return;
+                let mut sqs_mas = self.sqs_state.write();
+                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
+                    undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
+                }
+                return Taken::Nothing;
             }
         }
         batching.window_started_at.remove(&mapping.uuid);
@@ -280,7 +426,7 @@ impl SqsLambdaPoller {
                 if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
                     undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
                 }
-                return;
+                return Taken::Nothing;
             }
         };
 
@@ -340,7 +486,7 @@ impl SqsLambdaPoller {
         }
 
         if matched_records.is_empty() {
-            return;
+            return Taken::AllFiltered;
         }
 
         let payload = json!({ "Records": &matched_records }).to_string();
@@ -353,6 +499,28 @@ impl SqsLambdaPoller {
             "SQS->Lambda: delivering messages to function"
         );
 
+        let message_ids: Vec<String> = matched_records
+            .iter()
+            .filter_map(|r| {
+                r.get("messageId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .collect();
+        Taken::Batch(PreparedBatch {
+            payload,
+            message_ids,
+        })
+    }
+
+    /// Hand `batch` to the function and apply the outcome to the queue:
+    /// acknowledged messages are deleted, failed ones return to the queue
+    /// once their visibility timeout runs out.
+    async fn deliver(&self, mapping: &Mapping, batch: PreparedBatch) {
+        let PreparedBatch {
+            payload,
+            message_ids: matched_msg_ids,
+        } = batch;
         let invoke_result = if let Some(ref delivery) = self.lambda_delivery {
             Some(
                 delivery
@@ -362,15 +530,6 @@ impl SqsLambdaPoller {
         } else {
             None
         };
-
-        let matched_msg_ids: Vec<String> = matched_records
-            .iter()
-            .filter_map(|r| {
-                r.get("messageId")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .collect();
 
         let (acked_ids, failed_ids) = match &invoke_result {
             // A function error fails the whole batch, with or without
@@ -424,7 +583,7 @@ impl SqsLambdaPoller {
         lambda.invocations.push(LambdaInvocation {
             function_arn: mapping.function_arn.clone(),
             payload,
-            timestamp: now,
+            timestamp: Utc::now(),
             source: "aws:sqs".to_string(),
         });
     }
@@ -1192,6 +1351,7 @@ mod tests {
             filter: fakecloud_lambda::filter::FilterSet::from_strings(std::iter::empty::<&str>()),
             report_batch_item_failures: false,
             max_batching_window_seconds: 0,
+            max_concurrency: DEFAULT_MAX_CONCURRENCY,
         };
         // Hide the existing message in the future.
         {
@@ -1225,5 +1385,279 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(queue.messages.len(), 1);
+    }
+
+    fn queued_message(id: &str, group: Option<&str>) -> SqsMessage {
+        SqsMessage {
+            message_id: id.to_string(),
+            receipt_handle: None,
+            md5_of_body: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            body: id.to_string(),
+            sent_timestamp: 0,
+            attributes: BTreeMap::new(),
+            message_attributes: BTreeMap::new(),
+            visible_at: None,
+            receive_count: 0,
+            first_received_at: None,
+            message_group_id: group.map(str::to_string),
+            message_dedup_id: None,
+            created_at: Utc::now(),
+            sequence_number: None,
+            sealed_for_queue: None,
+            seal_recorded: true,
+        }
+    }
+
+    /// Replace the test queue's messages and tune the test mapping.
+    fn reshape(
+        sqs_state: &SharedSqsState,
+        lambda_state: &SharedLambdaState,
+        messages: Vec<SqsMessage>,
+        fifo: bool,
+        edit: impl FnOnce(&mut EventSourceMapping),
+    ) {
+        {
+            let mut sqs = sqs_state.write();
+            let queue = sqs
+                .default_regional_mut()
+                .queues
+                .values_mut()
+                .next()
+                .unwrap();
+            queue.messages = messages.into();
+            queue.is_fifo = fifo;
+        }
+        let mut lambda = lambda_state.write();
+        let mapping = lambda
+            .regional_mut(ACCOUNT, REGION)
+            .event_source_mappings
+            .get_mut("esm-1")
+            .unwrap();
+        edit(mapping);
+    }
+
+    fn visible_count(sqs_state: &SharedSqsState) -> usize {
+        let now = Utc::now();
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        queue
+            .messages
+            .iter()
+            .filter(|m| m.visible_at.is_none_or(|v| v <= now))
+            .count()
+    }
+
+    /// A function whose invocations each wait for a permit of `gate`,
+    /// tracking how many run at once.
+    struct GatedLambda {
+        gate: Arc<tokio::sync::Semaphore>,
+        running: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LambdaDelivery for GatedLambda {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>>
+        {
+            use std::sync::atomic::Ordering;
+            let gate = self.gate.clone();
+            let running = self.running.clone();
+            let peak = self.peak.clone();
+            Box::pin(async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                gate.acquire().await.expect("gate").forget();
+                running.fetch_sub(1, Ordering::SeqCst);
+                Ok(LambdaInvocationOutput::success(b"{}".to_vec()))
+            })
+        }
+    }
+
+    async fn wait_for(mut cond: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition never held");
+    }
+
+    #[tokio::test]
+    async fn maximum_concurrency_caps_the_batches_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (poller, sqs_state, lambda_state) = build_states();
+        let messages = (1..=6)
+            .map(|i| queued_message(&format!("m{i}"), None))
+            .collect();
+        reshape(&sqs_state, &lambda_state, messages, false, |m| {
+            m.batch_size = 1;
+            m.scaling_config = Some(json!({"MaximumConcurrency": 2}));
+        });
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let poller = poller.with_lambda_delivery(Arc::new(GatedLambda {
+            gate: gate.clone(),
+            running: running.clone(),
+            peak: peak.clone(),
+        }));
+        let mut batching = BatchingState::default();
+
+        let first = poller.start_batches(&mut batching).await;
+        assert_eq!(first.len(), 2, "two batches start, the cap");
+        wait_for(|| running.load(Ordering::SeqCst) == 2).await;
+        // While both are with the function, another poll starts nothing and
+        // the other messages stay in the queue.
+        assert!(poller.start_batches(&mut batching).await.is_empty());
+        assert_eq!(visible_count(&sqs_state), 4);
+
+        // One batch finishing frees exactly one slot.
+        gate.add_permits(1);
+        wait_for(|| poller.in_flight.lock().get("esm-1") == Some(&1)).await;
+        let next = poller.start_batches(&mut batching).await;
+        assert_eq!(next.len(), 1);
+
+        gate.add_permits(100);
+        let mut rest = Vec::new();
+        for handle in first.into_iter().chain(next) {
+            handle.await.unwrap();
+        }
+        // Drain the queue, still two at a time.
+        for _ in 0..10 {
+            rest.extend(poller.start_batches(&mut batching).await);
+            for handle in rest.drain(..) {
+                handle.await.unwrap();
+            }
+        }
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        assert!(queue.messages.is_empty(), "every message was delivered");
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "never more than two at once"
+        );
+        assert!(poller.in_flight.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_maximum_concurrency_five_batches_run_at_once() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (poller, sqs_state, lambda_state) = build_states();
+        let messages = (1..=8)
+            .map(|i| queued_message(&format!("m{i}"), None))
+            .collect();
+        reshape(&sqs_state, &lambda_state, messages, false, |m| {
+            m.batch_size = 1
+        });
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let poller = poller.with_lambda_delivery(Arc::new(GatedLambda {
+            gate: gate.clone(),
+            running: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        }));
+        let handles = poller.start_batches(&mut BatchingState::default()).await;
+        assert_eq!(handles.len(), DEFAULT_MAX_CONCURRENCY);
+        gate.add_permits(100);
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fifo_group_is_never_in_two_batches_at_once() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (poller, sqs_state, lambda_state) = build_states();
+        let messages = vec![
+            queued_message("g1-a", Some("g1")),
+            queued_message("g1-b", Some("g1")),
+            queued_message("g2-a", Some("g2")),
+        ];
+        reshape(&sqs_state, &lambda_state, messages, true, |m| {
+            m.batch_size = 1
+        });
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let poller = poller.with_lambda_delivery(Arc::new(GatedLambda {
+            gate: gate.clone(),
+            running: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        }));
+        let handles = poller.start_batches(&mut BatchingState::default()).await;
+        // One batch per group: g1-b waits for g1-a.
+        assert_eq!(handles.len(), 2);
+        {
+            let sqs = sqs_state.read();
+            let queue = sqs
+                .default_regional()
+                .unwrap()
+                .queues
+                .values()
+                .next()
+                .unwrap();
+            let waiting: Vec<&str> = queue
+                .messages
+                .iter()
+                .filter(|m| m.visible_at.is_none())
+                .map(|m| m.message_id.as_str())
+                .collect();
+            assert_eq!(waiting, ["g1-b"]);
+        }
+        gate.add_permits(100);
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_partial_batch_stays_visible_in_the_queue() {
+        let (poller, sqs_state, lambda_state) = build_states();
+        reshape(
+            &sqs_state,
+            &lambda_state,
+            vec![queued_message("m1", None)],
+            false,
+            |m| m.maximum_batching_window_in_seconds = Some(60),
+        );
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let poller = poller.with_lambda_delivery(Arc::new(RecordingLambda {
+            invocations: invocations.clone(),
+        }));
+        let mut batching = BatchingState::default();
+        poller.poll(&mut batching).await;
+        assert!(
+            invocations.lock().unwrap().is_empty(),
+            "the window holds the batch"
+        );
+        assert_eq!(
+            visible_count(&sqs_state),
+            1,
+            "a held message is not hidden for the visibility timeout"
+        );
+        // Once the window has passed, the batch goes out.
+        batching.window_started_at.insert(
+            "esm-1".to_string(),
+            Utc::now() - chrono::Duration::seconds(61),
+        );
+        poller.poll(&mut batching).await;
+        assert_eq!(invocations.lock().unwrap().len(), 1);
     }
 }

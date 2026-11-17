@@ -19,6 +19,7 @@
 //! transitions reconciled on restart).
 
 pub mod cfn_provision;
+pub mod client;
 pub mod persistence;
 pub mod runtime;
 pub mod service;
