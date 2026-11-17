@@ -22,10 +22,34 @@ use crate::state::MetricDatum;
 /// A metric's identity within a namespace: name plus exact dimension set.
 pub(crate) type SeriesKey = (String, BTreeMap<String, String>);
 
+/// Enough of a datapoint to tell whether the one at a position is still the
+/// one that was indexed there.
+#[derive(PartialEq)]
+struct Fingerprint {
+    timestamp_ms: i64,
+    metric_name: String,
+    value_bits: Option<u64>,
+}
+
+impl Fingerprint {
+    fn of(d: &MetricDatum) -> Self {
+        Fingerprint {
+            timestamp_ms: d.timestamp.timestamp_millis(),
+            metric_name: d.metric_name.clone(),
+            value_bits: d.value.map(f64::to_bits),
+        }
+    }
+}
+
 #[derive(Default)]
 struct NamespaceIndex {
     /// How many of the namespace's datapoints are indexed.
     indexed: usize,
+    /// The first and the last indexed datapoints. The index is only valid
+    /// while they are still where they were (the list only grew); anything
+    /// else (pruned, replaced, reordered) rebuilds it.
+    first: Option<Fingerprint>,
+    last: Option<Fingerprint>,
     /// Series -> timestamp (ms) -> positions in the namespace's datapoints.
     series: HashMap<SeriesKey, BTreeMap<i64, Vec<usize>>>,
 }
@@ -68,8 +92,12 @@ impl SeriesIndex {
             .namespaces
             .entry((region.to_string(), namespace.to_string()))
             .or_default();
-        // Datapoints are append-only; a shorter list means it was replaced.
-        if data.len() < ns.indexed {
+        // Valid only if the indexed prefix is untouched.
+        let intact = ns.indexed <= data.len()
+            && ns.indexed > 0
+            && ns.first.as_ref() == Some(&Fingerprint::of(&data[0]))
+            && ns.last.as_ref() == Some(&Fingerprint::of(&data[ns.indexed - 1]));
+        if !intact {
             *ns = NamespaceIndex::default();
         }
         for (i, d) in data.iter().enumerate().skip(ns.indexed) {
@@ -81,6 +109,8 @@ impl SeriesIndex {
                 .push(i);
         }
         ns.indexed = data.len();
+        ns.first = data.first().map(Fingerprint::of);
+        ns.last = data.last().map(Fingerprint::of);
         let key = (metric_name.to_string(), dims.clone());
         let Some(series) = ns.series.get(&key) else {
             return Vec::new();
@@ -127,5 +157,29 @@ mod tests {
         data.truncate(5);
         let got = idx.window(("r", "ns"), &data, "A", &BTreeMap::new(), at(0), at(100));
         assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn pruned_or_replaced_lists_rebuild_even_at_the_same_length() {
+        let mut idx = SeriesIndex::default();
+        let at = |s| DateTime::<Utc>::from_timestamp(s, 0).unwrap();
+        let mut data: Vec<MetricDatum> = (0..10).map(|s| datum("A", s)).collect();
+        assert_eq!(
+            idx.window(("r", "ns"), &data, "A", &BTreeMap::new(), at(0), at(100))
+                .len(),
+            10
+        );
+        // Prune the front and append as many: same length, different data.
+        data.drain(..5);
+        data.extend((100..105).map(|s| datum("A", s)));
+        let got = idx.window(("r", "ns"), &data, "A", &BTreeMap::new(), at(100), at(200));
+        assert_eq!(
+            got.iter().map(|d| d.value.unwrap()).collect::<Vec<_>>(),
+            [100.0, 101.0, 102.0, 103.0, 104.0]
+        );
+        // Replace the last indexed datapoint in place.
+        data[9] = datum("A", 150);
+        let got = idx.window(("r", "ns"), &data, "A", &BTreeMap::new(), at(150), at(151));
+        assert_eq!(got.len(), 1);
     }
 }

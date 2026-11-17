@@ -135,17 +135,27 @@ pub(crate) enum Scope<'a> {
     /// their next period boundary, and composites with a running
     /// suppression or owed actions (the evaluation timer).
     Due,
-    /// Alarms on the series a PutMetricData just wrote to `namespace`.
+    /// Alarms on the series just written to `namespace` (by PutMetricData or
+    /// another service's metrics).
     Series {
         namespace: &'a str,
         series: &'a [SeriesKey],
     },
+    /// Only the composite alarms (after alarms they may reference were
+    /// deleted or reconfigured).
+    Composites,
 }
 
-/// The first period boundary after `now`.
-fn next_boundary(now: DateTime<Utc>, period: i64) -> Option<DateTime<Utc>> {
+/// The first boundary of `interval` seconds after `now`.
+pub(crate) fn next_boundary(now: DateTime<Utc>, interval: i64) -> Option<DateTime<Utc>> {
     let secs = now.timestamp();
-    DateTime::<Utc>::from_timestamp(secs - secs.rem_euclid(period) + period, 0)
+    DateTime::<Utc>::from_timestamp(secs - secs.rem_euclid(interval) + interval, 0)
+}
+
+/// How often CloudWatch evaluates an alarm: every minute, or at its period
+/// for a high-resolution (10 / 30 second) alarm.
+pub(crate) fn evaluation_interval(alarm: &MetricAlarm) -> i64 {
+    alarm.period.unwrap_or(60).clamp(1, 60)
 }
 
 /// Evaluate every alarm in `region` against the stored metric data at `now`,
@@ -180,6 +190,7 @@ pub(crate) fn evaluate_alarms_in(
             for alarm in alarms.values_mut() {
                 let selected = match scope {
                     Scope::All => true,
+                    Scope::Composites => false,
                     Scope::Due => alarm.next_evaluation_at.is_none_or(|t| t <= now),
                     Scope::Series { namespace, series } => {
                         alarm.namespace.as_deref() == Some(namespace)
@@ -201,7 +212,7 @@ pub(crate) fn evaluate_alarms_in(
                     alarm.manual_hold_until = None;
                     out.changed = true;
                 }
-                alarm.next_evaluation_at = next_boundary(now, alarm.period.unwrap_or(60).max(1));
+                alarm.next_evaluation_at = next_boundary(now, evaluation_interval(alarm));
                 if crate::alarm_eval::not_single_metric(alarm) {
                     continue;
                 }
@@ -269,7 +280,7 @@ pub(crate) fn evaluate_alarms_in(
     // Composites follow their children, so a targeted or timed pass only
     // needs them when a child changed or a suppression is running out.
     let composites_due = match scope {
-        Scope::All => true,
+        Scope::All | Scope::Composites => true,
         Scope::Series { .. } => metric_transition,
         Scope::Due => {
             metric_transition
@@ -286,6 +297,13 @@ pub(crate) fn evaluate_alarms_in(
     let epoch = state.epoch;
     for n in &mut out.notifications {
         n.epoch = epoch;
+    }
+    // Queued under the state lock, so they keep transition order.
+    state
+        .pending_actions
+        .extend(out.notifications.iter().cloned());
+    if out.changed {
+        state.evaluation_dirty = true;
     }
     out
 }

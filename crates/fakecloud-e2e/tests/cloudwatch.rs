@@ -1307,6 +1307,83 @@ async fn alarm_transition_publishes_to_sns_subscribers() {
     );
 }
 
+// A metric another service emits (a CloudWatch Logs metric filter) fires the
+// alarm on it and its SNS action, with nothing describing the alarm: the test
+// only polls the subscribed queue.
+#[tokio::test]
+async fn metric_filter_metric_fires_alarm_action() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let logs = server.logs_client().await;
+    let sqs = server.sqs_client().await;
+    let (topic_arn, queue_url) = topic_with_queue(&server, "metric-filter-alarm").await;
+
+    logs.create_log_group()
+        .log_group_name("/app/errors")
+        .send()
+        .await
+        .expect("create log group");
+    logs.create_log_stream()
+        .log_group_name("/app/errors")
+        .log_stream_name("s")
+        .send()
+        .await
+        .expect("create log stream");
+    logs.put_metric_filter()
+        .log_group_name("/app/errors")
+        .filter_name("errors")
+        .filter_pattern("ERROR")
+        .metric_transformations(
+            aws_sdk_cloudwatchlogs::types::MetricTransformation::builder()
+                .metric_name("AppErrors")
+                .metric_namespace("FromLogs")
+                .metric_value("1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("put metric filter");
+    cw.put_metric_alarm()
+        .alarm_name("LogErrors")
+        .namespace("FromLogs")
+        .metric_name("AppErrors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(0.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .alarm_actions(&topic_arn)
+        .send()
+        .await
+        .expect("put alarm");
+
+    logs.put_log_events()
+        .log_group_name("/app/errors")
+        .log_stream_name("s")
+        .log_events(
+            aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
+                .timestamp(chrono::Utc::now().timestamp_millis())
+                .message("ERROR something broke")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("put log events");
+
+    // Dispatched by the evaluation timer (10s), not by any CloudWatch call.
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 1, std::time::Duration::from_secs(30))
+            .await;
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    let envelope: serde_json::Value = serde_json::from_str(messages[0].body().unwrap()).unwrap();
+    let alarm: serde_json::Value =
+        serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+    assert_eq!(alarm["AlarmName"], "LogErrors");
+    assert_eq!(alarm["NewStateValue"], "ALARM");
+}
+
 // A composite whose ActionsSuppressor is in ALARM transitions without acting.
 #[tokio::test]
 async fn suppressed_composite_alarm_does_not_notify() {

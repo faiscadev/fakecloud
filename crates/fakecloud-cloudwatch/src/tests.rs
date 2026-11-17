@@ -3304,90 +3304,222 @@ fn timer_evaluates_alarms_once_per_period() {
     );
 }
 
-// SetAlarmState holds the forced state until the alarm's next period even
-// with live data saying otherwise: no immediate revert, no back-to-back
-// actions. Then the alarm is evaluated normally.
+/// Push a datapoint of NS/X with `value` at `at` and evaluate the alarms on
+/// it at `at`, returning the actions they queued.
+fn put_x_at(
+    svc: &CloudWatchService,
+    at: chrono::DateTime<chrono::Utc>,
+    value: f64,
+) -> Vec<crate::alarm_actions::AlarmNotification> {
+    let mut state = svc.state.write();
+    let acct = state.accounts.get_mut(ACCT).unwrap();
+    acct.metrics_in_mut(REGION)
+        .entry("NS".into())
+        .or_default()
+        .push(crate::state::MetricDatum {
+            timestamp: at,
+            ..datum_at("X", 0, value)
+        });
+    let series = [("X".to_string(), Default::default())];
+    crate::alarm_eval::evaluate_alarms_in(
+        acct,
+        REGION,
+        at,
+        crate::alarm_eval::Scope::Series {
+            namespace: "NS",
+            series: &series,
+        },
+    )
+    .notifications
+}
+
+// SetAlarmState holds the forced state until the alarm's next evaluation
+// (each minute; the period for high-resolution alarms) even with live data
+// saying otherwise: no revert in the same request, no back-to-back actions.
+// Then the alarm is evaluated normally. Times are explicit so a minute
+// boundary can't land mid-test.
 #[tokio::test]
-async fn set_alarm_state_holds_until_the_next_period() {
-    let (svc, sns, _) = acting_service();
-    call(
-        &svc,
-        "PutMetricAlarm",
-        &[
-            ("AlarmName", "held"),
-            ("Namespace", "NS"),
-            ("MetricName", "X"),
-            ("Statistic", "Sum"),
-            ("Period", "60"),
-            ("Threshold", "1"),
-            ("AlarmActions.member.1", TOPIC),
-            ("OKActions.member.1", TOPIC),
-        ],
-    )
-    .await;
-    call(
-        &svc,
-        "PutMetricData",
-        &[
-            ("Namespace", "NS"),
-            ("MetricData.member.1.MetricName", "X"),
-            ("MetricData.member.1.Value", "5"),
-        ],
-    )
-    .await;
-    assert_eq!(sns.published.lock().len(), 1, "ALARM action");
+async fn set_alarm_state_holds_until_the_next_evaluation() {
+    let svc = service();
+    for (name, period) in [("minutely", "60"), ("daily", "86400"), ("fast", "10")] {
+        call(
+            &svc,
+            "PutMetricAlarm",
+            &[
+                ("AlarmName", name),
+                ("Namespace", "NS"),
+                ("MetricName", "X"),
+                ("Statistic", "Sum"),
+                ("Period", period),
+                ("Threshold", "1"),
+                ("AlarmActions.member.1", TOPIC),
+                ("OKActions.member.1", TOPIC),
+            ],
+        )
+        .await;
+        call(
+            &svc,
+            "SetAlarmState",
+            &[
+                ("AlarmName", name),
+                ("StateValue", "OK"),
+                ("StateReason", "forced"),
+            ],
+        )
+        .await;
+    }
+    for (name, interval) in [("minutely", 60), ("daily", 60), ("fast", 10)] {
+        let alarm = metric_alarm(&svc, name);
+        assert_eq!(
+            alarm.manual_hold_until,
+            crate::alarm_eval::next_boundary(alarm.state_updated_timestamp, interval),
+            "{name}"
+        );
+    }
+    let set_at = metric_alarm(&svc, "minutely").state_updated_timestamp;
+    let hold = metric_alarm(&svc, "minutely").manual_hold_until.unwrap();
+    svc.state
+        .write()
+        .get_or_create(ACCT)
+        .pending_actions
+        .clear();
+
+    // Breaching data within the hold: the forced OK stands, nothing acts.
+    assert!(put_x_at(&svc, set_at, 5.0).is_empty());
+    assert_eq!(
+        metric_alarm(&svc, "minutely").state_value,
+        crate::state::AlarmState::Ok
+    );
+    // At the next evaluation the data governs again.
+    let acted = put_x_at(&svc, hold, 5.0);
+    assert_eq!(
+        metric_alarm(&svc, "minutely").state_value,
+        crate::state::AlarmState::Alarm
+    );
+    assert!(acted.iter().any(|n| n.alarm_name == "minutely"));
+
+    // A new configuration during a hold ends it and evaluates at once.
     call(
         &svc,
         "SetAlarmState",
         &[
-            ("AlarmName", "held"),
+            ("AlarmName", "daily"),
             ("StateValue", "OK"),
             ("StateReason", "forced"),
         ],
     )
     .await;
-    // More data and a describe within the period: still OK, one OK action.
     call(
         &svc,
-        "PutMetricData",
+        "PutMetricAlarm",
         &[
+            ("AlarmName", "daily"),
             ("Namespace", "NS"),
-            ("MetricData.member.1.MetricName", "X"),
-            ("MetricData.member.1.Value", "5"),
+            ("MetricName", "X"),
+            ("Statistic", "Sum"),
+            ("Period", "86400"),
+            ("Threshold", "1"),
         ],
     )
     .await;
-    call(&svc, "DescribeAlarms", &[]).await;
-    let alarm = metric_alarm(&svc, "held");
-    assert_eq!(alarm.state_value, crate::state::AlarmState::Ok);
-    let subjects: Vec<String> = sns
-        .published
-        .lock()
-        .iter()
-        .filter_map(|p| p.2.clone())
-        .collect();
-    assert_eq!(subjects.len(), 2, "{subjects:?}");
-    assert!(subjects[1].starts_with("OK:"), "{subjects:?}");
+    let daily = metric_alarm(&svc, "daily");
+    assert_eq!(daily.manual_hold_until, None);
+    assert_eq!(daily.state_value, crate::state::AlarmState::Alarm);
+}
 
-    // After the hold, the data governs again.
-    let after = alarm.manual_hold_until.unwrap() + chrono::Duration::seconds(1);
-    {
-        let mut state = svc.state.write();
-        let acct = state.accounts.get_mut(ACCT).unwrap();
-        // Data in the window at `after`.
-        acct.metrics_in_mut(REGION)
-            .get_mut("NS")
-            .unwrap()
-            .push(crate::state::MetricDatum {
-                timestamp: after,
-                ..datum_at("X", 0, 5.0)
-            });
-        crate::alarm_eval::evaluate_alarms_in(acct, REGION, after, crate::alarm_eval::Scope::Due);
-    }
+// Datapoints another service publishes (here through the cross-service
+// metrics delivery, as Lambda/SNS/Logs metric filters do) evaluate the
+// alarms on that metric like PutMetricData, and the next evaluation tick
+// runs their actions. Nothing here describes the alarms.
+#[tokio::test]
+async fn delivered_metrics_evaluate_and_act_without_describe() {
+    use fakecloud_core::delivery::CloudwatchDelivery;
+    let (svc, sns, _) = acting_service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "fn-errors"),
+            ("Namespace", "AWS/Lambda"),
+            ("MetricName", "Errors"),
+            ("Statistic", "Sum"),
+            ("Period", "60"),
+            ("EvaluationPeriods", "1"),
+            ("Threshold", "0"),
+            ("Dimensions.member.1.Name", "FunctionName"),
+            ("Dimensions.member.1.Value", "f"),
+            ("AlarmActions.member.1", TOPIC),
+        ],
+    )
+    .await;
+    let delivery = crate::CloudwatchDeliveryImpl::new(svc.state.clone());
+    delivery.put_metric(
+        ACCT,
+        REGION,
+        "AWS/Lambda",
+        "Errors",
+        1.0,
+        Some("Count"),
+        [("FunctionName".to_string(), "f".to_string())].into(),
+        chrono::Utc::now().timestamp_millis(),
+    );
     assert_eq!(
-        metric_alarm(&svc, "held").state_value,
+        metric_alarm(&svc, "fn-errors").state_value,
         crate::state::AlarmState::Alarm
     );
+    // The timer tick dispatches the queued action.
+    svc.evaluate_all_alarms().await;
+    let published = sns.published.lock().clone();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(
+        published[0].2.as_deref(),
+        Some("ALARM: \"fn-errors\" in US East (N. Virginia)")
+    );
+}
+
+// Deleting an alarm a composite references re-evaluates the composite at
+// once.
+#[tokio::test]
+async fn deleting_a_child_refreshes_its_composites() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "child"),
+            ("Namespace", "N"),
+            ("MetricName", "M"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "child"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "x"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[("AlarmName", "c"), ("AlarmRule", "ALARM(child)")],
+    )
+    .await;
+    let composite_state = |svc: &CloudWatchService| {
+        svc.state
+            .read()
+            .get(ACCT)
+            .unwrap()
+            .composite_alarms_in(REGION)
+            .unwrap()["c"]
+            .state_value
+    };
+    assert_eq!(composite_state(&svc), crate::state::AlarmState::Alarm);
+    call(&svc, "DeleteAlarms", &[("AlarmNames.member.1", "child")]).await;
+    assert_eq!(composite_state(&svc), crate::state::AlarmState::Ok);
 }
 
 // Actions are dispatched one at a time in transition order, even when two
@@ -3431,10 +3563,13 @@ async fn actions_dispatch_in_order_and_not_after_reset() {
         n
     };
     use crate::state::AlarmState::{Alarm, InsufficientData, Ok as OkState};
-    svc.queue_notifications(vec![
-        notification(Alarm, InsufficientData),
-        notification(OkState, Alarm),
-    ]);
+    let first = notification(Alarm, InsufficientData);
+    let second = notification(OkState, Alarm);
+    svc.state
+        .write()
+        .get_or_create(ACCT)
+        .pending_actions
+        .extend([first, second]);
     tokio::join!(svc.run_pending_actions(), svc.run_pending_actions());
     let subjects: Vec<String> = sns
         .published
@@ -3446,10 +3581,22 @@ async fn actions_dispatch_in_order_and_not_after_reset() {
     assert!(subjects[1].starts_with("OK:"), "{subjects:?}");
 
     // Queued, then the account is reset: nothing is dispatched.
+    // A reset drops the queue with the state.
     let queued = notification(Alarm, OkState);
-    svc.queue_notifications(vec![queued]);
+    svc.state
+        .write()
+        .get_or_create(ACCT)
+        .pending_actions
+        .push(queued.clone());
     *svc.state.write() = crate::state::CloudWatchAccounts::new();
     svc.state.write().get_or_create(ACCT);
+    assert!(!svc.run_pending_actions().await);
+    // One queued against an earlier incarnation of the account is dropped.
+    svc.state
+        .write()
+        .get_or_create(ACCT)
+        .pending_actions
+        .push(queued);
     svc.run_pending_actions().await;
     assert_eq!(sns.published.lock().len(), 2);
 }

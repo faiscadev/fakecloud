@@ -139,11 +139,6 @@ pub struct CloudWatchService {
     /// Held while queued actions are dispatched, so they are delivered one
     /// at a time in the order the state changes happened.
     dispatch_lock: Mutex<()>,
-    /// Actions owed by state changes made under the state lock, run by
-    /// [`Self::run_pending_actions`] once it is released.
-    pending_actions: parking_lot::Mutex<Vec<AlarmNotification>>,
-    /// Set when an evaluation changed state outside a mutating action.
-    evaluation_dirty: std::sync::atomic::AtomicBool,
 }
 
 impl CloudWatchService {
@@ -156,8 +151,6 @@ impl CloudWatchService {
             ec2_actions: None,
             action_authorizer: None,
             dispatch_lock: Mutex::new(()),
-            pending_actions: parking_lot::Mutex::new(Vec::new()),
-            evaluation_dirty: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -181,36 +174,62 @@ impl CloudWatchService {
         self
     }
 
-    /// Evaluate the alarms of `account_id` in `region` now, queueing the
-    /// actions their state changes owe.
-    pub(crate) fn evaluate_region(&self, account_id: &str, region: &str) {
+    /// Evaluate the alarms of `account_id` in `region` `scope` selects now,
+    /// queueing the actions their state changes owe.
+    pub(crate) fn evaluate_region(
+        &self,
+        account_id: &str,
+        region: &str,
+        scope: crate::alarm_eval::Scope<'_>,
+    ) {
         let mut state = self.state.write();
         if let Some(acct) = state.accounts.get_mut(account_id) {
-            self.queue_evaluation(crate::alarm_eval::evaluate_alarms(acct, region, Utc::now()));
+            crate::alarm_eval::evaluate_alarms_in(acct, region, Utc::now(), scope);
         }
     }
 
-    pub(crate) fn queue_evaluation(&self, evaluated: crate::alarm_eval::Evaluated) {
-        if evaluated.changed {
-            self.evaluation_dirty
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        self.queue_notifications(evaluated.notifications);
+    /// Whether any account has queued alarm actions.
+    fn has_pending_actions(&self) -> bool {
+        self.state
+            .read()
+            .accounts
+            .values()
+            .any(|a| !a.pending_actions.is_empty())
     }
 
-    pub(crate) fn queue_notifications(&self, notifications: Vec<AlarmNotification>) {
-        if !notifications.is_empty() {
-            self.pending_actions.lock().extend(notifications);
+    /// Clear and return whether an evaluation left state to persist, for
+    /// `account` (or every account when `None`).
+    fn take_evaluation_dirty(&self, account: Option<&str>) -> bool {
+        let mut state = self.state.write();
+        match account {
+            Some(id) => state
+                .accounts
+                .get_mut(id)
+                .is_some_and(|a| std::mem::take(&mut a.evaluation_dirty)),
+            None => state.accounts.values_mut().fold(false, |dirty, a| {
+                std::mem::take(&mut a.evaluation_dirty) | dirty
+            }),
         }
     }
 
     /// Run every queued alarm action and record the outcomes in the alarm
     /// history. Returns whether anything ran.
     pub(crate) async fn run_pending_actions(&self) -> bool {
+        // Most requests owe no actions: don't wait behind a dispatch.
+        if !self.has_pending_actions() {
+            return false;
+        }
         // One dispatcher at a time, draining under the lock: actions queued
         // in transition order are delivered in that order.
         let _dispatching = self.dispatch_lock.lock().await;
-        let pending = std::mem::take(&mut *self.pending_actions.lock());
+        let pending: Vec<AlarmNotification> = {
+            let mut state = self.state.write();
+            state
+                .accounts
+                .values_mut()
+                .flat_map(|a| std::mem::take(&mut a.pending_actions))
+                .collect()
+        };
         if pending.is_empty() {
             return false;
         }
@@ -277,18 +296,18 @@ impl CloudWatchService {
                 .cloned()
                 .collect();
             for region in regions {
-                self.queue_evaluation(crate::alarm_eval::evaluate_alarms_in(
+                crate::alarm_eval::evaluate_alarms_in(
                     acct,
                     &region,
                     now,
                     crate::alarm_eval::Scope::Due,
-                ));
+                );
             }
         }
+        // Also runs actions other services' metrics queued (see
+        // `CloudwatchDeliveryImpl`).
         let acted = self.run_pending_actions().await;
-        let dirty = self
-            .evaluation_dirty
-            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let dirty = self.take_evaluation_dirty(None);
         if acted || dirty {
             self.save_snapshot().await;
         }
@@ -503,18 +522,29 @@ impl AwsService for CloudWatchService {
         // the region right away so the alarms (and composites over them)
         // transition and act without waiting for the evaluation timer.
         // (PutMetricData evaluates just the alarms on the series it wrote.)
-        if result.is_ok()
-            && matches!(
-                req.action.as_str(),
-                "SetAlarmState" | "PutMetricAlarm" | "PutCompositeAlarm" | "PutLogAlarm"
-            )
-        {
-            self.evaluate_region(&req.account_id, &req.region);
+        if result.is_ok() {
+            match req.action.as_str() {
+                "SetAlarmState" | "PutMetricAlarm" | "PutCompositeAlarm" | "PutLogAlarm" => {
+                    self.evaluate_region(
+                        &req.account_id,
+                        &req.region,
+                        crate::alarm_eval::Scope::All,
+                    );
+                }
+                // Composites referencing a deleted alarm (or one whose
+                // actions changed) follow at once.
+                "DeleteAlarms" | "EnableAlarmActions" | "DisableAlarmActions" => {
+                    self.evaluate_region(
+                        &req.account_id,
+                        &req.region,
+                        crate::alarm_eval::Scope::Composites,
+                    );
+                }
+                _ => {}
+            }
         }
         let acted = self.run_pending_actions().await;
-        let evaluated = self
-            .evaluation_dirty
-            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let evaluated = self.take_evaluation_dirty(Some(&req.account_id));
         if (mutates && result.is_ok()) || acted || evaluated {
             self.save_snapshot().await;
         }
@@ -1373,7 +1403,7 @@ impl CloudWatchService {
         }
 
         // Evaluate just the alarms on the series this put wrote.
-        self.queue_evaluation(crate::alarm_eval::evaluate_alarms_in(
+        crate::alarm_eval::evaluate_alarms_in(
             acct,
             &req.region,
             Utc::now(),
@@ -1381,7 +1411,7 @@ impl CloudWatchService {
                 namespace: &namespace,
                 series: &touched,
             },
-        ));
+        );
 
         Ok(empty_metadata_response("PutMetricData", &req.request_id))
     }
@@ -1911,7 +1941,9 @@ impl CloudWatchService {
                 .as_ref()
                 .map(|a| a.alarm_exit)
                 .unwrap_or_else(crate::state::AlarmExit::new),
-            manual_hold_until: existing.as_ref().and_then(|a| a.manual_hold_until),
+            // A new configuration is evaluated right away, ending any hold of
+            // a state set by SetAlarmState.
+            manual_hold_until: None,
             next_evaluation_at: None,
         };
         // An evaluation error belongs to the configuration that caused it. A
@@ -2021,11 +2053,7 @@ impl CloudWatchService {
         // reflected here and a composite alarm mirrors its children.
         let mut state = self.state.write();
         if let Some(acct) = state.accounts.get_mut(&req.account_id) {
-            self.queue_evaluation(crate::alarm_eval::evaluate_alarms(
-                acct,
-                &req.region,
-                Utc::now(),
-            ));
+            crate::alarm_eval::evaluate_alarms(acct, &req.region, Utc::now());
         }
         let mut combined: Vec<(AlarmKind, String)> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
@@ -2130,7 +2158,7 @@ impl CloudWatchService {
         // Recompute alarm states from stored metric data first, so this returns
         // the same fresh state DescribeAlarms would (a PutMetricData crossing a
         // threshold is reflected here rather than a stale stored value).
-        self.evaluate_region(&req.account_id, &req.region);
+        self.evaluate_region(&req.account_id, &req.region, crate::alarm_eval::Scope::All);
 
         let state = self.state.read();
         let mut inner = String::from("<MetricAlarms>");
@@ -2308,12 +2336,16 @@ impl CloudWatchService {
         let item = if let Some(alarm) = acct.alarms_in_mut(&req.region).get_mut(&alarm_name) {
             // Mark this as a manual override so a later evaluation with no
             // datapoints keeps it rather than resetting to INSUFFICIENT_DATA,
-            // and hold it for a period: AWS evaluates the alarm normally
-            // again at its next period, not within this request.
+            // and hold it until the alarm's next evaluation (each minute, or
+            // each period for a high-resolution alarm): AWS doesn't
+            // re-evaluate it within this request.
             alarm.state_manually_set = true;
-            let hold = now + chrono::Duration::seconds(alarm.period.unwrap_or(60).max(1));
-            alarm.manual_hold_until = Some(hold);
-            alarm.next_evaluation_at = Some(hold);
+            let hold = crate::alarm_eval::next_boundary(
+                now,
+                crate::alarm_eval::evaluation_interval(alarm),
+            );
+            alarm.manual_hold_until = hold;
+            alarm.next_evaluation_at = hold;
             let (item, prev) = set(
                 "MetricAlarm",
                 &mut alarm.state_value,
@@ -2374,18 +2406,12 @@ impl CloudWatchService {
             ));
         };
         push_alarm_history(acct, &req.region, item);
-        let epoch = acct.epoch;
         // Queued under the state lock, so it keeps its place in transition
         // order.
-        self.queue_notifications(
-            notification
-                .into_iter()
-                .map(|mut n| {
-                    n.epoch = epoch;
-                    n
-                })
-                .collect(),
-        );
+        if let Some(mut n) = notification {
+            n.epoch = acct.epoch;
+            acct.pending_actions.push(n);
+        }
         drop(state);
 
         Ok(empty_metadata_response("SetAlarmState", &req.request_id))

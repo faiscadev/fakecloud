@@ -110,6 +110,15 @@ pub struct CloudWatchState {
     /// state are dropped instead of dispatched.
     #[serde(skip, default = "next_epoch")]
     pub(crate) epoch: u64,
+    /// Actions owed by state changes, in transition order, waiting for the
+    /// service's dispatcher. Every writer (API handlers, the cross-service
+    /// metrics delivery, the evaluation timer) queues here under the state
+    /// lock, and a reset drops them with the state.
+    #[serde(skip)]
+    pub(crate) pending_actions: Vec<crate::alarm_actions::AlarmNotification>,
+    /// Set when an evaluation changed alarm state that needs persisting.
+    #[serde(skip)]
+    pub(crate) evaluation_dirty: bool,
 }
 
 /// A process-unique [`CloudWatchState::epoch`].
