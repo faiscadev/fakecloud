@@ -23,6 +23,14 @@
 //! and the OnFailure destination (SQS, SNS, S3, with a `KafkaBatchInfo`
 //! record) follow `stream_esm_failures`.
 //!
+//! Records are fetched `read_committed` (aborted transactions dropped; AWS
+//! does not document its poller's level). Commits never move a group offset
+//! below what the session read as committed, and the API refuses a second
+//! mapping in a group. A leaderless partition is skipped until a later
+//! metadata refresh, an unreadable one (legacy message format, corrupt
+//! batch) is reported and skipped, and the partition that leads a fetch
+//! rotates so an oversized batch (read alone) never starves.
+//!
 //! Authentication: a self-managed cluster is reached over PLAINTEXT, or
 //! SASL_PLAINTEXT with `BASIC_AUTH` (SASL/PLAIN) or `SASL_SCRAM_256_AUTH` /
 //! `SASL_SCRAM_512_AUTH` credentials read from Secrets Manager. An MSK
@@ -455,8 +463,66 @@ struct Session {
     buffer: VecDeque<Buffered>,
     buffered_since: Option<Instant>,
     last_metadata: Option<Instant>,
+    /// How long the partition placement is trusted: shorter while a
+    /// partition has no leader.
+    refresh_after: Duration,
+    /// The group's committed offsets as this session knows them: a commit
+    /// never moves one back.
+    floor: HashMap<TopicPartition, i64>,
+    /// Partitions whose records cannot be read, skipped until the next
+    /// metadata refresh.
+    blocked: HashMap<TopicPartition, String>,
+    /// A problem to report that does not end the session.
+    pending_problem: Option<String>,
+    /// Which partition leads the next fetch, so every partition is first in
+    /// turn.
+    rotation: usize,
     /// A batch failed and waits for its retry.
     retrying: bool,
+}
+
+/// Leadership is moving: the partition is retried once metadata is fresh.
+fn is_leader_error(code: Option<i16>) -> bool {
+    matches!(
+        code,
+        Some(client::ERROR_NOT_LEADER_OR_FOLLOWER)
+            | Some(client::ERROR_LEADER_NOT_AVAILABLE)
+            | Some(client::ERROR_UNKNOWN_TOPIC_OR_PARTITION)
+    )
+}
+
+/// The wait after a fetch hit a partition whose leadership is moving.
+const LEADER_BACKOFF: Duration = Duration::from_millis(200);
+/// How soon metadata is read again while a partition has no leader.
+const LEADERLESS_REFRESH: Duration = Duration::from_secs(1);
+
+/// The `(topic, partition, offset)` fetch targets, starting `rotation`
+/// places in, so no partition is always behind the others in a fetch.
+fn rotated<T: Clone>(targets: &[T], rotation: usize) -> Vec<T> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let start = rotation % targets.len();
+    targets[start..]
+        .iter()
+        .chain(&targets[..start])
+        .cloned()
+        .collect()
+}
+
+/// The offsets of `dirty` worth committing: none at or below what the group
+/// has committed already.
+fn commit_targets(
+    dirty: &HashMap<TopicPartition, i64>,
+    floor: &HashMap<TopicPartition, i64>,
+) -> Vec<FetchTarget> {
+    let mut out: Vec<FetchTarget> = dirty
+        .iter()
+        .filter(|(tp, o)| floor.get(*tp).is_none_or(|f| *o > f))
+        .map(|((t, p), o)| (t.clone(), *p, *o))
+        .collect();
+    out.sort();
+    out
 }
 
 impl Session {
@@ -471,8 +537,18 @@ impl Session {
             buffer: VecDeque::new(),
             buffered_since: None,
             last_metadata: None,
+            refresh_after: METADATA_REFRESH,
+            floor: HashMap::new(),
+            blocked: HashMap::new(),
+            pending_problem: None,
+            rotation: 0,
             retrying: false,
         }
+    }
+
+    fn metadata_stale(&self) -> bool {
+        self.last_metadata
+            .is_none_or(|t| t.elapsed() >= self.refresh_after)
     }
 
     fn leader(&self, tp: &TopicPartition) -> Option<i32> {
@@ -542,6 +618,7 @@ impl Session {
             .await
             .map_err(|e| problem(&e))?;
         let mut found = Vec::new();
+        let mut leaderless = false;
         for topic in &m.topics {
             let Some(meta) = topics.iter().find(|t| &t.name == topic) else {
                 return Err(format!("PROBLEM: Topic not found: {topic}"));
@@ -559,6 +636,11 @@ impl Session {
                 }
             }
             for p in &meta.partitions {
+                // A partition electing a leader is skipped until it has one.
+                if p.leader < 0 || p.error_code == client::ERROR_LEADER_NOT_AVAILABLE {
+                    leaderless = true;
+                    continue;
+                }
                 found.push(((topic.clone(), p.partition), p.leader));
             }
         }
@@ -569,6 +651,12 @@ impl Session {
             .collect();
         self.partitions = found;
         self.last_metadata = Some(Instant::now());
+        self.blocked.clear();
+        self.refresh_after = if leaderless {
+            LEADERLESS_REFRESH
+        } else {
+            METADATA_REFRESH
+        };
         if new.is_empty() {
             return Ok(());
         }
@@ -585,19 +673,24 @@ impl Session {
             }
         };
         for tp in new {
-            let offset = match self
-                .dirty
-                .get(&tp)
-                .copied()
-                .or_else(|| committed.get(&tp).copied().flatten())
-            {
+            let group_offset = committed.get(&tp).copied().flatten();
+            if let Some(offset) = group_offset {
+                self.floor.insert(tp.clone(), offset);
+            }
+            let offset = match self.dirty.get(&tp).copied().or(group_offset) {
                 Some(offset) => offset,
                 None => {
                     let leader = self.leader(&tp).unwrap_or(-1);
-                    let offset = self
-                        .start_offset(m.starting_position, &tp, leader)
-                        .await
-                        .map_err(|e| problem(&e))?;
+                    let offset = match self.start_offset(m.starting_position, &tp, leader).await {
+                        Ok(offset) => offset,
+                        // Leadership moved since the metadata: the partition
+                        // starts after the next refresh.
+                        Err(e) if is_leader_error(e.broker_code()) => {
+                            self.refresh_after = LEADERLESS_REFRESH;
+                            continue;
+                        }
+                        Err(e) => return Err(problem(&e)),
+                    };
                     self.dirty.insert(tp.clone(), offset);
                     offset
                 }
@@ -613,13 +706,12 @@ impl Session {
         if self.dirty.is_empty() {
             return Ok(());
         }
+        let offsets = commit_targets(&self.dirty, &self.floor);
+        if offsets.is_empty() {
+            self.dirty.clear();
+            return Ok(());
+        }
         let coordinator = self.coordinator(&m.group_id).await?;
-        let mut offsets: Vec<(String, i32, i64)> = self
-            .dirty
-            .iter()
-            .map(|((t, p), o)| (t.clone(), *p, *o))
-            .collect();
-        offsets.sort();
         match self
             .client
             .offset_commit(&coordinator, &m.group_id, &offsets)
@@ -627,6 +719,9 @@ impl Session {
         {
             Ok(()) => {
                 self.dirty.clear();
+                for (t, p, o) in offsets {
+                    self.floor.insert((t, p), o);
+                }
                 Ok(())
             }
             Err(e)
@@ -649,20 +744,29 @@ impl Session {
 
     /// One Fetch per partition leader, appending what arrives.
     async fn fetch(&mut self, m: &KafkaMapping, max_wait_ms: i32) -> Result<(), String> {
+        let targets: Vec<(i32, FetchTarget)> = self
+            .partitions
+            .iter()
+            .filter(|(tp, _)| !self.blocked.contains_key(tp))
+            .filter_map(|(tp, leader)| {
+                self.positions
+                    .get(tp)
+                    .map(|o| (*leader, (tp.0.clone(), tp.1, *o)))
+            })
+            .collect();
+        let targets = rotated(&targets, self.rotation);
+        self.rotation = self.rotation.wrapping_add(1);
         let mut by_leader: Vec<(i32, Vec<FetchTarget>)> = Vec::new();
-        for (tp, leader) in &self.partitions {
-            let Some(offset) = self.positions.get(tp) else {
-                continue;
-            };
-            let entry = (tp.0.clone(), tp.1, *offset);
-            match by_leader.iter_mut().find(|(l, _)| l == leader) {
+        for (leader, entry) in targets {
+            match by_leader.iter_mut().find(|(l, _)| *l == leader) {
                 Some((_, parts)) => parts.push(entry),
-                None => by_leader.push((*leader, vec![entry])),
+                None => by_leader.push((leader, vec![entry])),
             }
         }
         if by_leader.is_empty() {
             tokio::time::sleep(Duration::from_millis(max_wait_ms.max(0) as u64)).await;
         }
+        let mut leader_trouble = false;
         for (leader, parts) in by_leader {
             let fetched = self
                 .client
@@ -675,51 +779,104 @@ impl Session {
                 )
                 .await
                 .map_err(|e| problem(&e))?;
+            let mut stalled = Vec::new();
             for fp in fetched {
-                let tp = (fp.topic.clone(), fp.partition);
-                match fp.error_code {
-                    0 => {
-                        let last = fp.records.last().map(|r| r.offset + 1);
-                        if let Some(next) = fp.next_offset.max(last) {
-                            let pos = self.positions.entry(tp.clone()).or_default();
-                            *pos = (*pos).max(next);
-                        }
-                        if !fp.records.is_empty() && self.buffered_since.is_none() {
-                            self.buffered_since = Some(Instant::now());
-                        }
-                        self.buffer
-                            .extend(fp.records.into_iter().map(|record| Buffered {
-                                topic: fp.topic.clone(),
-                                partition: fp.partition,
-                                record,
-                            }));
-                    }
-                    // Records gone (retention, deleted): restart where a
-                    // partition with no committed offset would.
-                    client::ERROR_OFFSET_OUT_OF_RANGE => {
-                        let position = match m.starting_position {
-                            StartingPosition::Latest => StartingPosition::Latest,
-                            _ => StartingPosition::TrimHorizon,
-                        };
-                        let offset = self
-                            .start_offset(position, &tp, leader)
-                            .await
-                            .map_err(|e| problem(&e))?;
-                        self.positions.insert(tp, offset);
-                    }
-                    client::ERROR_NOT_LEADER_OR_FOLLOWER
-                    | client::ERROR_LEADER_NOT_AVAILABLE
-                    | client::ERROR_UNKNOWN_TOPIC_OR_PARTITION => self.last_metadata = None,
-                    code => {
-                        return Err(problem(&ClientError::Broker {
-                            code,
-                            context: format!(": fetching {}-{}", tp.0, tp.1),
-                        }))
-                    }
+                if fp.truncated {
+                    stalled.push(fp);
+                } else {
+                    leader_trouble |= self.apply_fetched(m, leader, fp).await?;
+                }
+            }
+            // A batch larger than the partition's share of the fetch comes
+            // back whole only when its partition leads the fetch: read it on
+            // its own.
+            for fp in stalled {
+                let Some(offset) = self.positions.get(&(fp.topic.clone(), fp.partition)) else {
+                    continue;
+                };
+                let alone = [(fp.topic.clone(), fp.partition, *offset)];
+                let refetched = self
+                    .client
+                    .fetch(leader, &alone, 0, FETCH_MAX_BYTES, FETCH_MAX_BYTES)
+                    .await
+                    .map_err(|e| problem(&e))?;
+                for fp in refetched {
+                    leader_trouble |= self.apply_fetched(m, leader, fp).await?;
                 }
             }
         }
+        if leader_trouble {
+            tokio::time::sleep(LEADER_BACKOFF).await;
+        }
         Ok(())
+    }
+
+    /// Take in one partition of a Fetch response; `true` when its leadership
+    /// is moving.
+    async fn apply_fetched(
+        &mut self,
+        m: &KafkaMapping,
+        leader: i32,
+        fp: client::FetchedPartition,
+    ) -> Result<bool, String> {
+        let tp = (fp.topic.clone(), fp.partition);
+        if let Some(reason) = fp.decode_error {
+            // The partition is skipped; the others go on.
+            let reported = format!(
+                "PROBLEM: Partition {}-{} could not be read: {reason}",
+                tp.0, tp.1
+            );
+            tracing::warn!(mapping = %m.uuid, %reported, "Kafka->Lambda: skipping a partition");
+            self.blocked.insert(tp, reported.clone());
+            self.pending_problem = Some(reported);
+            return Ok(false);
+        }
+        match fp.error_code {
+            0 => {
+                let last = fp.records.last().map(|r| r.offset + 1);
+                if let Some(next) = fp.next_offset.max(last) {
+                    let pos = self.positions.entry(tp.clone()).or_default();
+                    *pos = (*pos).max(next);
+                }
+                if !fp.records.is_empty() && self.buffered_since.is_none() {
+                    self.buffered_since = Some(Instant::now());
+                }
+                self.buffer
+                    .extend(fp.records.into_iter().map(|record| Buffered {
+                        topic: fp.topic.clone(),
+                        partition: fp.partition,
+                        record,
+                    }));
+                Ok(false)
+            }
+            // Records gone (retention, deleted): restart where a partition
+            // with no committed offset would.
+            client::ERROR_OFFSET_OUT_OF_RANGE => {
+                let position = match m.starting_position {
+                    StartingPosition::Latest => StartingPosition::Latest,
+                    _ => StartingPosition::TrimHorizon,
+                };
+                match self.start_offset(position, &tp, leader).await {
+                    Ok(offset) => {
+                        self.positions.insert(tp, offset);
+                        Ok(false)
+                    }
+                    Err(e) if is_leader_error(e.broker_code()) => {
+                        self.last_metadata = None;
+                        Ok(true)
+                    }
+                    Err(e) => Err(problem(&e)),
+                }
+            }
+            code if is_leader_error(Some(code)) => {
+                self.last_metadata = None;
+                Ok(true)
+            }
+            code => Err(problem(&ClientError::Broker {
+                code,
+                context: format!(": fetching {}-{}", tp.0, tp.1),
+            })),
+        }
     }
 
     /// Mark the first `n` buffered records handled.
@@ -1029,6 +1186,8 @@ impl KafkaLambdaPoller {
             };
             let outcome: Result<std::convert::Infallible, String> = async {
                 session.refresh_partitions(&m).await?;
+                // Connected: the next problem backs off from the start.
+                failures = 0;
                 loop {
                     self.cycle(&m, &mut session, &retries, &filter).await?;
                 }
@@ -1055,12 +1214,13 @@ impl KafkaLambdaPoller {
         retries: &RetryTracker,
         filter: &FilterSet,
     ) -> Result<(), String> {
-        if s.last_metadata
-            .is_none_or(|t| t.elapsed() >= METADATA_REFRESH)
-        {
+        if s.metadata_stale() {
             s.refresh_partitions(m).await?;
         }
         s.commit(m).await?;
+        if let Some(reported) = s.pending_problem.take() {
+            self.report(m, &reported);
+        }
         if s.buffer.len() < m.batch_size && !s.retrying {
             // Wait on the broker no longer than the batching window has left.
             let wait = match s.buffered_since {

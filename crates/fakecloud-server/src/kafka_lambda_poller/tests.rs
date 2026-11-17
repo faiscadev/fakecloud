@@ -466,14 +466,51 @@ async fn self_managed_mappings_present_sasl_credentials_or_refuse_tls() {
 /// A stored record's `(key, value)`.
 type KeyValue = (Option<Vec<u8>>, Option<Vec<u8>>);
 
+/// A partition of `orders` past partition 0.
+#[derive(Default)]
+struct PartitionDouble {
+    /// `-1` while electing a leader.
+    leader: i32,
+    records: Vec<KeyValue>,
+    /// Serves a legacy (magic 1) message set.
+    legacy: bool,
+    /// Its batch only fits a fetch of that partition alone.
+    oversized: bool,
+}
+
 #[derive(Default)]
 struct BrokerState {
     /// Topic `orders`, partition 0, per offset.
     records: Vec<KeyValue>,
+    /// Partitions 1.. of `orders`.
+    others: std::collections::BTreeMap<i32, PartitionDouble>,
     /// `(group, topic, partition)` -> committed offset.
     committed: HashMap<(String, String, i32), i64>,
     /// Every commit, in order.
     commits: Vec<(String, i32, i64)>,
+    /// The isolation level of every Fetch.
+    isolation: Vec<i8>,
+    /// The partitions of every Fetch.
+    fetched: Vec<Vec<i32>>,
+}
+
+impl BrokerState {
+    fn records_of(&self, p: i32) -> &[KeyValue] {
+        if p == 0 {
+            &self.records
+        } else {
+            self.others.get(&p).map_or(&[], |o| &o.records)
+        }
+    }
+}
+
+/// A legacy (magic 1) message set at offset 0.
+fn legacy_message_set() -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.i64(0)
+        .i32(14)
+        .raw(&[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    e.into_bytes()
 }
 
 const BASE_TS: i64 = 1_700_000_000_000;
@@ -495,8 +532,18 @@ fn answer(state: &Mutex<BrokerState>, port: u16, key: i16, body: &[u8]) -> (Vec<
     let mut e = Encoder::new();
     let mut idle = false;
     match key {
+        18 => {
+            // Every API, every version up to 12.
+            let keys = [1i16, 2, 3, 8, 9, 10, 17, 36];
+            e.i16(0).array(&keys, |e, k| {
+                e.i16(*k).i16(0).i16(12);
+            });
+        }
         3 => {
             let topics = d.array(|d| d.string()).unwrap();
+            let st = state.lock();
+            let mut parts: Vec<(i32, i32)> = vec![(0, 1)];
+            parts.extend(st.others.iter().map(|(p, o)| (*p, o.leader)));
             e.i32(0)
                 .i32(1)
                 .i32(1)
@@ -507,8 +554,13 @@ fn answer(state: &Mutex<BrokerState>, port: u16, key: i16, body: &[u8]) -> (Vec<
                 .i32(1)
                 .array(&topics, |e, t| {
                     if t == "orders" {
-                        e.i16(0).string(t).bool(false).i32(1);
-                        e.i16(0).i32(0).i32(1).i32(1).i32(1).i32(1).i32(1);
+                        e.i16(0)
+                            .string(t)
+                            .bool(false)
+                            .array(&parts, |e, (p, leader)| {
+                                let code = if *leader < 0 { 5 } else { 0 };
+                                e.i16(code).i32(*p).i32(*leader).i32(1).i32(1).i32(1).i32(1);
+                            });
                     } else {
                         e.i16(3).string(t).bool(false).i32(0);
                     }
@@ -574,9 +626,10 @@ fn answer(state: &Mutex<BrokerState>, port: u16, key: i16, body: &[u8]) -> (Vec<
             let topics = d
                 .array(|d| Ok((d.string()?, d.array(|d| Ok((d.i32()?, d.i64()?)))?)))
                 .unwrap();
-            let len = state.lock().records.len() as i64;
+            let st = state.lock();
             e.array(&topics, |e, (name, parts)| {
                 e.string(name).array(parts, |e, (p, ts)| {
+                    let len = st.records_of(*p).len() as i64;
                     let offset = match *ts {
                         -2 => 0,
                         -1 => len,
@@ -598,7 +651,7 @@ fn answer(state: &Mutex<BrokerState>, port: u16, key: i16, body: &[u8]) -> (Vec<
             let _max_wait = d.i32().unwrap();
             let _min_bytes = d.i32().unwrap();
             let _max_bytes = d.i32().unwrap();
-            let _isolation = d.i8().unwrap();
+            let isolation = d.i8().unwrap();
             let topics = d
                 .array(|d| {
                     Ok((
@@ -607,31 +660,46 @@ fn answer(state: &Mutex<BrokerState>, port: u16, key: i16, body: &[u8]) -> (Vec<
                     ))
                 })
                 .unwrap();
-            let st = state.lock();
-            let hw = st.records.len() as i64;
+            let mut st = state.lock();
+            st.isolation.push(isolation);
+            let requested: Vec<i32> = topics
+                .iter()
+                .flat_map(|(_, parts)| parts.iter().map(|(p, _, _)| *p))
+                .collect();
+            let alone = requested.len() == 1;
+            st.fetched.push(requested);
+            let mut any = false;
             e.i32(0).array(&topics, |e, (name, parts)| {
                 e.string(name).array(parts, |e, (p, offset, _)| {
+                    let records = st.records_of(*p);
+                    let hw = records.len() as i64;
+                    let other = st.others.get(p);
                     e.i32(*p).i16(0).i64(hw).i64(hw).i32(-1);
+                    if other.is_some_and(|o| o.legacy) {
+                        any = true;
+                        e.bytes(&legacy_message_set());
+                        return;
+                    }
                     let from = (*offset).clamp(0, hw) as usize;
                     if from as i64 >= hw {
-                        idle = true;
                         e.bytes(&[]);
                         return;
                     }
-                    let recs: Vec<encode::TestRecord<'_>> = st.records[from..]
+                    any = true;
+                    let recs: Vec<encode::TestRecord<'_>> = records[from..]
                         .iter()
                         .enumerate()
                         .map(|(i, (k, v))| (i as i64, k.as_deref(), v.as_deref(), vec![]))
                         .collect();
-                    e.bytes(&encode::batch(
-                        from as i64,
-                        BASE_TS + from as i64,
-                        0,
-                        0,
-                        &recs,
-                    ));
+                    let batch = encode::batch(from as i64, BASE_TS + from as i64, 0, 0, &recs);
+                    if other.is_some_and(|o| o.oversized) && !alone {
+                        e.bytes(&batch[..batch.len() / 2]);
+                    } else {
+                        e.bytes(&batch);
+                    }
                 });
             });
+            idle = !any;
         }
         other => panic!("unexpected api key {other}"),
     }
@@ -790,6 +858,9 @@ async fn a_batch_is_retried_and_committed_only_after_it_succeeds() {
         vec![("orders".to_string(), 0, 0), ("orders".to_string(), 0, 3)]
     );
     assert_eq!(last_result(&lambda).as_deref(), Some("OK"));
+    // Only committed transactional records are read.
+    let isolation = broker.lock().isolation.clone();
+    assert!(!isolation.is_empty() && isolation.iter().all(|i| *i == 1));
 }
 
 /// A new mapping in a group with committed offsets resumes after them, and
@@ -940,4 +1011,147 @@ async fn exhausted_retries_discard_and_commit_the_batch() {
     task.abort();
     // The first invocation and one retry.
     assert_eq!(delivery.count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn commits_never_move_a_group_offset_back() {
+    let tp = |p: i32| ("orders".to_string(), p);
+    let dirty: HashMap<TopicPartition, i64> = [(tp(0), 5), (tp(1), 9), (tp(2), 3)].into();
+    let floor: HashMap<TopicPartition, i64> = [(tp(0), 7), (tp(1), 4), (tp(2), 3)].into();
+    // Partition 0 would go back (7 -> 5) and partition 2 would not move.
+    assert_eq!(
+        commit_targets(&dirty, &floor),
+        vec![("orders".to_string(), 1, 9)]
+    );
+    assert_eq!(commit_targets(&dirty, &HashMap::new()).len(), 3);
+}
+
+#[test]
+fn every_partition_leads_a_fetch_in_turn() {
+    let targets = [1, 2, 3];
+    assert_eq!(rotated(&targets, 0), vec![1, 2, 3]);
+    assert_eq!(rotated(&targets, 1), vec![2, 3, 1]);
+    assert_eq!(rotated(&targets, 5), vec![3, 1, 2]);
+    assert!(rotated::<i32>(&[], 3).is_empty());
+}
+
+/// A partition with no leader is left out until it has one; the others are
+/// read meanwhile.
+#[tokio::test]
+async fn a_leaderless_partition_does_not_stop_the_others() {
+    let (port, broker) = broker(2).await;
+    broker.lock().others.insert(
+        1,
+        PartitionDouble {
+            leader: -1,
+            records: vec![(None, Some(b"{}".to_vec()))],
+            ..Default::default()
+        },
+    );
+    let mapping = self_managed(port, json!({}));
+    let delivery = ScriptedDelivery::new(0);
+    let p = poller(
+        lambda_state_with(&mapping),
+        kafka_state(),
+        secrets_state(),
+        Some(delivery.clone()),
+    );
+    let task = tokio::spawn(p.consume(mapping_of(&mapping)));
+    wait_until("partition 0's commit", || {
+        broker
+            .lock()
+            .committed
+            .get(&("esm-1".to_string(), "orders".to_string(), 0))
+            == Some(&2)
+    })
+    .await;
+    // Once elected, partition 1 is read too.
+    broker.lock().others.get_mut(&1).unwrap().leader = 1;
+    wait_until("partition 1's commit", || {
+        broker
+            .lock()
+            .committed
+            .get(&("esm-1".to_string(), "orders".to_string(), 1))
+            == Some(&1)
+    })
+    .await;
+    task.abort();
+    assert!(broker.lock().fetched[0].iter().all(|p| *p == 0));
+}
+
+/// A partition whose records cannot be read is reported and skipped; the
+/// others keep being delivered.
+#[tokio::test]
+async fn an_unreadable_partition_is_reported_and_skipped() {
+    let (port, broker) = broker(0).await;
+    broker.lock().others.insert(
+        1,
+        PartitionDouble {
+            leader: 1,
+            legacy: true,
+            ..Default::default()
+        },
+    );
+    let mapping = self_managed(port, json!({}));
+    let lambda = lambda_state_with(&mapping);
+    let delivery = ScriptedDelivery::new(0);
+    let p = poller(
+        lambda.clone(),
+        kafka_state(),
+        secrets_state(),
+        Some(delivery.clone()),
+    );
+    let task = tokio::spawn(p.consume(mapping_of(&mapping)));
+    wait_until("the partition problem", || {
+        last_result(&lambda).is_some_and(|r| r.starts_with("PROBLEM: Partition orders-1"))
+    })
+    .await;
+    assert!(last_result(&lambda)
+        .unwrap()
+        .contains("legacy message format v1"));
+    broker
+        .lock()
+        .records
+        .push((None, Some(b"{\"n\":0}".to_vec())));
+    wait_until("partition 0's record", || {
+        delivery.count.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+    task.abort();
+    assert_eq!(delivery.offsets(0), vec![0]);
+}
+
+/// A batch too large for its share of a multi-partition fetch is read with
+/// its partition alone, instead of stalling the partition.
+#[tokio::test]
+async fn an_oversized_batch_is_fetched_alone() {
+    let (port, broker) = broker(1).await;
+    broker.lock().others.insert(
+        1,
+        PartitionDouble {
+            leader: 1,
+            records: vec![(None, Some(b"a".to_vec())), (None, Some(b"b".to_vec()))],
+            oversized: true,
+            ..Default::default()
+        },
+    );
+    let mapping = self_managed(port, json!({}));
+    let delivery = ScriptedDelivery::new(0);
+    let p = poller(
+        lambda_state_with(&mapping),
+        kafka_state(),
+        secrets_state(),
+        Some(delivery.clone()),
+    );
+    let task = tokio::spawn(p.consume(mapping_of(&mapping)));
+    wait_until("partition 1's commit", || {
+        broker
+            .lock()
+            .committed
+            .get(&("esm-1".to_string(), "orders".to_string(), 1))
+            == Some(&2)
+    })
+    .await;
+    task.abort();
+    assert!(broker.lock().fetched.iter().any(|f| f == &vec![1]));
 }

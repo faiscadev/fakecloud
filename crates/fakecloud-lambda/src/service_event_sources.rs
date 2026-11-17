@@ -39,6 +39,10 @@ impl LambdaService {
         let state = accounts.regional_mut(&req.account_id, &req.region);
 
         let function_arn = mapping_function_arn(state, &req.region, &function_name)?;
+        crate::esm_config::check_consumer_group_unique(
+            &source_configs,
+            state.event_source_mappings.values(),
+        )?;
 
         let batch_size = body["BatchSize"].as_i64().unwrap_or_else(|| {
             crate::esm_config::default_batch_size(

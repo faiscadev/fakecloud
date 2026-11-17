@@ -32,6 +32,38 @@ const API_OFFSET_FETCH: i16 = 9;
 const API_FIND_COORDINATOR: i16 = 10;
 const API_SASL_HANDSHAKE: i16 = 17;
 const API_SASL_AUTHENTICATE: i16 = 36;
+const API_API_VERSIONS: i16 = 18;
+
+/// `(api key, name, version)` of every request this client sends; the SASL
+/// ones only on an authenticated connection.
+const SPOKEN_APIS: &[(i16, &str, i16)] = &[
+    (API_METADATA, "Metadata", 4),
+    (API_LIST_OFFSETS, "ListOffsets", 1),
+    (API_FETCH, "Fetch", 4),
+    (API_FIND_COORDINATOR, "FindCoordinator", 1),
+    (API_OFFSET_FETCH, "OffsetFetch", 1),
+    (API_OFFSET_COMMIT, "OffsetCommit", 2),
+];
+const SASL_APIS: &[(i16, &str, i16)] = &[
+    (API_SASL_HANDSHAKE, "SaslHandshake", 1),
+    (API_SASL_AUTHENTICATE, "SaslAuthenticate", 0),
+];
+
+/// The spoken API versions an `ApiVersions` answer (`(key, min, max)`)
+/// lacks, as `Name vN`.
+fn unsupported_apis(ranges: &[(i16, i16, i16)], sasl: bool) -> Vec<String> {
+    let sasl_apis: &[(i16, &str, i16)] = if sasl { SASL_APIS } else { &[] };
+    SPOKEN_APIS
+        .iter()
+        .chain(sasl_apis)
+        .filter(|(key, _, version)| {
+            !ranges
+                .iter()
+                .any(|(k, min, max)| k == key && (*min..=*max).contains(version))
+        })
+        .map(|(_, name, version)| format!("{name} v{version}"))
+        .collect()
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bounds every request, a Fetch's long poll included.
@@ -52,6 +84,7 @@ pub const ERROR_COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub const ERROR_NOT_COORDINATOR: i16 = 16;
 pub const ERROR_TOPIC_AUTHORIZATION_FAILED: i16 = 29;
 pub const ERROR_GROUP_AUTHORIZATION_FAILED: i16 = 30;
+pub const ERROR_UNSUPPORTED_VERSION: i16 = 35;
 
 /// The name of a Kafka protocol error code.
 pub fn error_name(code: i16) -> &'static str {
@@ -96,11 +129,22 @@ impl SaslMechanism {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SaslCredentials {
     pub mechanism: SaslMechanism,
     pub username: String,
     pub password: String,
+}
+
+/// The password never reaches a log line.
+impl std::fmt::Debug for SaslCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaslCredentials")
+            .field("mechanism", &self.mechanism)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +210,13 @@ pub struct FetchedPartition {
     pub records: Vec<ConsumedRecord>,
     /// The offset after the last complete batch returned.
     pub next_offset: Option<i64>,
+    /// The partition returned bytes but no complete batch: its next batch is
+    /// larger than the partition's share of the fetch.
+    pub truncated: bool,
+    /// The partition's records could not be read (a legacy message format,
+    /// a corrupt batch, ...): the other partitions of the fetch are not
+    /// affected.
+    pub decode_error: Option<String>,
 }
 
 /// `host:port`, bracketing an IPv6 host.
@@ -204,10 +255,45 @@ impl Connection {
             stream,
             correlation: 0,
         };
+        conn.check_api_versions(addr, client_id, sasl.is_some())
+            .await?;
         if let Some(creds) = sasl {
             conn.authenticate(addr, client_id, creds).await?;
         }
         Ok(conn)
+    }
+
+    /// Ask the broker which API versions it serves (`ApiVersions` v0, which
+    /// every broker since Kafka 0.10 answers, before authentication) and
+    /// refuse one that lacks a version this client speaks, rather than
+    /// failing later on a closed connection.
+    async fn check_api_versions(
+        &mut self,
+        addr: &str,
+        client_id: &str,
+        sasl: bool,
+    ) -> ClientResult<()> {
+        let resp = self.send(addr, client_id, API_API_VERSIONS, 0, &[]).await?;
+        let mut d = Decoder::new(&resp);
+        let code = d.i16()?;
+        let ranges = d.array(|d| Ok((d.i16()?, d.i16()?, d.i16()?)))?;
+        if code != 0 {
+            return Err(ClientError::broker(
+                code,
+                format!("ApiVersions from {addr}"),
+            ));
+        }
+        let missing = unsupported_apis(&ranges, sasl);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(ClientError::broker(
+            ERROR_UNSUPPORTED_VERSION,
+            format!(
+                "the broker at {addr} does not serve {} that fakecloud's Kafka client speaks",
+                missing.join(", ")
+            ),
+        ))
     }
 
     async fn authenticate(
@@ -556,8 +642,9 @@ impl KafkaClient {
             .i32(max_wait_ms)
             .i32(1)
             .i32(max_bytes)
-            // READ_UNCOMMITTED, the consumer default.
-            .i8(0)
+            // READ_COMMITTED: records of open transactions are not
+            // returned, and aborted ones are dropped below.
+            .i8(1)
             .array(&grouped, |e, (topic, parts)| {
                 e.string(topic).array(parts, |e, (p, offset)| {
                     e.i32(*p).i64(*offset).i32(partition_max_bytes);
@@ -573,22 +660,26 @@ impl KafkaClient {
                 let error_code = d.i16()?;
                 let high_watermark = d.i64()?;
                 let _last_stable = d.i64()?;
-                let _aborted = d.array(|d| Ok((d.i64()?, d.i64()?)))?;
+                let aborted = d.array(|d| Ok((d.i64()?, d.i64()?)))?;
                 let records = d.nullable_bytes()?.unwrap_or_default();
-                Ok((partition, error_code, high_watermark, records))
+                Ok((partition, error_code, high_watermark, aborted, records))
             })?;
             Ok((topic, parts))
         })?;
         let mut out = Vec::new();
         for (topic, parts) in responses {
-            for (partition, error_code, high_watermark, data) in parts {
+            for (partition, error_code, high_watermark, aborted, data) in parts {
                 let from = partitions
                     .iter()
                     .find(|(t, p, _)| *t == topic && *p == partition)
                     .map(|(_, _, o)| *o)
                     .unwrap_or_default();
+                let mut decode_error = None;
                 let (records, next_offset) = if error_code == 0 {
-                    records::decode_record_set(data, from)?
+                    records::decode_committed_record_set(data, from, &aborted).unwrap_or_else(|e| {
+                        decode_error = Some(e.0);
+                        (Vec::new(), None)
+                    })
                 } else {
                     (Vec::new(), None)
                 };
@@ -597,8 +688,13 @@ impl KafkaClient {
                     partition,
                     error_code,
                     high_watermark,
+                    truncated: error_code == 0
+                        && decode_error.is_none()
+                        && next_offset.is_none()
+                        && !data.is_empty(),
                     records,
                     next_offset,
+                    decode_error,
                 });
             }
         }
@@ -756,6 +852,95 @@ mod tests {
         sock.write_all(&e.into_bytes()).await.unwrap();
     }
 
+    /// Answer a connection's `ApiVersions` probe with every spoken API,
+    /// `Fetch` up to `fetch_max`.
+    async fn answer_api_versions(sock: &mut TcpStream, fetch_max: i16) {
+        let (key, version, corr, _) = read_request(sock).await;
+        assert_eq!((key, version), (API_API_VERSIONS, 0));
+        let apis: Vec<(i16, i16)> = SPOKEN_APIS
+            .iter()
+            .chain(SASL_APIS)
+            .map(|(k, _, v)| (*k, if *k == API_FETCH { fetch_max } else { *v + 3 }))
+            .collect();
+        let mut e = Encoder::new();
+        e.i16(0).array(&apis, |e, (k, max)| {
+            e.i16(*k).i16(0).i16(*max);
+        });
+        respond(sock, corr, e.into_bytes()).await;
+    }
+
+    #[test]
+    fn spoken_api_versions_are_checked_against_the_broker() {
+        let all: Vec<(i16, i16, i16)> = SPOKEN_APIS
+            .iter()
+            .chain(SASL_APIS)
+            .map(|(k, _, v)| (*k, 0, *v))
+            .collect();
+        assert!(unsupported_apis(&all, true).is_empty());
+        // A broker whose Fetch starts at v5, and no SASL APIs (only needed
+        // with SASL).
+        let narrowed: Vec<(i16, i16, i16)> = all
+            .iter()
+            .filter(|(k, _, _)| *k != API_SASL_HANDSHAKE)
+            .map(|(k, min, max)| {
+                if *k == API_FETCH {
+                    (*k, 5, 12)
+                } else {
+                    (*k, *min, *max)
+                }
+            })
+            .collect();
+        assert_eq!(
+            unsupported_apis(&narrowed, false),
+            vec!["Fetch v4".to_string()]
+        );
+        assert_eq!(
+            unsupported_apis(&narrowed, true),
+            vec!["Fetch v4".to_string(), "SaslHandshake v1".to_string()]
+        );
+    }
+
+    #[test]
+    fn credentials_debug_output_hides_the_password() {
+        let creds = SaslCredentials {
+            mechanism: SaslMechanism::Scram(ScramAlgorithm::Sha512),
+            username: "alice".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let client = KafkaClient::new(vec!["b:9092".to_string()], "c", Some(creds.clone()));
+        for shown in [format!("{creds:?}"), format!("{client:?}")] {
+            assert!(
+                shown.contains("alice") && !shown.contains("hunter2"),
+                "{shown}"
+            );
+        }
+        let mut scram = scram::ScramClient::new(
+            ScramAlgorithm::Sha256,
+            "alice",
+            "hunter2",
+            "nonce".to_string(),
+        );
+        scram.client_final("r=nonce123,s=AAAA,i=4096").unwrap();
+        assert!(!format!("{scram:?}").contains("hunter2"));
+    }
+
+    /// A broker without the API versions the client speaks is reported as
+    /// UNSUPPORTED_VERSION, naming what is missing.
+    #[tokio::test]
+    async fn an_unsupported_broker_is_reported_as_such() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let broker = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            answer_api_versions(&mut sock, 3).await;
+        });
+        let mut client = KafkaClient::new(vec![addr], "test", None);
+        let err = client.metadata(&[]).await.unwrap_err();
+        assert_eq!(err.broker_code(), Some(ERROR_UNSUPPORTED_VERSION));
+        assert!(err.to_string().contains("Fetch v4"), "{err}");
+        broker.await.unwrap();
+    }
+
     /// The client's requests decode as the broker reads them, and its
     /// responses are read back: Metadata, then a group commit and fetch.
     #[tokio::test]
@@ -764,6 +949,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let broker = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
+            answer_api_versions(&mut sock, 12).await;
             // Metadata v4.
             let (key, version, corr, body) = read_request(&mut sock).await;
             assert_eq!((key, version), (API_METADATA, 4));
@@ -850,6 +1036,7 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let broker = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
+            answer_api_versions(&mut sock, 12).await;
             let (key, _, corr, body) = read_request(&mut sock).await;
             assert_eq!(key, API_SASL_HANDSHAKE);
             assert_eq!(Decoder::new(&body).string().unwrap(), "PLAIN");

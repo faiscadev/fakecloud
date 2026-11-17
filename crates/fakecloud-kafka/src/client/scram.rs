@@ -66,7 +66,6 @@ impl ScramAlgorithm {
 }
 
 /// One SCRAM exchange.
-#[derive(Debug)]
 pub struct ScramClient {
     algorithm: ScramAlgorithm,
     password: String,
@@ -75,6 +74,17 @@ pub struct ScramClient {
     /// Set by [`Self::client_final`]: the salted password and auth message
     /// the server signature is checked against.
     exchange: Option<(Vec<u8>, String)>,
+}
+
+/// The password and the salted password never reach a log line.
+impl std::fmt::Debug for ScramClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScramClient")
+            .field("algorithm", &self.algorithm)
+            .field("client_first_bare", &self.client_first_bare)
+            .field("password", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// `saslname`: `=` and `,` escaped as `=3D` and `=2C`.

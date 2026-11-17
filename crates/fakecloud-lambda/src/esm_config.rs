@@ -586,6 +586,49 @@ pub fn create_configs(body: &Value, uuid: &str) -> Result<SourceConfigs, AwsServ
     })
 }
 
+/// The consumer group a Kafka mapping's stored config names.
+pub fn consumer_group(esm: &EventSourceMapping) -> Option<&str> {
+    esm.amazon_managed_kafka_event_source_config
+        .as_ref()
+        .or(esm.self_managed_kafka_event_source_config.as_ref())
+        .and_then(|c| c.get("ConsumerGroupId"))
+        .and_then(Value::as_str)
+}
+
+/// Refuse a new Kafka mapping whose `ConsumerGroupId` another Kafka mapping
+/// of the region already uses: "The consumer group ID must be unique among
+/// all your Kafka event sources" (the member's documentation). Two mappings
+/// in one group would each read every partition and commit over each
+/// other's offsets.
+pub fn check_consumer_group_unique<'a>(
+    configs: &SourceConfigs,
+    existing: impl IntoIterator<Item = &'a EventSourceMapping>,
+) -> Result<(), AwsServiceError> {
+    let Some(group) = configs
+        .amazon_managed_kafka
+        .as_ref()
+        .or(configs.self_managed_kafka.as_ref())
+        .and_then(|c| c.get("ConsumerGroupId"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    if let Some(other) = existing
+        .into_iter()
+        .find(|m| consumer_group(m) == Some(group))
+    {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::CONFLICT,
+            "ResourceConflictException",
+            format!(
+                "The consumer group ID {group} is already used by event source mapping {}. The consumer group ID must be unique among all your Kafka event sources.",
+                other.uuid
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// A stored Kafka config updated by a request's: `ConsumerGroupId` and
 /// `ConsumptionMode` are fixed at creation (resending the same value is
 /// fine), `SchemaRegistryConfig` is replaced (an empty one removes it).
@@ -765,6 +808,39 @@ mod tests {
             .expect_err(&format!("{body} was accepted"))
             .message()
             .to_string()
+    }
+
+    #[test]
+    fn a_consumer_group_id_is_unique_among_kafka_mappings() {
+        let existing = mapping(&json!({
+            "EventSourceArn": MSK,
+            "AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "orders"},
+        }));
+        // A self-managed mapping may not join the same group either.
+        let clash = create_configs(
+            &json!({
+                "SelfManagedEventSource": {"Endpoints": {"KAFKA_BOOTSTRAP_SERVERS": ["b:9092"]}},
+                "SelfManagedKafkaEventSourceConfig": {"ConsumerGroupId": "orders"},
+            }),
+            "uuid-2",
+        )
+        .unwrap();
+        let err = check_consumer_group_unique(&clash, [&existing]).unwrap_err();
+        assert_eq!(err.code(), "ResourceConflictException");
+        assert_eq!(err.status(), http::StatusCode::CONFLICT);
+        assert!(err.message().contains("uuid-1"), "{}", err.message());
+        // Another group, the defaulted UUID group, and a non-Kafka source
+        // are fine.
+        let other = create_configs(
+            &json!({"EventSourceArn": MSK, "AmazonManagedKafkaEventSourceConfig": {"ConsumerGroupId": "audit"}}),
+            "uuid-3",
+        )
+        .unwrap();
+        assert!(check_consumer_group_unique(&other, [&existing]).is_ok());
+        let defaulted = create_configs(&json!({"EventSourceArn": MSK}), "uuid-4").unwrap();
+        assert!(check_consumer_group_unique(&defaulted, [&existing]).is_ok());
+        let sqs = create_configs(&json!({"EventSourceArn": QUEUE}), "uuid-5").unwrap();
+        assert!(check_consumer_group_unique(&sqs, [&existing]).is_ok());
     }
 
     #[test]

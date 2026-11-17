@@ -48,6 +48,23 @@ pub fn decode_record_set(
     data: &[u8],
     from_offset: i64,
 ) -> WireResult<(Vec<ConsumedRecord>, Option<i64>)> {
+    decode_committed_record_set(data, from_offset, &[])
+}
+
+/// [`decode_record_set`] for a `read_committed` fetch: the records of
+/// transactions the partition's `aborted` list (`(producer id, first
+/// offset)`, from the Fetch response) names are dropped, as a Java consumer
+/// drops them. A producer's transaction is aborted from its first offset
+/// until the producer's ABORT marker.
+pub fn decode_committed_record_set(
+    data: &[u8],
+    from_offset: i64,
+    aborted: &[(i64, i64)],
+) -> WireResult<(Vec<ConsumedRecord>, Option<i64>)> {
+    let mut aborted = aborted.to_vec();
+    aborted.sort_by_key(|(_, first)| *first);
+    let mut pending_aborts = aborted.into_iter().peekable();
+    let mut aborting = std::collections::HashSet::new();
     let mut d = Decoder::new(data);
     let mut records = Vec::new();
     let mut next_offset: Option<i64> = None;
@@ -61,27 +78,48 @@ pub fn decode_record_set(
         if batch_len as usize > d.remaining() {
             break;
         }
-        let batch = d.take(batch_len as usize)?;
-        let last = decode_batch(base_offset, batch, from_offset, &mut records)?;
-        next_offset = Some(next_offset.map_or(last + 1, |n: i64| n.max(last + 1)));
+        let batch = decode_batch(base_offset, d.take(batch_len as usize)?, from_offset)?;
+        next_offset =
+            Some(next_offset.map_or(batch.last_offset + 1, |n: i64| n.max(batch.last_offset + 1)));
+        if batch.transactional {
+            while let Some((producer, _)) =
+                pending_aborts.next_if(|(_, first)| *first <= batch.last_offset)
+            {
+                aborting.insert(producer);
+            }
+        }
+        match batch.control {
+            // A transaction marker is no record; an ABORT ends the abort.
+            Some(abort) => {
+                if abort {
+                    aborting.remove(&batch.producer_id);
+                }
+            }
+            None if batch.transactional && aborting.contains(&batch.producer_id) => {}
+            None => records.extend(batch.records),
+        }
     }
     Ok((records, next_offset))
 }
 
-/// Decode one batch (the bytes after its `batchLength`), appending its
-/// records; returns the batch's last offset.
-fn decode_batch(
-    base_offset: i64,
-    batch: &[u8],
-    from_offset: i64,
-    out: &mut Vec<ConsumedRecord>,
-) -> WireResult<i64> {
+/// One decoded batch.
+struct Batch {
+    last_offset: i64,
+    producer_id: i64,
+    transactional: bool,
+    /// For a control batch, whether its marker is an ABORT.
+    control: Option<bool>,
+    records: Vec<ConsumedRecord>,
+}
+
+/// Decode one batch (the bytes after its `batchLength`).
+fn decode_batch(base_offset: i64, batch: &[u8], from_offset: i64) -> WireResult<Batch> {
     let mut b = Decoder::new(batch);
     let _partition_leader_epoch = b.i32()?;
     let magic = b.i8()?;
     if magic != 2 {
         return Err(WireError(format!(
-            "record batch magic {magic} (message format v{magic}) is not supported"
+            "the partition holds messages in the legacy message format v{magic} (magic {magic}) at offset {base_offset}, which fakecloud's Kafka poller does not read; only record batches (magic 2, Kafka 0.11+) are supported"
         )));
     }
     let crc = b.u32()?;
@@ -94,15 +132,17 @@ fn decode_batch(
     let last_offset_delta = b.i32()?;
     let base_timestamp = b.i64()?;
     let max_timestamp = b.i64()?;
-    let _producer_id = b.i64()?;
+    let producer_id = b.i64()?;
     let _producer_epoch = b.i16()?;
     let _base_sequence = b.i32()?;
     let count = b.i32()?;
-    let last_offset = base_offset + i64::from(last_offset_delta);
-    // Transaction markers are not records a consumer sees.
-    if attributes & 0x20 != 0 {
-        return Ok(last_offset);
-    }
+    let mut out = Batch {
+        last_offset: base_offset + i64::from(last_offset_delta),
+        producer_id,
+        transactional: attributes & 0x10 != 0,
+        control: None,
+        records: Vec::new(),
+    };
     let timestamp_type = if attributes & 0x08 != 0 {
         TimestampType::LogAppendTime
     } else {
@@ -110,6 +150,26 @@ fn decode_batch(
     };
     let payload = decompress(attributes & 0x07, b.rest())?;
     let mut r = Decoder::new(&payload);
+    if attributes & 0x20 != 0 {
+        // A control record's key is `version (i16), type (i16)`: 0 ABORT,
+        // 1 COMMIT.
+        let mut abort = false;
+        if count > 0 {
+            let len = r.varint()?;
+            let mut rec = Decoder::new(r.take(len.max(0) as usize)?);
+            let _attributes = rec.i8()?;
+            let _ts = rec.varlong()?;
+            let _off = rec.varint()?;
+            if let Some(key) = rec.var_bytes()? {
+                let mut k = Decoder::new(key);
+                let _version = k.i16()?;
+                abort = k.i16()? == 0;
+            }
+        }
+        out.control = Some(abort);
+        return Ok(out);
+    }
+    let out_records = &mut out.records;
     for _ in 0..count.max(0) {
         let len = r.varint()?;
         if len < 0 {
@@ -134,7 +194,7 @@ fn decode_batch(
         if offset < from_offset {
             continue;
         }
-        out.push(ConsumedRecord {
+        out_records.push(ConsumedRecord {
             offset,
             timestamp_ms: match timestamp_type {
                 TimestampType::LogAppendTime => max_timestamp,
@@ -146,7 +206,7 @@ fn decode_batch(
             headers,
         });
     }
-    Ok(last_offset)
+    Ok(out)
 }
 
 /// The xerial framing the Java client writes Snappy batches in.
@@ -233,6 +293,26 @@ pub mod encode {
         extra_attributes: i16,
         records: &[TestRecord<'_>],
     ) -> Vec<u8> {
+        producer_batch(
+            base_offset,
+            base_timestamp,
+            codec,
+            extra_attributes,
+            -1,
+            records,
+        )
+    }
+
+    /// [`batch`] written by producer `producer_id` (0x10 in
+    /// `extra_attributes` makes it transactional).
+    pub fn producer_batch(
+        base_offset: i64,
+        base_timestamp: i64,
+        codec: i16,
+        extra_attributes: i16,
+        producer_id: i64,
+        records: &[TestRecord<'_>],
+    ) -> Vec<u8> {
         let mut body = Encoder::new();
         for (i, (ts_delta, key, value, headers)) in records.iter().enumerate() {
             let mut rec = Encoder::new();
@@ -266,7 +346,7 @@ pub mod encode {
             .i32(records.len().saturating_sub(1) as i32)
             .i64(base_timestamp)
             .i64(max_ts)
-            .i64(-1)
+            .i64(producer_id)
             .i16(-1)
             .i32(-1)
             .i32(records.len() as i32)
@@ -371,6 +451,66 @@ mod tests {
         let (records, next) = decode_record_set(&data, 0).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(next, Some(2));
+    }
+
+    #[test]
+    fn read_committed_drops_aborted_transactions() {
+        use super::encode::producer_batch;
+        let txn = 0x10;
+        let control = 0x30;
+        let mut data = producer_batch(
+            0,
+            0,
+            0,
+            txn,
+            7,
+            &[(0, None, Some(b"a"), vec![]), (0, None, Some(b"b"), vec![])],
+        );
+        data.extend(producer_batch(
+            2,
+            0,
+            0,
+            control,
+            7,
+            &[(0, Some(b"\0\0\0\0"), None, vec![])],
+        ));
+        data.extend(producer_batch(
+            3,
+            0,
+            0,
+            txn,
+            8,
+            &[(0, None, Some(b"c"), vec![])],
+        ));
+        data.extend(producer_batch(
+            4,
+            0,
+            0,
+            control,
+            8,
+            &[(0, Some(b"\0\0\0\x01"), None, vec![])],
+        ));
+        data.extend(batch(5, 0, 0, 0, &[(0, None, Some(b"d"), vec![])]));
+        let values = |records: &[ConsumedRecord]| -> Vec<Vec<u8>> {
+            records.iter().map(|r| r.value.clone().unwrap()).collect()
+        };
+        let (records, next) = decode_committed_record_set(&data, 0, &[(7, 0)]).unwrap();
+        assert_eq!(values(&records), vec![b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(next, Some(6));
+        // Without the aborted list (read_uncommitted) every data record reads.
+        let (records, _) = decode_record_set(&data, 0).unwrap();
+        assert_eq!(records.len(), 4);
+    }
+
+    #[test]
+    fn legacy_message_sets_are_refused_with_a_clear_reason() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0i64.to_be_bytes());
+        data.extend_from_slice(&14i32.to_be_bytes());
+        // crc, magic 1, attributes, timestamp...
+        data.extend_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let err = decode_record_set(&data, 0).unwrap_err();
+        assert!(err.0.contains("legacy message format v1"), "{err}");
     }
 
     #[test]
