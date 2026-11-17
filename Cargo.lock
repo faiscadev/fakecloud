@@ -6948,6 +6948,7 @@ dependencies = [
  "fakecloud-dynamodb",
  "fakecloud-persistence",
  "flate2",
+ "futures-util",
  "hex",
  "http 1.4.0",
  "jsonata-core",

@@ -316,6 +316,103 @@ async fn map_run_children_log_under_the_parent_machine() {
     assert_eq!(map_run_started["details"], json!({}));
 }
 
+// Stopping the parent logs its abort and the abort of each map run child it
+// stopped, the child's naming its map run and parent.
+#[tokio::test]
+async fn a_stopped_map_run_logs_its_aborted_children() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let logs = server.logs_client().await;
+    logs.create_log_group()
+        .log_group_name("/sfn/stopped")
+        .send()
+        .await
+        .unwrap();
+    let machine = create_machine(
+        &client,
+        "logged-stopped",
+        aws_sdk_sfn::types::StateMachineType::Standard,
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map","Label":"lbl",
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                "StartAt":"W","States":{"W":{"Type":"Wait","Seconds":60,"End":true}}
+            },
+            "End":true
+        }}}),
+        logging("/sfn/stopped", LogLevel::Error, false),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input(r#"["a"]"#)
+        .send()
+        .await
+        .unwrap();
+    let parent = started.execution_arn();
+    let mut run_arn = None;
+    for _ in 0..100 {
+        let runs = client
+            .list_map_runs()
+            .execution_arn(parent)
+            .send()
+            .await
+            .unwrap();
+        if let Some(run) = runs.map_runs().first() {
+            let children = client
+                .list_executions()
+                .map_run_arn(run.map_run_arn())
+                .send()
+                .await
+                .unwrap();
+            if !children.executions().is_empty() {
+                run_arn = Some(run.map_run_arn().to_string());
+                break;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    let run_arn = run_arn.expect("the map run started no child");
+    client
+        .stop_execution()
+        .execution_arn(parent)
+        .error("Halt")
+        .cause("enough")
+        .send()
+        .await
+        .unwrap();
+
+    let lines = log_lines(&logs, "/sfn/stopped", 2).await;
+    let events: Vec<Value> = lines
+        .iter()
+        .map(|(_, m)| serde_json::from_str(m).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2, "{lines:?}");
+    assert!(
+        events.iter().all(|e| e["type"] == "ExecutionAborted"),
+        "{lines:?}"
+    );
+    let parent_event = events
+        .iter()
+        .find(|e| e["execution_arn"] == parent)
+        .unwrap();
+    assert_eq!(
+        parent_event["details"],
+        json!({"cause": "enough", "error": "Halt"})
+    );
+    let child = events
+        .iter()
+        .find(|e| e["execution_arn"] != parent)
+        .unwrap();
+    assert_eq!(child["map_run_arn"], run_arn.as_str());
+    assert_eq!(child["parent_execution_arn"], parent);
+    assert_eq!(
+        child["details"]["cause"],
+        format!("The map run execution [{run_arn}] which was managing this resource was aborted")
+    );
+}
+
 // A logging configuration naming a log group that doesn't exist is refused, as
 // recorded against AWS.
 #[tokio::test]
