@@ -1392,7 +1392,13 @@ mod tests {
 
     #[tokio::test]
     async fn activemq_batch_is_acked_after_the_function_succeeds() {
-        let state = lambda_state_with(mapping("esm-1"));
+        // The batch closes on size, not on the window: with a zero window a
+        // slow reader can see the second message only after the first batch
+        // has gone out.
+        let mut m = mapping("esm-1");
+        m.batch_size = 2;
+        m.maximum_batching_window_in_seconds = Some(5);
+        let state = lambda_state_with(m);
         let (inner, payloads) = inner_with(
             state.clone(),
             LambdaInvocationOutput::success(b"{}".to_vec()),
