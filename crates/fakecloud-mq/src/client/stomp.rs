@@ -28,7 +28,7 @@ impl StompFrame {
 /// An authenticated STOMP 1.2 session.
 pub struct StompConnection {
     stream: TcpStream,
-    buf: Vec<u8>,
+    buf: FrameBuffer,
 }
 
 impl StompConnection {
@@ -40,7 +40,7 @@ impl StompConnection {
         let _ = stream.set_nodelay(true);
         let mut conn = Self {
             stream,
-            buf: Vec::new(),
+            buf: FrameBuffer::default(),
         };
         // CONNECT headers are never escaped (STOMP 1.2, "Value Encoding").
         let connect = format!(
@@ -115,7 +115,7 @@ impl StompConnection {
     /// returned like any other; callers decide what it means.
     pub async fn read_frame(&mut self) -> Result<StompFrame, ClientError> {
         loop {
-            if let Some(frame) = parse_frame(&mut self.buf)? {
+            if let Some(frame) = self.buf.parse()? {
                 return Ok(frame);
             }
             let mut chunk = [0u8; 8192];
@@ -123,7 +123,7 @@ impl StompConnection {
             if n == 0 {
                 return Err(ClientError::Closed);
             }
-            self.buf.extend_from_slice(&chunk[..n]);
+            self.buf.bytes.extend_from_slice(&chunk[..n]);
         }
     }
 
@@ -215,43 +215,125 @@ fn unescape(s: &str) -> String {
     out
 }
 
-/// Parse one frame off the front of `buf`, consuming it, or `None` when the
-/// buffer does not hold a whole frame yet. Leading end-of-line bytes
-/// (heart-beats and the optional EOLs after a frame's NUL) are skipped.
-fn parse_frame(buf: &mut Vec<u8>) -> Result<Option<StompFrame>, ClientError> {
-    let start = buf
-        .iter()
-        .position(|b| *b != b'\n' && *b != b'\r')
-        .unwrap_or(buf.len());
-    if start > 0 {
-        buf.drain(..start);
-    }
-    if buf.is_empty() {
-        return Ok(None);
-    }
-    // The header block ends at the first blank line.
-    let mut pos = 0;
-    let mut lines: Vec<String> = Vec::new();
-    loop {
-        let Some(nl) = buf[pos..].iter().position(|b| *b == b'\n') else {
-            return Ok(None);
+/// The header block of the frame being read.
+struct Head {
+    body_start: usize,
+    command: String,
+    headers: Vec<(String, String)>,
+    content_length: Option<usize>,
+}
+
+/// Bytes read off the connection, parsed into frames incrementally: the
+/// header block is parsed once, and the searches for its end and for a
+/// body's NUL resume where the previous read left them, so a large frame
+/// arriving in many reads costs linear time. A frame over
+/// [`super::MAX_FRAME_BYTES`] is [`ClientError::FrameTooLarge`].
+#[derive(Default)]
+struct FrameBuffer {
+    bytes: Vec<u8>,
+    head: Option<Head>,
+    /// How far the current search has got without finding its terminator.
+    scan: usize,
+}
+
+impl FrameBuffer {
+    /// Parse one frame off the front of the buffer, consuming it, or `None`
+    /// when the buffer does not hold a whole frame yet. Leading end-of-line
+    /// bytes (heart-beats and the optional EOLs after a frame's NUL) are
+    /// skipped.
+    fn parse(&mut self) -> Result<Option<StompFrame>, ClientError> {
+        if self.head.is_none() {
+            let start = self
+                .bytes
+                .iter()
+                .position(|b| *b != b'\n' && *b != b'\r')
+                .unwrap_or(self.bytes.len());
+            if start > 0 {
+                self.bytes.drain(..start);
+                self.scan = self.scan.saturating_sub(start);
+            }
+            if self.bytes.is_empty() {
+                return Ok(None);
+            }
+            // The header block ends at the first blank line (`\n\n` or
+            // `\n\r\n`); the frame starts with a non-EOL byte, so a blank
+            // line always follows a newline.
+            let from = self.scan.max(1);
+            let end = (from..self.bytes.len()).find(|&i| {
+                self.bytes[i] == b'\n'
+                    && (self.bytes[i - 1] == b'\n'
+                        || (i >= 2 && self.bytes[i - 1] == b'\r' && self.bytes[i - 2] == b'\n'))
+            });
+            let Some(end) = end else {
+                self.scan = self.bytes.len();
+                return self.check_size(0).map(|()| None);
+            };
+            self.head = Some(parse_head(&self.bytes[..end], end + 1)?);
+            self.scan = end + 1;
+        }
+        let head = self.head.as_ref().expect("header block parsed");
+        let body_start = head.body_start;
+        let body_end = match head.content_length {
+            Some(len) => {
+                if len > super::MAX_FRAME_BYTES {
+                    return Err(ClientError::FrameTooLarge(len));
+                }
+                if self.bytes.len() < body_start + len + 1 {
+                    return Ok(None);
+                }
+                if self.bytes[body_start + len] != 0 {
+                    return Err(ClientError::Protocol(
+                        "frame body is not NUL-terminated at its content-length".to_string(),
+                    ));
+                }
+                body_start + len
+            }
+            None => {
+                let from = self.scan.max(body_start);
+                match self.bytes[from..].iter().position(|b| *b == 0) {
+                    Some(n) => from + n,
+                    None => {
+                        self.scan = self.bytes.len();
+                        return self.check_size(body_start).map(|()| None);
+                    }
+                }
+            }
         };
-        let mut line = &buf[pos..pos + nl];
-        if line.last() == Some(&b'\r') {
-            line = &line[..line.len() - 1];
-        }
-        pos += nl + 1;
-        if line.is_empty() {
-            break;
-        }
-        lines.push(String::from_utf8_lossy(line).into_owned());
+        let head = self.head.take().expect("header block parsed");
+        let body = self.bytes[body_start..body_end].to_vec();
+        self.bytes.drain(..body_end + 1);
+        self.scan = 0;
+        Ok(Some(StompFrame {
+            command: head.command,
+            headers: head.headers,
+            body,
+        }))
     }
-    let mut lines = lines.into_iter();
+
+    /// Refuse a partial frame that has already grown past the limit.
+    fn check_size(&self, body_start: usize) -> Result<(), ClientError> {
+        let size = self.bytes.len() - body_start;
+        if size > super::MAX_FRAME_BYTES {
+            return Err(ClientError::FrameTooLarge(size));
+        }
+        Ok(())
+    }
+}
+
+/// Parse a frame's header block (its command and header lines, without the
+/// blank line ending it).
+fn parse_head(block: &[u8], body_start: usize) -> Result<Head, ClientError> {
+    let mut lines = block.split(|b| *b == b'\n').map(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        String::from_utf8_lossy(line).into_owned()
+    });
     let command = lines
         .next()
+        .filter(|c| !c.is_empty())
         .ok_or_else(|| ClientError::Protocol("frame without a command".to_string()))?;
     let unescaped = command != "CONNECTED";
     let headers: Vec<(String, String)> = lines
+        .filter(|line| !line.is_empty())
         .map(|line| {
             let (k, v) = line.split_once(':').unwrap_or((line.as_str(), ""));
             if unescaped {
@@ -265,30 +347,12 @@ fn parse_frame(buf: &mut Vec<u8>) -> Result<Option<StompFrame>, ClientError> {
         .iter()
         .find(|(k, _)| k == "content-length")
         .and_then(|(_, v)| v.trim().parse::<usize>().ok());
-    let body_end = match content_length {
-        Some(len) => {
-            if buf.len() < pos + len + 1 {
-                return Ok(None);
-            }
-            if buf[pos + len] != 0 {
-                return Err(ClientError::Protocol(
-                    "frame body is not NUL-terminated at its content-length".to_string(),
-                ));
-            }
-            pos + len
-        }
-        None => match buf[pos..].iter().position(|b| *b == 0) {
-            Some(n) => pos + n,
-            None => return Ok(None),
-        },
-    };
-    let body = buf[pos..body_end].to_vec();
-    buf.drain(..body_end + 1);
-    Ok(Some(StompFrame {
+    Ok(Head {
+        body_start,
         command,
         headers,
-        body,
-    }))
+        content_length,
+    })
 }
 
 #[cfg(test)]
@@ -298,11 +362,11 @@ mod tests {
     #[test]
     fn parses_frames_split_across_reads() {
         let wire = b"\nMESSAGE\nmessage-id:ID\\c1\ndestination:/queue/a\n\nhello\0\nMESSAGE\ncontent-length:3\n\na\0b\0";
-        let mut buf = Vec::new();
+        let mut buf = FrameBuffer::default();
         let mut frames = Vec::new();
         for byte in wire {
-            buf.push(*byte);
-            while let Some(frame) = parse_frame(&mut buf).unwrap() {
+            buf.bytes.push(*byte);
+            while let Some(frame) = buf.parse().unwrap() {
                 frames.push(frame);
             }
         }
@@ -312,7 +376,42 @@ mod tests {
         assert_eq!(frames[0].body, b"hello");
         // A content-length body may hold NUL bytes.
         assert_eq!(frames[1].body, b"a\0b");
-        assert!(buf.is_empty());
+        assert!(buf.bytes.is_empty());
+    }
+
+    #[test]
+    fn a_large_text_frame_parses_as_it_streams_in() {
+        let body = vec![b'x'; 3 * 1024 * 1024];
+        let mut wire = b"MESSAGE\r\nmessage-id:1\r\n\r\n".to_vec();
+        wire.extend_from_slice(&body);
+        wire.push(0);
+        let mut buf = FrameBuffer::default();
+        let mut frames = Vec::new();
+        for chunk in wire.chunks(8192) {
+            buf.bytes.extend_from_slice(chunk);
+            if let Some(frame) = buf.parse().unwrap() {
+                frames.push(frame);
+            } else {
+                // A partial body is never rescanned from its start.
+                assert_eq!(buf.scan, buf.bytes.len());
+            }
+        }
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].header("message-id"), Some("1"));
+        assert_eq!(frames[0].body.len(), body.len());
+    }
+
+    #[test]
+    fn a_frame_over_the_limit_is_refused() {
+        let mut buf = FrameBuffer::default();
+        buf.bytes.extend_from_slice(b"MESSAGE\n\n");
+        buf.bytes.resize(super::super::MAX_FRAME_BYTES + 64, b'x');
+        assert!(matches!(buf.parse(), Err(ClientError::FrameTooLarge(_))));
+
+        let mut buf = FrameBuffer::default();
+        buf.bytes
+            .extend_from_slice(format!("MESSAGE\ncontent-length:{}\n\n", 1 << 30).as_bytes());
+        assert!(matches!(buf.parse(), Err(ClientError::FrameTooLarge(_))));
     }
 
     #[test]
@@ -323,8 +422,11 @@ mod tests {
 
     #[test]
     fn first_repeated_header_wins() {
-        let mut buf = b"MESSAGE\nfoo:1\nfoo:2\n\n\0".to_vec();
-        let frame = parse_frame(&mut buf).unwrap().unwrap();
+        let mut buf = FrameBuffer {
+            bytes: b"MESSAGE\nfoo:1\nfoo:2\n\n\0".to_vec(),
+            ..Default::default()
+        };
+        let frame = buf.parse().unwrap().unwrap();
         assert_eq!(frame.header("foo"), Some("1"));
     }
 }

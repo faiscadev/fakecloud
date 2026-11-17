@@ -11,6 +11,11 @@
 pub mod amqp;
 pub mod stomp;
 
+/// The largest message (STOMP frame / AMQP body) a client accepts. Anything
+/// bigger could never fit Lambda's 6 MB invocation payload anyway, and an
+/// unbounded buffer would let a broker exhaust fakecloud's memory.
+pub const MAX_FRAME_BYTES: usize = 7 * 1024 * 1024;
+
 /// A broker client failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -27,4 +32,7 @@ pub enum ClientError {
     Protocol(String),
     #[error("broker closed the connection")]
     Closed,
+    /// A message larger than [`MAX_FRAME_BYTES`] (its size so far).
+    #[error("message of {0} bytes exceeds the {MAX_FRAME_BYTES}-byte limit")]
+    FrameTooLarge(usize),
 }

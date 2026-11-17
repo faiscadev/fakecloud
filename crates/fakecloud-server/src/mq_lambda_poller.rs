@@ -47,8 +47,13 @@ use fakecloud_secretsmanager::SharedSecretsManagerState;
 const DEFAULT_BATCHING_WINDOW: Duration = Duration::from_millis(500);
 /// Lambda's synchronous invocation payload limit.
 const MAX_PAYLOAD_BYTES: usize = 6 * 1024 * 1024;
-/// Wait before reconnecting after a connection or configuration problem.
+/// Room kept in the payload for the event around the messages (event source,
+/// broker ARN, queue key).
+const PAYLOAD_ENVELOPE_BYTES: usize = 4096;
+/// Wait before reconnecting after a connection or configuration problem; it
+/// doubles while the same problem repeats, up to [`MAX_RECONNECT_DELAY`].
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 /// Wait before the broker redelivers a batch the function failed.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// How often the set of mappings is reconciled with the running consumers.
@@ -60,6 +65,11 @@ const RESULT_OK: &str = "OK";
 const RESULT_FUNCTION_FAILED: &str = "PROBLEM: Function call failed.";
 const RESULT_CONNECTION_ERROR: &str =
     "PROBLEM: Connection error. Please check your event source connection configuration.";
+/// A message that alone does not fit Lambda's 6 MB invocation payload is never
+/// delivered; it stays on the broker (handed back unacknowledged) until the
+/// broker's own policies move it.
+const RESULT_MESSAGE_TOO_LARGE: &str =
+    "PROBLEM: A message exceeds Lambda's 6 MB invocation payload limit and cannot be delivered.";
 
 /// STOMP headers that are message fields or protocol framing, not JMS
 /// properties.
@@ -120,6 +130,7 @@ impl From<ClientError> for SessionEnd {
                 "PROBLEM: Authentication failed. Please check the BASIC_AUTH secret of your event source mapping. ({m})"
             ),
             ClientError::Broker(m) => format!("PROBLEM: Broker error: {m}"),
+            ClientError::FrameTooLarge(_) => RESULT_MESSAGE_TOO_LARGE.to_string(),
             ClientError::Io(_) | ClientError::Protocol(_) | ClientError::Closed => {
                 RESULT_CONNECTION_ERROR.to_string()
             }
@@ -238,16 +249,55 @@ fn mq_mappings(lambda_state: &SharedLambdaState) -> Vec<MqMapping> {
 /// and reconnect.
 async fn consume(inner: Arc<Inner>, spec: MqMapping) {
     let filter = FilterSet::from_strings(spec.filter_patterns.iter());
+    let mut backoff = Backoff::default();
     loop {
         let end = session(&inner, &spec, &filter).await;
+        // A session that delivered a batch ended a run of problems.
+        if processing_result(&inner.lambda_state, &spec.uuid).as_deref() == Some(RESULT_OK) {
+            backoff = Backoff::default();
+        }
         let (result, delay) = match end {
             SessionEnd::Redeliver => (RESULT_FUNCTION_FAILED.to_string(), RETRY_DELAY),
-            SessionEnd::Problem(p) => (p, RECONNECT_DELAY),
+            SessionEnd::Problem(p) => {
+                let delay = backoff.next(&p);
+                (p, delay)
+            }
         };
         tracing::debug!(mapping = %spec.uuid, result = %result, "MQ->Lambda: consumer session ended");
         set_processing_result(&inner.lambda_state, &spec.uuid, &result);
         tokio::time::sleep(delay).await;
     }
+}
+
+/// The wait before reconnecting after a problem: [`RECONNECT_DELAY`],
+/// doubling while the same problem keeps ending sessions (an undeliverable
+/// message, a broker that stays down), up to [`MAX_RECONNECT_DELAY`].
+#[derive(Default)]
+struct Backoff {
+    last: Option<String>,
+    delay: Duration,
+}
+
+impl Backoff {
+    fn next(&mut self, problem: &str) -> Duration {
+        self.delay = if self.last.as_deref() == Some(problem) {
+            (self.delay * 2).min(MAX_RECONNECT_DELAY)
+        } else {
+            RECONNECT_DELAY
+        };
+        self.last = Some(problem.to_string());
+        self.delay
+    }
+}
+
+/// Mapping `uuid`'s current `LastProcessingResult`.
+fn processing_result(lambda_state: &SharedLambdaState, uuid: &str) -> Option<String> {
+    let accounts = lambda_state.read();
+    let result = accounts
+        .iter_regional()
+        .find_map(|(_, _, lambda)| lambda.event_source_mappings.get(uuid))
+        .and_then(|m| m.last_processing_result.clone());
+    result
 }
 
 async fn session(inner: &Inner, spec: &MqMapping, filter: &FilterSet) -> SessionEnd {
@@ -382,18 +432,26 @@ impl MessageSource for AmqpSource<'_> {
 /// Collect the next batch: block for its first message (or start from the one
 /// `carry` holds over), then take more until `batch_size`, until `window` has
 /// passed since the first, or until the next one would push the payload over
-/// Lambda's limit (it is then held over in `carry` for the next batch).
+/// Lambda's limit (it is then held over in `carry` for the next batch). A
+/// message too large to fit the payload even alone is
+/// [`ClientError::FrameTooLarge`]: the session ends without acknowledging it,
+/// so the broker keeps it.
 async fn collect_batch<S: MessageSource>(
     source: &mut S,
     carry: &mut Option<(Value, S::Ack)>,
     batch_size: usize,
     window: Duration,
 ) -> Result<Vec<(Value, S::Ack)>, ClientError> {
+    let budget = MAX_PAYLOAD_BYTES - PAYLOAD_ENVELOPE_BYTES;
     let mut items = Vec::new();
     let mut size = 0;
     let mut deadline = None;
     if let Some(held) = carry.take() {
-        size += record_size(&held.0);
+        let held_size = record_size(&held.0);
+        if held_size > budget {
+            return Err(ClientError::FrameTooLarge(held_size));
+        }
+        size += held_size;
         items.push(held);
         deadline = Some(Instant::now() + window);
     }
@@ -406,7 +464,10 @@ async fn collect_batch<S: MessageSource>(
             },
         };
         let next_size = record_size(&next.0);
-        if !items.is_empty() && size + next_size > MAX_PAYLOAD_BYTES {
+        if size + next_size > budget {
+            if items.is_empty() {
+                return Err(ClientError::FrameTooLarge(next_size));
+            }
             *carry = Some(next);
             break;
         }
@@ -1037,6 +1098,79 @@ mod tests {
         assert_eq!(second.iter().map(|(_, a)| *a).collect::<Vec<_>>(), [1]);
     }
 
+    #[tokio::test]
+    async fn a_message_too_large_for_any_payload_is_refused() {
+        let mut source = queued(1, MAX_PAYLOAD_BYTES);
+        let mut carry = None;
+        let err = collect_batch(&mut source, &mut carry, 10, Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::FrameTooLarge(_)));
+        match SessionEnd::from(err) {
+            SessionEnd::Problem(p) => assert_eq!(p, RESULT_MESSAGE_TOO_LARGE),
+            SessionEnd::Redeliver => panic!("expected a problem"),
+        }
+        // Held over behind a smaller message, it is refused once it leads.
+        let mut source = QueuedSource(
+            vec![
+                (json!({"data": "small"}), 0u64),
+                (json!({"data": "x".repeat(MAX_PAYLOAD_BYTES)}), 1u64),
+            ]
+            .into(),
+        );
+        let first = collect_batch(&mut source, &mut carry, 10, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(
+            collect_batch(&mut source, &mut carry, 10, Duration::from_secs(60))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_repeating_problem_backs_off_up_to_a_minute() {
+        let mut backoff = Backoff::default();
+        assert_eq!(backoff.next("a"), RECONNECT_DELAY);
+        assert_eq!(backoff.next("a"), RECONNECT_DELAY * 2);
+        assert_eq!(backoff.next("a"), RECONNECT_DELAY * 4);
+        for _ in 0..10 {
+            backoff.next("a");
+        }
+        assert_eq!(backoff.next("a"), MAX_RECONNECT_DELAY);
+        // A different problem starts over.
+        assert_eq!(backoff.next("b"), RECONNECT_DELAY);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_activemq_message_is_never_acked_or_invoked() {
+        let state = lambda_state_with(mapping("esm-1"));
+        let (inner, payloads) = inner_with(
+            state.clone(),
+            LambdaInvocationOutput::success(b"{}".to_vec()),
+        );
+        let s = spec(&state);
+        let big = format!(
+            "MESSAGE\nsubscription:fakecloud-esm\nmessage-id:ID:big\nack:big\ndestination:/queue/orders\n\n{}\0",
+            "x".repeat(5 * 1024 * 1024)
+        );
+        let (addr, broker) = scripted_stomp_broker(vec![big]).await;
+        let end = tokio::time::timeout(
+            Duration::from_secs(10),
+            activemq_session(&inner, &s, &FilterSet::default(), &addr, "u", "p"),
+        )
+        .await
+        .expect("the oversized message ends the session");
+        match end {
+            SessionEnd::Problem(p) => assert_eq!(p, RESULT_MESSAGE_TOO_LARGE),
+            SessionEnd::Redeliver => panic!("expected the size problem"),
+        }
+        let sent = broker.await.unwrap();
+        assert!(payloads.lock().unwrap().is_empty());
+        assert!(!sent.contains("ACK"), "nothing acked: {sent}");
+    }
+
     struct AnsweringLambda {
         output: LambdaInvocationOutput,
         payloads: Arc<Mutex<Vec<Value>>>,
@@ -1213,9 +1347,10 @@ mod tests {
     /// A scripted STOMP broker on loopback: accepts one session, delivers
     /// `messages`, and reports every frame the client sent after its
     /// SUBSCRIBE until the client goes away.
-    async fn scripted_stomp_broker(
-        messages: Vec<&'static str>,
+    async fn scripted_stomp_broker<M: Into<String>>(
+        messages: Vec<M>,
     ) -> (String, tokio::task::JoinHandle<String>) {
+        let messages: Vec<String> = messages.into_iter().map(Into::into).collect();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let handle = tokio::spawn(async move {

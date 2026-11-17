@@ -35,8 +35,9 @@ pub enum FieldValue {
     I64(i64),
     F32(f32),
     F64(f64),
-    /// `(scale, value)`: `value / 10^scale`.
-    Decimal(u8, u32),
+    /// `(scale, value)`: `value / 10^scale`, the value a signed 32-bit
+    /// integer as RabbitMQ and its clients encode it.
+    Decimal(u8, i32),
     LongString(Vec<u8>),
     Array(Vec<FieldValue>),
     /// Seconds since the epoch.
@@ -348,6 +349,12 @@ impl AmqpConnection {
                     let _class = dec.u16()?;
                     let _weight = dec.u16()?;
                     let size = dec.u64()?;
+                    if size > super::MAX_FRAME_BYTES as u64 {
+                        // Dropping the connection hands it back to its queue.
+                        return Err(ClientError::FrameTooLarge(
+                            usize::try_from(size).unwrap_or(usize::MAX),
+                        ));
+                    }
                     let properties = decode_properties(&mut dec)?;
                     let pending = self.pending.as_mut().ok_or_else(|| {
                         ClientError::Protocol("content header without a delivery".to_string())
@@ -612,7 +619,7 @@ impl Enc {
             FieldValue::Decimal(scale, n) => {
                 self.u8(b'D');
                 self.u8(*scale);
-                self.u32(*n);
+                self.0.extend_from_slice(&n.to_be_bytes());
             }
             FieldValue::LongString(b) => {
                 self.u8(b'S');
@@ -711,7 +718,7 @@ impl Dec {
             b'd' => FieldValue::F64(f64::from_bits(self.u64()?)),
             b'D' => {
                 let scale = self.u8()?;
-                FieldValue::Decimal(scale, self.u32()?)
+                FieldValue::Decimal(scale, self.u32()? as i32)
             }
             b'S' => FieldValue::LongString(self.longstr()?),
             b'A' => {
@@ -892,6 +899,15 @@ mod tests {
         assert_eq!(frames[0].kind, FRAME_HEARTBEAT);
         assert_eq!(frames[1].channel, 1);
         assert_eq!(frames[1].payload, b"hi");
+    }
+
+    #[test]
+    fn decimals_are_signed() {
+        let mut enc = Enc(Vec::new());
+        enc.value(&FieldValue::Decimal(2, -1234));
+        assert_eq!(enc.0, [b'D', 2, 0xFF, 0xFF, 0xFB, 0x2E]);
+        let mut dec = Dec::new(enc.0.clone());
+        assert_eq!(dec.value().unwrap(), FieldValue::Decimal(2, -1234));
     }
 
     #[test]

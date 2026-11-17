@@ -16,7 +16,7 @@
 //!   invoking the Lambda. Once `BatchSize` is reached or the window
 //!   expires, the batch is dispatched.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,10 +87,43 @@ impl Drop for InFlightSlot {
     }
 }
 
+/// `(queue ARN, message id)` of every message a batch of this poller has
+/// with the function.
+type HeldSet = Arc<parking_lot::Mutex<HashSet<(String, String)>>>;
+
+/// A batch's claim on its messages: until it is dropped (the batch's outcome
+/// applied, or the receive undone) the poller never receives them again,
+/// whatever their visibility timeout.
+struct HeldMessages {
+    set: HeldSet,
+    keys: Vec<(String, String)>,
+}
+
+impl HeldMessages {
+    fn hold(set: &HeldSet, queue_arn: &str, ids: impl Iterator<Item = String>) -> Self {
+        let keys: Vec<(String, String)> = ids.map(|id| (queue_arn.to_string(), id)).collect();
+        set.lock().extend(keys.iter().cloned());
+        Self {
+            set: set.clone(),
+            keys,
+        }
+    }
+}
+
+impl Drop for HeldMessages {
+    fn drop(&mut self) {
+        let mut set = self.set.lock();
+        for key in &self.keys {
+            set.remove(key);
+        }
+    }
+}
+
 /// A batch taken off the queue and ready for the function.
 struct PreparedBatch {
     payload: String,
     message_ids: Vec<String>,
+    _held: HeldMessages,
 }
 
 /// What one attempt to take a batch found.
@@ -130,6 +163,8 @@ pub struct SqsLambdaPoller {
     snapshot_hook: Option<SnapshotHook>,
     /// Batches each mapping has with the function right now.
     in_flight: InFlightCounts,
+    /// The messages of those batches.
+    held: HeldSet,
 }
 
 impl SqsLambdaPoller {
@@ -141,6 +176,7 @@ impl SqsLambdaPoller {
             kms_hook: None,
             snapshot_hook: None,
             in_flight: Arc::default(),
+            held: Arc::default(),
         }
     }
 
@@ -278,16 +314,17 @@ impl SqsLambdaPoller {
         batching: &mut BatchingState,
         now: DateTime<Utc>,
     ) -> Taken {
-        // Pull up to BatchSize visible messages and immediately mark
-        // them invisible for the queue's `VisibilityTimeout`. Real SQS
-        // hides in-flight messages from other consumers (and from later
-        // poll ticks of this same mapping) until the consumer either
-        // deletes them or the timeout expires. Without setting
-        // visibility, two consecutive poll cycles on a slow Lambda
-        // would re-deliver the same batch and the function would be
-        // invoked twice for one message — duplicates that real AWS
-        // doesn't produce inside a single visibility window.
-        let (messages, previous_visibility, hidden_until, account_id, queue_encrypted) = {
+        // Receive up to BatchSize messages the way ReceiveMessage does
+        // (`fakecloud_sqs::receive`): they move to the queue's in-flight set
+        // for its `VisibilityTimeout`, with a receipt handle and a counted
+        // receive, a FIFO group with a message in flight hands out nothing
+        // else, and a message past `maxReceiveCount` goes to the DLQ. The
+        // API's consumers and this mapping share that one in-flight set.
+        // Messages this poller still has with the function are also held
+        // back even after their visibility timeout runs out (a
+        // `VisibilityTimeout` of 0 would otherwise hand the same message to
+        // every concurrency slot of one poll).
+        let (messages, at_rest, account_id, queue_encrypted, dead_lettered) = {
             let mut sqs_mas = self.sqs_state.write();
             // The queue lives in the account and region its ARN names.
             let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) else {
@@ -301,7 +338,6 @@ impl SqsLambdaPoller {
             };
 
             let visibility_timeout: i64 = queue.visibility_timeout_secs();
-            let visible_at = now + chrono::Duration::seconds(visibility_timeout);
 
             // Same effective-key logic as the SQS service: SSE-KMS
             // wins when `KmsMasterKeyId` is set, otherwise SSE-SQS
@@ -319,56 +355,32 @@ impl SqsLambdaPoller {
                     .map(String::as_str)
                     == Some("true");
 
-            let mut batch = Vec::new();
-            let mut previous_visibility = Vec::new();
             let limit = mapping.batch_size.min(10) as usize;
-            // FIFO order: while a message group has a message in flight (or
-            // not yet visible), none of its later messages is handed out, so
-            // concurrent batches never reorder a group.
-            let blocked_groups: std::collections::HashSet<String> = if queue.is_fifo {
-                queue
-                    .messages
-                    .iter()
-                    .filter(|m| m.visible_at.is_some_and(|vis| vis > now))
-                    .filter_map(|m| m.message_group_id.clone())
-                    .collect()
-            } else {
-                Default::default()
-            };
-
-            for msg in queue.messages.iter_mut() {
-                if batch.len() >= limit {
-                    break;
-                }
-                if let Some(vis) = msg.visible_at {
-                    if vis > now {
-                        continue;
-                    }
-                }
-                if msg
-                    .message_group_id
-                    .as_ref()
-                    .is_some_and(|g| blocked_groups.contains(g))
-                {
-                    continue;
-                }
-                // Hide the message for the visibility window. The
-                // poller doesn't bump `receive_count` here because the
-                // batch may still get filtered out below — the count
-                // is bumped only when delivery actually fails (see the
-                // ack/fail block).
-                previous_visibility.push((msg.message_id.clone(), msg.visible_at));
-                msg.visible_at = Some(visible_at);
-                batch.push(msg.clone());
-            }
-
-            (batch, previous_visibility, visible_at, acct, encrypted)
+            let held = self.held.lock();
+            let queue_arn = mapping.queue_arn.clone();
+            let taken = queue.take_receivable(limit, visibility_timeout, now, &|m| {
+                held.contains(&(queue_arn.clone(), m.message_id.clone()))
+            });
+            drop(held);
+            queue.commit_taken(&taken.messages);
+            let dead_lettered = !taken.dead_letters.is_empty();
+            sqs.route_dead_letters(&mapping.queue_arn, taken.dead_letters);
+            let at_rest = taken.messages.clone();
+            (taken.messages, at_rest, acct, encrypted, dead_lettered)
         };
+        if dead_lettered {
+            self.persist().await;
+        }
 
         if messages.is_empty() {
             batching.window_started_at.remove(&mapping.uuid);
             return Taken::Nothing;
         }
+        let held = HeldMessages::hold(
+            &self.held,
+            &mapping.queue_arn,
+            messages.iter().map(|m| m.message_id.clone()),
+        );
 
         // Honor MaximumBatchingWindowInSeconds: hold a partial batch
         // open until the window expires, then dispatch what we have.
@@ -383,10 +395,7 @@ impl SqsLambdaPoller {
                 .or_insert(now);
             let elapsed = now.signed_duration_since(*window_start).num_seconds();
             if elapsed < mapping.max_batching_window_seconds {
-                let mut sqs_mas = self.sqs_state.write();
-                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
-                    undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
-                }
+                self.unreceive(&mapping.queue_arn, at_rest);
                 return Taken::Nothing;
             }
         }
@@ -406,8 +415,8 @@ impl SqsLambdaPoller {
         // message of the poll becomes in flight, none reaches the function
         // (not even as ciphertext), and no receive count moves -- the
         // message never approaches `maxReceiveCount` and stays in the queue
-        // until KMS opens it again. The poll is undone the same way here:
-        // the batch's visibility goes back to what it was before the poll.
+        // until KMS opens it again. The receive is undone the same way here:
+        // the batch goes back to the queue, visible, its receives uncounted.
         let messages = match open_batch(
             self.kms_hook.as_deref(),
             &account_id,
@@ -422,10 +431,7 @@ impl SqsLambdaPoller {
                     error = %err,
                     "SQS->Lambda poller: KMS refused a message body; nothing received"
                 );
-                let mut sqs_mas = self.sqs_state.write();
-                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
-                    undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
-                }
+                self.unreceive(&mapping.queue_arn, at_rest);
                 return Taken::Nothing;
             }
         };
@@ -475,9 +481,7 @@ impl SqsLambdaPoller {
                     .by_arn_mut(&mapping.queue_arn)
                     .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn))
                 {
-                    queue
-                        .messages
-                        .retain(|m| !dropped_ids.contains(&m.message_id));
+                    queue.delete_messages(&dropped_ids);
                 }
             }
             // Persist the filter-dropped (acked) removals so a restart doesn't
@@ -510,16 +514,38 @@ impl SqsLambdaPoller {
         Taken::Batch(PreparedBatch {
             payload,
             message_ids,
+            _held: held,
         })
+    }
+
+    /// Undo a receive whose batch never reached the function: `at_rest` (the
+    /// received messages as stored) leave the in-flight set and go back to
+    /// the front of the queue, visible, their receives uncounted.
+    fn unreceive(&self, queue_arn: &str, at_rest: Vec<fakecloud_sqs::SqsMessage>) {
+        let mut sqs_mas = self.sqs_state.write();
+        let Some(queue) = sqs_mas
+            .by_arn_mut(queue_arn)
+            .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == queue_arn))
+        else {
+            return;
+        };
+        let ids: Vec<&str> = at_rest.iter().map(|m| m.message_id.as_str()).collect();
+        queue
+            .inflight
+            .retain(|m| !ids.contains(&m.message_id.as_str()));
+        queue.restore_taken(at_rest);
     }
 
     /// Hand `batch` to the function and apply the outcome to the queue:
     /// acknowledged messages are deleted, failed ones return to the queue
     /// once their visibility timeout runs out.
     async fn deliver(&self, mapping: &Mapping, batch: PreparedBatch) {
+        // `_held` keeps the batch's messages from being received again until
+        // its outcome is applied.
         let PreparedBatch {
             payload,
             message_ids: matched_msg_ids,
+            _held,
         } = batch;
         let invoke_result = if let Some(ref delivery) = self.lambda_delivery {
             Some(
@@ -531,7 +557,7 @@ impl SqsLambdaPoller {
             None
         };
 
-        let (acked_ids, failed_ids) = match &invoke_result {
+        let (acked_ids, _failed_ids) = match &invoke_result {
             // A function error fails the whole batch, with or without
             // ReportBatchItemFailures: every message returns to the queue.
             Some(Ok(output)) if output.is_function_error() => {
@@ -557,17 +583,22 @@ impl SqsLambdaPoller {
             None => (matched_msg_ids.clone(), Vec::new()),
         };
 
-        if !acked_ids.is_empty() || !failed_ids.is_empty() {
+        // Acknowledged messages are deleted. Failed ones stay in flight until
+        // the visibility timeout set when they were received runs out, then
+        // return to the queue (their receive already counted), as on AWS; the
+        // receive after `maxReceiveCount` moves them to the DLQ.
+        if !acked_ids.is_empty() {
+            let mut sqs_mas = self.sqs_state.write();
+            if let Some(queue) = sqs_mas
+                .by_arn_mut(&mapping.queue_arn)
+                .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn))
             {
-                let mut sqs_mas = self.sqs_state.write();
-                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
-                    settle_batch(sqs, &mapping.queue_arn, &acked_ids, &failed_ids);
-                }
+                queue.delete_messages(&acked_ids);
             }
-            // Persist acked removals + receive_count/visibility bumps so a
-            // restart preserves delivery progress instead of re-delivering.
-            self.persist().await;
         }
+        // Persist acked removals and the receive's in-flight / receive-count
+        // changes so a restart preserves delivery progress.
+        self.persist().await;
 
         // The invocation is recorded in the account and region the mapped
         // function's ARN names.
@@ -634,84 +665,6 @@ fn open_batch(
             Ok(msg)
         })
         .collect()
-}
-
-/// Undo a poll that received nothing: each polled message still hidden by
-/// it (`hidden_until`) gets back the visibility it had before the poll
-/// (`previous`). Receive counts were never touched.
-fn undo_poll(
-    sqs: &mut fakecloud_sqs::SqsState,
-    queue_arn: &str,
-    previous: &[(String, Option<DateTime<Utc>>)],
-    hidden_until: DateTime<Utc>,
-) {
-    let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == queue_arn) else {
-        return;
-    };
-    for msg in queue.messages.iter_mut() {
-        if msg.visible_at != Some(hidden_until) {
-            continue;
-        }
-        if let Some((_, before)) = previous.iter().find(|(id, _)| *id == msg.message_id) {
-            msg.visible_at = *before;
-        }
-    }
-}
-
-/// Apply a batch's outcome to its queue: acked messages are deleted; failed
-/// ones count the failed receive and stay hidden until the visibility
-/// timeout set when the batch was picked runs out, as on AWS (the message
-/// reappears in the queue after the timeout). A failed message that has
-/// reached the queue's `maxReceiveCount` moves to the redrive policy's
-/// dead-letter queue, as SQS does on its next receive.
-fn settle_batch(
-    sqs: &mut fakecloud_sqs::SqsState,
-    queue_arn: &str,
-    acked_ids: &[String],
-    failed_ids: &[String],
-) {
-    let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == queue_arn) else {
-        return;
-    };
-    queue
-        .messages
-        .retain(|m| !acked_ids.contains(&m.message_id));
-    for msg in queue.messages.iter_mut() {
-        if failed_ids.contains(&msg.message_id) {
-            msg.receive_count = msg.receive_count.saturating_add(1);
-        }
-    }
-    let Some(redrive) = queue.redrive_policy.clone() else {
-        return;
-    };
-    let (exhausted, kept): (Vec<_>, Vec<_>) = queue.messages.drain(..).partition(|m| {
-        failed_ids.contains(&m.message_id) && m.receive_count >= redrive.max_receive_count
-    });
-    queue.messages = kept.into_iter().collect();
-    if exhausted.is_empty() {
-        return;
-    }
-    match sqs
-        .queues
-        .values_mut()
-        .find(|q| q.arn == redrive.dead_letter_target_arn)
-    {
-        Some(dlq) => {
-            for mut msg in exhausted {
-                // A redriven message starts a fresh receive history.
-                msg.visible_at = None;
-                msg.receipt_handle = None;
-                msg.receive_count = 0;
-                dlq.messages.push_back(msg);
-            }
-        }
-        None => {
-            // No such DLQ: the messages stay in the source queue.
-            if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == queue_arn) {
-                queue.messages.extend(exhausted);
-            }
-        }
-    }
 }
 
 /// Mirrors `fakecloud_sqs::looks_like_fakecloud_envelope`: detect
@@ -872,8 +825,8 @@ mod tests {
         }
     }
 
-    /// Poll once with a function answering `output`; return the queue's
-    /// remaining messages' receive counts.
+    /// Poll once with a function answering `output`; return the receive
+    /// counts of the queue's remaining messages (queued or in flight).
     async fn poll_once_answering(output: LambdaInvocationOutput) -> Vec<u32> {
         let (poller, sqs_state, _lambda_state) = build_states();
         let delivery: Arc<dyn LambdaDelivery> = Arc::new(AnsweringLambda { output });
@@ -888,7 +841,12 @@ mod tests {
             .values()
             .next()
             .unwrap();
-        queue.messages.iter().map(|m| m.receive_count).collect()
+        queue
+            .messages
+            .iter()
+            .chain(queue.inflight.iter())
+            .map(|m| m.receive_count)
+            .collect()
     }
 
     #[tokio::test]
@@ -941,7 +899,8 @@ mod tests {
             .values()
             .next()
             .unwrap();
-        let visible_at = queue.messages[0].visible_at.expect("still hidden");
+        assert!(queue.messages.is_empty(), "the failed message is in flight");
+        let visible_at = queue.inflight[0].visible_at.expect("still hidden");
         assert!(
             visible_at >= before + chrono::Duration::seconds(29),
             "the message reappears only after the 30s visibility timeout"
@@ -1055,48 +1014,201 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(queue.messages.len(), 2, "both messages stay in the queue");
+        assert!(queue.inflight.is_empty(), "nothing is left in flight");
+        assert!(
+            queue.receipt_handle_map.is_empty(),
+            "no receipt handle survives"
+        );
         for msg in &queue.messages {
             assert_eq!(msg.receive_count, 0, "{}", msg.message_id);
             assert_eq!(msg.visible_at, None, "{} is not in flight", msg.message_id);
         }
     }
 
-    #[test]
-    fn exhausted_failed_message_moves_to_the_dead_letter_queue() {
-        let (_, sqs_state, _) = build_states();
+    #[tokio::test]
+    async fn exhausted_failed_message_moves_to_the_dead_letter_queue() {
+        let (poller, sqs_state, _) = build_states();
         let dlq_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:k2-dlq");
-        let mut sqs = sqs_state.write();
-        let st = sqs.default_regional_mut();
-        let mut dlq = st.queues.values().next().unwrap().clone();
-        dlq.queue_name = "k2-dlq".to_string();
-        dlq.queue_url = format!("http://localhost:4566/{ACCOUNT}/k2-dlq");
-        dlq.arn = dlq_arn.clone();
-        dlq.messages.clear();
         let source_arn = {
+            let mut sqs = sqs_state.write();
+            let st = sqs.default_regional_mut();
+            let mut dlq = st.queues.values().next().unwrap().clone();
+            dlq.queue_name = "k2-dlq".to_string();
+            dlq.queue_url = format!("http://localhost:4566/{ACCOUNT}/k2-dlq");
+            dlq.arn = dlq_arn.clone();
+            dlq.messages.clear();
             let source = st.queues.values_mut().next().unwrap();
+            // Failed messages are receivable again at once.
+            source
+                .attributes
+                .insert("VisibilityTimeout".to_string(), "0".to_string());
             source.redrive_policy = Some(fakecloud_sqs::RedrivePolicy {
                 dead_letter_target_arn: dlq_arn.clone(),
                 max_receive_count: 2,
             });
-            source.arn.clone()
+            let source_arn = source.arn.clone();
+            st.queues.insert(dlq.queue_url.clone(), dlq);
+            source_arn
         };
-        st.queues.insert(dlq.queue_url.clone(), dlq);
-        let failed = vec!["msg-1".to_string()];
+        let poller = poller.with_lambda_delivery(Arc::new(AnsweringLambda {
+            output: LambdaInvocationOutput::unhandled(br#"{"errorMessage":"boom"}"#.to_vec()),
+        }));
+        let queue_len = |arn: &str| {
+            let sqs = sqs_state.read();
+            let q = sqs
+                .default_regional()
+                .unwrap()
+                .queues
+                .values()
+                .find(|q| q.arn == arn)
+                .unwrap()
+                .clone();
+            q.messages.len() + q.inflight.len()
+        };
 
-        super::settle_batch(st, &source_arn, &[], &failed);
-        let source = st.queues.values().find(|q| q.arn == source_arn).unwrap();
-        assert_eq!(source.messages.len(), 1, "below maxReceiveCount it stays");
+        // Two failed receives: still below maxReceiveCount.
+        poller.poll(&mut BatchingState::default()).await;
+        poller.poll(&mut BatchingState::default()).await;
+        assert_eq!(queue_len(&source_arn), 1, "below maxReceiveCount it stays");
 
-        super::settle_batch(st, &source_arn, &[], &failed);
-        let source = st.queues.values().find(|q| q.arn == source_arn).unwrap();
-        assert!(
-            source.messages.is_empty(),
-            "at maxReceiveCount it is redriven"
+        // The receive past maxReceiveCount redrives it, as SQS does.
+        poller.poll(&mut BatchingState::default()).await;
+        assert_eq!(
+            queue_len(&source_arn),
+            0,
+            "past maxReceiveCount it is redriven"
         );
-        let dlq = st.queues.values().find(|q| q.arn == dlq_arn).unwrap();
+        let sqs = sqs_state.read();
+        let dlq = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .find(|q| q.arn == dlq_arn)
+            .unwrap();
         assert_eq!(dlq.messages.len(), 1);
         assert_eq!(dlq.messages[0].message_id, "msg-1");
         assert_eq!(dlq.messages[0].receive_count, 0);
+    }
+
+    /// With a `VisibilityTimeout` of 0 a received message is visible again at
+    /// once; the poller must still hand it to the function once, not once
+    /// per concurrency slot.
+    #[tokio::test]
+    async fn a_zero_visibility_timeout_never_duplicates_a_batch_in_flight() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (poller, sqs_state, lambda_state) = build_states();
+        reshape(
+            &sqs_state,
+            &lambda_state,
+            vec![queued_message("only", None)],
+            false,
+            |m| m.batch_size = 1,
+        );
+        sqs_state
+            .write()
+            .default_regional_mut()
+            .queues
+            .values_mut()
+            .next()
+            .unwrap()
+            .attributes
+            .insert("VisibilityTimeout".to_string(), "0".to_string());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let poller = poller.with_lambda_delivery(Arc::new(GatedLambda {
+            gate: gate.clone(),
+            running: running.clone(),
+            peak: Arc::new(AtomicUsize::new(0)),
+        }));
+        let mut batching = BatchingState::default();
+        let first = poller.start_batches(&mut batching).await;
+        assert_eq!(first.len(), 1, "one message, one batch");
+        // Later polls while it is with the function start nothing either.
+        assert!(poller.start_batches(&mut batching).await.is_empty());
+        gate.add_permits(100);
+        for handle in first {
+            handle.await.unwrap();
+        }
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        assert!(queue.messages.is_empty() && queue.inflight.is_empty());
+    }
+
+    /// A delayed later message of a FIFO group does not hold back the
+    /// group's earlier, visible message: only received messages lock a group.
+    #[tokio::test]
+    async fn a_delayed_fifo_message_does_not_block_its_group() {
+        let (poller, sqs_state, lambda_state) = build_states();
+        let mut delayed = queued_message("g1-b", Some("g1"));
+        delayed.visible_at = Some(Utc::now() + chrono::Duration::seconds(600));
+        reshape(
+            &sqs_state,
+            &lambda_state,
+            vec![queued_message("g1-a", Some("g1")), delayed],
+            true,
+            |m| m.batch_size = 10,
+        );
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let poller = poller.with_lambda_delivery(Arc::new(RecordingLambda {
+            invocations: invocations.clone(),
+        }));
+        poller.poll(&mut BatchingState::default()).await;
+        let invocations = invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 1);
+        let event: Value = serde_json::from_str(&invocations[0]).unwrap();
+        assert_eq!(event["Records"][0]["messageId"], "g1-a");
+        assert_eq!(event["Records"].as_array().unwrap().len(), 1);
+    }
+
+    /// A FIFO group a ReceiveMessage caller has a message of in flight is
+    /// locked for the mapping too (and the other way round): both consume
+    /// through the same in-flight set.
+    #[tokio::test]
+    async fn fifo_group_locks_are_shared_with_receive_message() {
+        let (poller, sqs_state, lambda_state) = build_states();
+        reshape(
+            &sqs_state,
+            &lambda_state,
+            vec![
+                queued_message("g1-a", Some("g1")),
+                queued_message("g1-b", Some("g1")),
+                queued_message("g2-a", Some("g2")),
+            ],
+            true,
+            |m| m.batch_size = 1,
+        );
+        // An API consumer receives g1-a, as ReceiveMessage does.
+        {
+            let mut sqs = sqs_state.write();
+            let queue = sqs
+                .default_regional_mut()
+                .queues
+                .values_mut()
+                .next()
+                .unwrap();
+            let taken = queue.take_receivable(1, 30, Utc::now(), &|_| false);
+            assert_eq!(taken.messages[0].message_id, "g1-a");
+            queue.commit_taken(&taken.messages);
+        }
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let poller = poller.with_lambda_delivery(Arc::new(RecordingLambda {
+            invocations: invocations.clone(),
+        }));
+        poller.poll(&mut BatchingState::default()).await;
+        let invocations = invocations.lock().unwrap();
+        let ids: Vec<Value> = invocations
+            .iter()
+            .map(|p| serde_json::from_str::<Value>(p).unwrap()["Records"][0]["messageId"].clone())
+            .collect();
+        assert_eq!(ids, ["g2-a"], "g1-b waits for the API consumer's g1-a");
     }
 
     const ACCOUNT: &str = "123456789012";
