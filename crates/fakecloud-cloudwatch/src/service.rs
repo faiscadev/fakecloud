@@ -326,12 +326,23 @@ impl CloudWatchService {
                 .cloned()
                 .collect();
             for region in regions {
-                crate::alarm_eval::evaluate_alarms_in(
-                    acct,
-                    &region,
-                    now,
-                    crate::alarm_eval::Scope::Due,
-                );
+                // A bug evaluating one region must not stop the others (or
+                // the timer): it's logged and the pass goes on.
+                let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::alarm_eval::evaluate_alarms_in(
+                        acct,
+                        &region,
+                        now,
+                        crate::alarm_eval::Scope::Due,
+                    );
+                }));
+                if evaluated.is_err() {
+                    tracing::error!(
+                        account = %account_id,
+                        region = %region,
+                        "alarm evaluation panicked"
+                    );
+                }
             }
         }
         // Also runs actions other services' metrics queued (see
@@ -343,13 +354,18 @@ impl CloudWatchService {
         }
     }
 
-    /// Run [`Self::evaluate_all_alarms`] every `interval`, forever.
+    /// Run [`Self::evaluate_all_alarms`] every `interval`, forever. Each pass
+    /// runs as its own task, so a panic in one pass is logged and the next
+    /// tick still runs.
     pub async fn run_alarm_evaluator(self: Arc<Self>, interval: std::time::Duration) {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            self.evaluate_all_alarms().await;
+            let svc = self.clone();
+            if let Err(e) = tokio::spawn(async move { svc.evaluate_all_alarms().await }).await {
+                tracing::error!(error = %e, "alarm evaluation pass failed");
+            }
         }
     }
 

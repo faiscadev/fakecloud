@@ -4130,7 +4130,7 @@ fn mute_window_follows_the_schedule_clock() {
     let started = eval(&mut st, at(6, 0));
     assert!(started.changed);
     assert_eq!(
-        st.alarm_mutes[REGION]["cpu"].value,
+        st.alarm_mutes[REGION]["cpu"].start.value,
         AlarmState::InsufficientData
     );
     set(&mut st, AlarmState::Alarm, at(6, 10));
@@ -4146,6 +4146,214 @@ fn mute_window_follows_the_schedule_clock() {
 
 // A composite alarm's muted actions run when the window ends, through its
 // suppressor as usual.
+// DeleteAlarmMuteRule: "If those alarms are in an ALARM state, their
+// configured actions will trigger", even when the window started in ALARM.
+#[tokio::test]
+async fn deleting_a_mute_rule_runs_alarm_actions_of_alarms_in_alarm() {
+    let (svc, sns, _) = acting_service();
+    put_topic_alarm(&svc, "cpu").await;
+    set_state(&svc, "cpu", "ALARM").await;
+    assert_eq!(sns.published.lock().len(), 1);
+    put_active_mute_rule(&svc, "maint", &["cpu"]).await;
+    set_state(&svc, "cpu", "OK").await;
+    set_state(&svc, "cpu", "ALARM").await;
+    assert_eq!(sns.published.lock().len(), 1);
+    call(
+        &svc,
+        "DeleteAlarmMuteRule",
+        &[("AlarmMuteRuleName", "maint")],
+    )
+    .await;
+    let published = sns.published.lock().clone();
+    assert_eq!(published.len(), 2, "{published:?}");
+    let m: serde_json::Value = serde_json::from_str(&published[1].1).unwrap();
+    assert_eq!(m["NewStateValue"], "ALARM");
+}
+
+// The schedule closing a window that started and ended in ALARM runs nothing
+// (the user guide's comparison), unlike a delete.
+#[test]
+fn schedule_end_in_the_starting_alarm_state_runs_nothing() {
+    use crate::state::AlarmState;
+    use chrono::TimeZone;
+    let at = |h: u32, m: u32| chrono::Utc.with_ymd_and_hms(2030, 1, 1, h, m, 0).unwrap();
+    let mut st = crate::state::CloudWatchState::new(ACCT);
+    let mut alarm = bare_alarm("cpu", "Errors");
+    alarm.namespace = None;
+    alarm.metric_name = None;
+    alarm.alarm_actions = vec![TOPIC.to_string()];
+    alarm.state_value = AlarmState::Alarm;
+    st.alarms_in_mut(REGION).insert("cpu".into(), alarm);
+    st.mute_rules_in_mut(REGION).insert(
+        "m".into(),
+        crate::state::AlarmMuteRule {
+            name: "m".into(),
+            arn: "arn".into(),
+            description: None,
+            schedule_expression: Some("at(2030-01-01T06:00)".into()),
+            schedule_duration: Some("PT1H".into()),
+            schedule_timezone: None,
+            mute_target_alarm_names: vec!["cpu".into()],
+            start_date: None,
+            expire_date: None,
+            last_updated_timestamp: at(0, 0),
+            created_timestamp: Some(at(0, 0)),
+        },
+    );
+    let eval = |st: &mut crate::state::CloudWatchState, t| {
+        crate::alarm_eval::evaluate_alarms_in(st, REGION, t, crate::alarm_eval::Scope::Composites)
+    };
+    eval(&mut st, at(6, 0));
+    assert!(st.alarm_mutes[REGION].contains_key("cpu"));
+    assert!(eval(&mut st, at(7, 0)).notifications.is_empty());
+    assert!(!st.alarm_mutes.contains_key(REGION));
+}
+
+// A composite alarm's action its ActionsSuppressor was holding before the
+// window started is still owed after the window ends.
+#[tokio::test]
+async fn mute_window_keeps_actions_the_suppressor_was_holding() {
+    let (svc, _sns, _) = acting_service();
+    for name in ["child", "maint"] {
+        call(
+            &svc,
+            "PutMetricAlarm",
+            &[
+                ("AlarmName", name),
+                ("Namespace", "App"),
+                ("MetricName", name),
+                ("Statistic", "Sum"),
+                ("Period", "60"),
+                ("EvaluationPeriods", "1"),
+                ("Threshold", "1"),
+                ("ComparisonOperator", "GreaterThanThreshold"),
+            ],
+        )
+        .await;
+    }
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "svc"),
+            ("AlarmRule", "ALARM(child)"),
+            ("AlarmActions.member.1", TOPIC),
+            ("ActionsSuppressor", "maint"),
+            ("ActionsSuppressorWaitPeriod", "600"),
+            ("ActionsSuppressorExtensionPeriod", "600"),
+        ],
+    )
+    .await;
+    set_state(&svc, "maint", "ALARM").await;
+    set_state(&svc, "child", "ALARM").await;
+    let pending = || {
+        svc.state.read().accounts[ACCT].composite_alarms[REGION]["svc"]
+            .pending_action_from
+            .clone()
+    };
+    let held = pending();
+    assert!(held.is_some(), "the suppressor holds the ALARM actions");
+    put_active_mute_rule(&svc, "m", &["svc"]).await;
+    call(&svc, "DeleteAlarmMuteRule", &[("AlarmMuteRuleName", "m")]).await;
+    assert_eq!(pending(), held);
+}
+
+// Invalid schedules are refused rather than stored as rules that never mute.
+#[tokio::test]
+async fn put_alarm_mute_rule_rejects_invalid_schedules() {
+    let svc = service();
+    for (expr, dur, tz) in [
+        ("cron(bogus)", Some("PT1H"), None),
+        ("rate(5 minutes)", Some("PT1H"), None),
+        ("cron(0 2 * * *)", None, None),
+        ("cron(0 2 * * *)", Some("PT9300000000000000S"), None),
+        ("cron(0 2 * * *)", Some("P99999999999999D"), None),
+        ("at(+262142-12-31T23:59)", Some("PT1H"), None),
+        ("cron(0 2 * * *)", Some("PT1H"), Some("Mars/Base")),
+    ] {
+        let mut params = vec![("Name", "bad"), ("Rule.Schedule.Expression", expr)];
+        if let Some(d) = dur {
+            params.push(("Rule.Schedule.Duration", d));
+        }
+        if let Some(t) = tz {
+            params.push(("Rule.Schedule.Timezone", t));
+        }
+        let err = call_err(&svc, "PutAlarmMuteRule", &params).await;
+        assert_eq!(err.code(), "InvalidParameterValue", "{expr} {dur:?} {tz:?}");
+    }
+    let list = body_of(&call(&svc, "ListAlarmMuteRules", &[]).await);
+    assert!(!list.contains("<member>"), "{list}");
+}
+
+// A rule persisted before validation, with values that once overflowed,
+// neither panics nor mutes anywhere it's read.
+#[tokio::test]
+async fn stored_overflowing_rule_does_not_panic() {
+    let (svc, sns, _) = acting_service();
+    put_topic_alarm(&svc, "cpu").await;
+    {
+        let mut st = svc.state.write();
+        let acct = st.get_or_create(ACCT);
+        acct.mute_rules_in_mut(REGION).insert(
+            "bad".into(),
+            crate::state::AlarmMuteRule {
+                name: "bad".into(),
+                arn: "arn:aws:cloudwatch:us-east-1:123456789012:alarm-mute-rule:bad".into(),
+                description: None,
+                schedule_expression: Some("at(+262142-12-31T23:59)".into()),
+                schedule_duration: Some("P99999999999999D".into()),
+                schedule_timezone: None,
+                mute_target_alarm_names: vec!["cpu".into()],
+                start_date: None,
+                expire_date: None,
+                last_updated_timestamp: chrono::Utc::now(),
+                created_timestamp: None,
+            },
+        );
+    }
+    call(&svc, "GetAlarmMuteRule", &[("AlarmMuteRuleName", "bad")]).await;
+    call(&svc, "ListAlarmMuteRules", &[]).await;
+    set_state(&svc, "cpu", "ALARM").await;
+    svc.evaluate_all_alarms().await;
+    assert_eq!(sns.published.lock().len(), 1);
+}
+
+// Snapshots from before the ARN fix load with `alarm-mute-rule:<name>`.
+#[test]
+fn loaded_mute_rule_arns_are_migrated() {
+    let mut accounts = CloudWatchAccounts::new();
+    let old = "arn:aws:cloudwatch:us-east-1:123456789012:alarm-mute-rule/m";
+    let new = "arn:aws:cloudwatch:us-east-1:123456789012:alarm-mute-rule:m";
+    {
+        let acct = accounts.get_or_create(ACCT);
+        acct.mute_rules_in_mut(REGION).insert(
+            "m".into(),
+            crate::state::AlarmMuteRule {
+                name: "m".into(),
+                arn: old.into(),
+                description: None,
+                schedule_expression: Some("cron(0 2 * * *)".into()),
+                schedule_duration: Some("PT1H".into()),
+                schedule_timezone: None,
+                mute_target_alarm_names: vec![],
+                start_date: None,
+                expire_date: None,
+                last_updated_timestamp: chrono::Utc::now(),
+                created_timestamp: None,
+            },
+        );
+        acct.tags
+            .entry(old.into())
+            .or_default()
+            .insert("team".into(), "ops".into());
+    }
+    accounts.migrate_loaded();
+    let acct = accounts.get(ACCT).unwrap();
+    assert_eq!(acct.mute_rules[REGION]["m"].arn, new);
+    assert!(!acct.tags.contains_key(old));
+    assert_eq!(acct.tags[new]["team"], "ops");
+}
+
 #[tokio::test]
 async fn mute_rule_mutes_composite_alarms() {
     let (svc, sns, _) = acting_service();

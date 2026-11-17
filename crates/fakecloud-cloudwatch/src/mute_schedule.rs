@@ -95,6 +95,34 @@ pub(crate) fn parse_schedule(
     })
 }
 
+/// Why a schedule given to PutAlarmMuteRule is invalid, if it is.
+pub(crate) fn schedule_error(
+    expression: &str,
+    duration: Option<&str>,
+    timezone: Option<&str>,
+) -> Option<String> {
+    if parse_expression(expression).is_none() {
+        return Some(format!(
+            "Invalid schedule expression {expression}: use cron(Minutes Hours Day-of-month \
+             Month Day-of-week) or at(yyyy-MM-ddThh:mm)"
+        ));
+    }
+    let Some(duration) = duration else {
+        return Some("The schedule duration is required".to_string());
+    };
+    if parse_duration(duration).is_none() {
+        return Some(format!(
+            "Invalid schedule duration {duration}: use an ISO 8601 duration from PT1M to P15D"
+        ));
+    }
+    if let Some(tz) = timezone {
+        if tz.trim().parse::<Tz>().is_err() {
+            return Some(format!("Invalid time zone {tz}"));
+        }
+    }
+    None
+}
+
 fn rule_schedule(rule: &AlarmMuteRule) -> Option<MuteSchedule> {
     parse_schedule(
         rule.schedule_expression.as_deref()?,
@@ -114,6 +142,48 @@ pub(crate) fn rule_status(rule: &AlarmMuteRule, now: DateTime<Utc>) -> MuteRuleS
     schedule_status(&schedule, rule.start_date, rule.expire_date, now)
 }
 
+/// The window of a one-time schedule clipped to `start` / `expire`, or
+/// `None` when it never opens (a local time the time zone skips, or bounds
+/// leaving nothing of it).
+fn one_time_window(
+    schedule: &MuteSchedule,
+    local: NaiveDateTime,
+    start: Option<DateTime<Utc>>,
+    expire: Option<DateTime<Utc>>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let begin = resolve_local(&schedule.timezone, local)?;
+    let mut end = begin.checked_add_signed(schedule.duration)?;
+    if let Some(e) = expire {
+        end = end.min(e);
+    }
+    let begin = start.map_or(begin, |s| begin.max(s));
+    (begin < end).then_some((begin, end))
+}
+
+/// Whether `schedule` bounded by `start` / `expire` mutes at `now`.
+pub(crate) fn schedule_active(
+    schedule: &MuteSchedule,
+    start: Option<DateTime<Utc>>,
+    expire: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    if expire.is_some_and(|e| now >= e) || start.is_some_and(|s| now < s) {
+        return false;
+    }
+    match &schedule.expression {
+        MuteExpression::At(local) => one_time_window(schedule, *local, start, expire)
+            .is_some_and(|(begin, end)| now >= begin && now < end),
+        MuteExpression::Cron(cron) => {
+            let Some(lookback) = schedule.duration.checked_add(&Duration::days(2)) else {
+                return false;
+            };
+            cron.latest_at_or_before(&schedule.timezone, now, lookback)
+                .and_then(|occ| occ.checked_add_signed(schedule.duration))
+                .is_some_and(|end| now < end)
+        }
+    }
+}
+
 /// The status of `schedule` bounded by `start` / `expire` at `now`.
 pub(crate) fn schedule_status(
     schedule: &MuteSchedule,
@@ -124,49 +194,27 @@ pub(crate) fn schedule_status(
     if expire.is_some_and(|e| now >= e) {
         return MuteRuleStatus::Expired;
     }
-    // The window bounds clip every window.
-    let lower = start;
-    let in_bounds = |t: DateTime<Utc>| lower.is_none_or(|s| t >= s) && expire.is_none_or(|e| t < e);
+    if schedule_active(schedule, start, expire, now) {
+        return MuteRuleStatus::Active;
+    }
     match &schedule.expression {
-        MuteExpression::At(local) => {
-            let Some(begin) = resolve_local(&schedule.timezone, *local) else {
-                // The local time never happens there.
-                return MuteRuleStatus::Expired;
-            };
-            let mut end = begin + schedule.duration;
-            if let Some(e) = expire {
-                end = end.min(e);
-            }
-            let begin = lower.map_or(begin, |s| begin.max(s));
-            if now >= end || begin >= end {
-                MuteRuleStatus::Expired
-            } else if now >= begin {
-                MuteRuleStatus::Active
-            } else {
-                MuteRuleStatus::Scheduled
-            }
-        }
+        MuteExpression::At(local) => match one_time_window(schedule, *local, start, expire) {
+            Some((_, end)) if now < end => MuteRuleStatus::Scheduled,
+            _ => MuteRuleStatus::Expired,
+        },
         MuteExpression::Cron(cron) => {
-            if in_bounds(now) {
-                if let Some(occ) = cron.latest_at_or_before(
-                    &schedule.timezone,
-                    now,
-                    schedule.duration + Duration::days(2),
-                ) {
-                    if now < occ + schedule.duration {
-                        return MuteRuleStatus::Active;
-                    }
-                }
-            }
             // Not muting now: is there a window still to come? The first one
             // ending after `from` (a window already running at the start
             // date counts from the start date), if it begins before the
             // expire date.
-            let from = match lower {
+            let from = match start {
                 Some(s) if s > now => s,
                 _ => now,
             };
-            match cron.next_after(&schedule.timezone, from - schedule.duration) {
+            let Some(search_from) = from.checked_sub_signed(schedule.duration) else {
+                return MuteRuleStatus::Expired;
+            };
+            match cron.next_after(&schedule.timezone, search_from, expire) {
                 Some(next) if expire.is_none_or(|e| next.max(from) < e) => {
                     MuteRuleStatus::Scheduled
                 }
@@ -178,7 +226,10 @@ pub(crate) fn schedule_status(
 
 /// Whether `rule` mutes its alarms at `now`.
 pub(crate) fn rule_active(rule: &AlarmMuteRule, now: DateTime<Utc>) -> bool {
-    rule_status(rule, now) == MuteRuleStatus::Active
+    if rule.expire_date.is_some_and(|e| now >= e) {
+        return false;
+    }
+    rule_schedule(rule).is_some_and(|s| schedule_active(&s, rule.start_date, rule.expire_date, now))
 }
 
 /// The UTC instant of a local time in `tz`: the first one when a clock
@@ -199,9 +250,16 @@ fn parse_expression(expr: &str) -> Option<MuteExpression> {
     let expr = expr.trim();
     if let Some(inner) = expr.strip_prefix("at(").and_then(|s| s.strip_suffix(')')) {
         let inner = inner.trim();
+        // `yyyy`: four digits, no sign.
+        if !inner.as_bytes().get(..4)?.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
         let local = NaiveDateTime::parse_from_str(inner, "%Y-%m-%dT%H:%M")
             .or_else(|_| NaiveDateTime::parse_from_str(inner, "%Y-%m-%dT%H:%M:%S"))
             .ok()?;
+        if !(1970..=9999).contains(&local.year()) {
+            return None;
+        }
         return Some(MuteExpression::At(local));
     }
     if let Some(inner) = expr.strip_prefix("cron(").and_then(|s| s.strip_suffix(')')) {
@@ -223,7 +281,10 @@ pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
         }
         None => (rest, None),
     };
-    let mut total = Duration::zero();
+    // Seconds, checked: anything past the 15-day maximum is refused before
+    // it can overflow.
+    const MAX_SECS: i64 = 15 * 86_400;
+    let mut total: i64 = 0;
     let mut any = false;
     let mut parse_part = |part: &str, units: &[(char, i64)]| -> Option<()> {
         let mut num = String::new();
@@ -239,7 +300,10 @@ pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
                 return None;
             }
             let n: i64 = num.parse().ok()?;
-            total = total.checked_add(&Duration::seconds(n.checked_mul(units[idx].1)?))?;
+            total = total.checked_add(n.checked_mul(units[idx].1)?)?;
+            if total > MAX_SECS {
+                return None;
+            }
             num.clear();
             last_unit = Some(idx);
             any = true;
@@ -250,10 +314,10 @@ pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
     if let Some(t) = time {
         parse_part(t, &[('H', 3_600), ('M', 60), ('S', 1)])?;
     }
-    if !any || total < Duration::minutes(1) || total > Duration::days(15) {
+    if !any || !(60..=MAX_SECS).contains(&total) {
         return None;
     }
-    Some(total)
+    Duration::try_seconds(total)
 }
 
 /// One `lo-hi/step` term of a cron field.
@@ -489,9 +553,11 @@ impl Cron {
         now: DateTime<Utc>,
         lookback: Duration,
     ) -> Option<DateTime<Utc>> {
-        let floor = now - lookback;
-        let mut day = now.with_timezone(tz).date_naive().succ_opt()?;
-        loop {
+        let floor = now.checked_sub_signed(lookback)?;
+        // Local dates: from today back to the floor's date.
+        let floor_day = floor.with_timezone(tz).date_naive();
+        let mut day = now.with_timezone(tz).date_naive();
+        while day >= floor_day {
             if self.day_matches(day) {
                 for t in self.times_desc() {
                     let Some(at) = resolve_local(tz, day.and_time(t)) else {
@@ -503,18 +569,42 @@ impl Cron {
                 }
             }
             day = day.pred_opt()?;
-            // Past the floor by more than a day: nothing earlier counts.
-            if day.and_time(NaiveTime::MIN).and_utc() < floor - Duration::days(1) {
-                return None;
-            }
+        }
+        None
+    }
+
+    /// The last year the year field allows.
+    fn last_year(&self) -> i32 {
+        if self.years.any {
+            2199
+        } else {
+            self.years.terms.iter().map(|t| t.hi).max().unwrap_or(2199) as i32
         }
     }
 
-    /// The first window start strictly after `after`, within about eight
-    /// years.
-    pub(crate) fn next_after(&self, tz: &Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    /// The first window start strictly after `after` (and before `until`,
+    /// when given), as far ahead as the year field allows.
+    pub(crate) fn next_after(
+        &self,
+        tz: &Tz,
+        after: DateTime<Utc>,
+        until: Option<DateTime<Utc>>,
+    ) -> Option<DateTime<Utc>> {
+        let mut last = NaiveDate::from_ymd_opt(self.last_year(), 12, 31)?;
+        if let Some(u) = until {
+            last = last.min(u.with_timezone(tz).date_naive().succ_opt()?);
+        }
         let mut day = after.with_timezone(tz).date_naive().pred_opt()?;
-        for _ in 0..(366 * 8) {
+        while day <= last {
+            // Whole months (and years) that can't match are skipped.
+            if !self.years.matches(day.year() as u32) {
+                day = NaiveDate::from_ymd_opt(day.year() + 1, 1, 1)?;
+                continue;
+            }
+            if !self.months.matches(day.month()) {
+                day = first_of_next_month(day)?;
+                continue;
+            }
             if self.day_matches(day) {
                 for t in self.times_asc() {
                     let Some(at) = resolve_local(tz, day.and_time(t)) else {
@@ -599,6 +689,14 @@ fn parse_dow(s: &str) -> Option<DayOfWeek> {
     })
 }
 
+fn first_of_next_month(d: NaiveDate) -> Option<NaiveDate> {
+    if d.month() == 12 {
+        NaiveDate::from_ymd_opt(d.year() + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(d.year(), d.month() + 1, 1)
+    }
+}
+
 fn last_day_of_month(d: NaiveDate) -> u32 {
     let (y, m) = if d.month() == 12 {
         (d.year() + 1, 1)
@@ -647,6 +745,86 @@ mod tests {
         assert_eq!(parse_duration("PTH"), None);
         assert_eq!(parse_duration("PT1M1H"), None);
         assert_eq!(parse_duration("4H"), None);
+    }
+
+    #[test]
+    fn huge_durations_and_dates_are_refused_without_panicking() {
+        assert_eq!(parse_duration("PT9300000000000000S"), None);
+        assert_eq!(parse_duration("P99999999999999D"), None);
+        assert_eq!(parse_duration("P9999999999999999999999W"), None);
+        assert_eq!(parse_duration("PT2562047788015215H"), None);
+        assert_eq!(parse_duration("P15DT1S"), None);
+        assert!(parse_schedule("at(+262142-12-31T23:59)", "PT1H", None).is_none());
+        assert!(parse_schedule("at(262142-12-31T23:59)", "PT1H", None).is_none());
+        assert!(parse_schedule("at(-0001-01-01T00:00)", "PT1H", None).is_none());
+        assert!(schedule_error("at(+262142-12-31T23:59)", Some("PT1H"), None).is_some());
+        // The latest accepted time with the longest duration still works.
+        let s = sched("at(9999-12-31T23:59)", "P15D", Some("Pacific/Kiritimati"));
+        assert_eq!(status(&s, "2024-01-01T00:00:00Z"), Scheduled);
+        let c = sched("cron(59 23 31 DEC ? 2199)", "P15D", None);
+        assert_eq!(status(&c, "2024-01-01T00:00:00Z"), Scheduled);
+        // A rule stored before validation existed, unparseable: never
+        // active, never a panic.
+        let rule = AlarmMuteRule {
+            name: "r".into(),
+            arn: "arn".into(),
+            description: None,
+            schedule_expression: Some("at(+262142-12-31T23:59)".into()),
+            schedule_duration: Some("PT9300000000000000S".into()),
+            schedule_timezone: None,
+            mute_target_alarm_names: vec![],
+            start_date: None,
+            expire_date: None,
+            last_updated_timestamp: utc("2024-01-01T00:00:00Z"),
+            created_timestamp: None,
+        };
+        assert!(!rule_active(&rule, utc("2024-01-01T00:00:00Z")));
+        assert_eq!(rule_status(&rule, utc("2024-01-01T00:00:00Z")), Scheduled);
+    }
+
+    #[test]
+    fn far_future_years_are_scheduled() {
+        // Beyond any fixed lookahead.
+        let s = sched("cron(0 2 1 JAN ? 2040)", "PT1H", None);
+        assert_eq!(status(&s, "2026-11-17T00:00:00Z"), Scheduled);
+        assert_eq!(status(&s, "2040-01-01T02:30:00Z"), Active);
+        assert_eq!(status(&s, "2040-01-01T03:00:00Z"), Expired);
+        let late = sched("cron(0 2 1 JAN ? 2150-2199/7)", "PT1H", None);
+        assert_eq!(status(&late, "2026-11-17T00:00:00Z"), Scheduled);
+        // Unless the expire date comes first.
+        assert_eq!(
+            schedule_status(
+                &s,
+                None,
+                Some(utc("2039-12-31T00:00:00Z")),
+                utc("2026-11-17T00:00:00Z")
+            ),
+            Expired
+        );
+        // Only in leap years.
+        let leap = sched("cron(0 0 29 FEB ?)", "PT1H", None);
+        assert_eq!(status(&leap, "2026-11-17T00:00:00Z"), Scheduled);
+        assert_eq!(status(&leap, "2028-02-29T00:30:00Z"), Active);
+    }
+
+    #[test]
+    fn schedule_errors_name_the_problem() {
+        assert!(schedule_error("cron(0 2 * * *)", Some("PT1H"), None).is_none());
+        assert!(schedule_error("cron(0 2 * * *)", Some("PT1H"), Some("Asia/Tokyo")).is_none());
+        assert!(schedule_error("cron(bogus)", Some("PT1H"), None)
+            .unwrap()
+            .contains("expression"));
+        assert!(schedule_error("cron(0 2 * * *)", None, None)
+            .unwrap()
+            .contains("duration"));
+        assert!(schedule_error("cron(0 2 * * *)", Some("forever"), None)
+            .unwrap()
+            .contains("duration"));
+        assert!(
+            schedule_error("cron(0 2 * * *)", Some("PT1H"), Some("Mars/Base"))
+                .unwrap()
+                .contains("time zone")
+        );
     }
 
     #[test]

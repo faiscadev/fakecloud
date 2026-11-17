@@ -4825,7 +4825,9 @@ async fn main() {
                                 ));
                             }
                             let account_count = snapshot.accounts.accounts.len();
-                            *cloudwatch_state.write() = snapshot.accounts;
+                            let mut accounts = snapshot.accounts;
+                            accounts.migrate_loaded();
+                            *cloudwatch_state.write() = accounts;
                             tracing::info!(
                                 accounts = account_count,
                                 "loaded cloudwatch persistence snapshot"

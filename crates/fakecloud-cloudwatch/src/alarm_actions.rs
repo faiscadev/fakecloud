@@ -644,7 +644,20 @@ pub(crate) fn metric_alarm_notification(
     alarm: &MetricAlarm,
     prev: &PreviousState,
 ) -> Option<AlarmNotification> {
-    if !alarm.actions_enabled || prev.value == alarm.state_value {
+    metric_notification(account_id, region, alarm, prev, true)
+}
+
+/// [`metric_alarm_notification`]; with `require_change` false, also when the
+/// state is the same as `prev`'s (a deleted mute rule unmuting an alarm in
+/// ALARM).
+pub(crate) fn metric_notification(
+    account_id: &str,
+    region: &str,
+    alarm: &MetricAlarm,
+    prev: &PreviousState,
+    require_change: bool,
+) -> Option<AlarmNotification> {
+    if !alarm.actions_enabled || (require_change && prev.value == alarm.state_value) {
         return None;
     }
     let actions = actions_for(
@@ -715,7 +728,19 @@ pub(crate) fn composite_alarm_notification(
     alarm: &CompositeAlarm,
     prev: &PreviousState,
 ) -> Option<AlarmNotification> {
-    if !alarm.actions_enabled || prev.value == alarm.state_value {
+    composite_notification(account_id, region, alarm, prev, true)
+}
+
+/// [`composite_alarm_notification`], optionally without requiring a state
+/// change (see [`metric_notification`]).
+pub(crate) fn composite_notification(
+    account_id: &str,
+    region: &str,
+    alarm: &CompositeAlarm,
+    prev: &PreviousState,
+    require_change: bool,
+) -> Option<AlarmNotification> {
+    if !alarm.actions_enabled || (require_change && prev.value == alarm.state_value) {
         return None;
     }
     let actions = actions_for(
@@ -819,7 +844,19 @@ pub(crate) fn log_alarm_notification(
     alarm: &LogAlarm,
     prev: &PreviousState,
 ) -> Option<AlarmNotification> {
-    if !alarm.actions_enabled || prev.value == alarm.state_value {
+    log_notification(account_id, region, alarm, prev, true)
+}
+
+/// [`log_alarm_notification`], optionally without requiring a state change
+/// (see [`metric_notification`]).
+pub(crate) fn log_notification(
+    account_id: &str,
+    region: &str,
+    alarm: &LogAlarm,
+    prev: &PreviousState,
+    require_change: bool,
+) -> Option<AlarmNotification> {
+    if !alarm.actions_enabled || (require_change && prev.value == alarm.state_value) {
         return None;
     }
     let actions = actions_for(

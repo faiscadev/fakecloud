@@ -57,6 +57,14 @@ impl CloudWatchService {
         let schedule_expression = optional_query_param(req, "Rule.Schedule.Expression");
         let schedule_duration = optional_query_param(req, "Rule.Schedule.Duration");
         let schedule_timezone = optional_query_param(req, "Rule.Schedule.Timezone");
+        // A schedule that can't be evaluated would never mute: refuse it.
+        if let Some(reason) = crate::mute_schedule::schedule_error(
+            schedule_expression.as_deref().unwrap_or_default(),
+            schedule_duration.as_deref(),
+            schedule_timezone.as_deref(),
+        ) {
+            return Err(crate::service::invalid_param(reason));
+        }
         let mute_target_alarm_names = collect_member_values(req, "MuteTargets.AlarmNames");
         let start_date = parse_ts(req, "StartDate");
         let expire_date = parse_ts(req, "ExpireDate");
@@ -239,6 +247,22 @@ impl CloudWatchService {
         let acct = state.get_or_create(&req.account_id);
         if let Some(rule) = acct.mute_rules_in_mut(&req.region).remove(&name) {
             acct.tags.remove(&rule.arn);
+            // The alarms it was muting are unmuted now; one in ALARM runs its
+            // ALARM actions (DeleteAlarmMuteRule's documented behavior).
+            let released: std::collections::BTreeSet<String> =
+                rule.mute_target_alarm_names.into_iter().collect();
+            let now = Utc::now();
+            let mutes =
+                crate::alarm_mutes::update_mutes_releasing(acct, &req.region, now, &released);
+            let mut owed = mutes.owed;
+            crate::alarm_mutes::hold_muted(acct, &req.region, &mutes.muted, &mut owed, now);
+            for mut n in owed {
+                n.epoch = acct.epoch;
+                acct.pending_actions.push(n);
+            }
+            if mutes.changed {
+                acct.evaluation_dirty = true;
+            }
         }
         Ok(empty_metadata_response(
             "DeleteAlarmMuteRule",
