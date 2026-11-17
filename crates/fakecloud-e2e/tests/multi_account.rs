@@ -103,6 +103,231 @@ async fn sts_assume_role_routes_to_target_account() {
 }
 
 // ======================================================================
+// STS: trust-policy conditions on AssumeRole
+// ======================================================================
+
+const ASSUME_ANY_ROLE: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*"}]}"#;
+
+/// A trust policy letting `principal` assume the role only with `external_id`.
+fn external_id_trust(principal: &str, external_id: &str) -> String {
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": principal},
+            "Action": "sts:AssumeRole",
+            "Condition": {"StringEquals": {"sts:ExternalId": external_id}}
+        }]
+    })
+    .to_string()
+}
+
+async fn create_role(iam: &aws_sdk_iam::Client, role_name: &str, trust: &str) -> String {
+    iam.create_role()
+        .role_name(role_name)
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap()
+        .role()
+        .unwrap()
+        .arn()
+        .to_string()
+}
+
+/// An IAM user with its own access key, allowed `sts:AssumeRole` on any role
+/// when `may_assume`.
+async fn user_config(
+    server: &TestServer,
+    iam: &aws_sdk_iam::Client,
+    user_name: &str,
+    may_assume: bool,
+) -> aws_config::SdkConfig {
+    iam.create_user().user_name(user_name).send().await.unwrap();
+    if may_assume {
+        iam.put_user_policy()
+            .user_name(user_name)
+            .policy_name("assume")
+            .policy_document(ASSUME_ANY_ROLE)
+            .send()
+            .await
+            .unwrap();
+    }
+    let key = iam
+        .create_access_key()
+        .user_name(user_name)
+        .send()
+        .await
+        .unwrap();
+    let key = key.access_key().unwrap();
+    config_with(server, key.access_key_id(), key.secret_access_key()).await
+}
+
+/// Assumes `role_arn`, returning the session's ARN or the error code.
+async fn assume(
+    sts: &StsClient,
+    role_arn: &str,
+    external_id: Option<&str>,
+) -> Result<String, String> {
+    sts.assume_role()
+        .role_arn(role_arn)
+        .role_session_name("cross-account")
+        .set_external_id(external_id.map(str::to_string))
+        .send()
+        .await
+        .map(|out| out.assumed_role_user().unwrap().arn().to_string())
+        .map_err(|err| {
+            aws_sdk_sts::error::ProvideErrorMetadata::code(&err)
+                .map_or_else(|| format!("{err:?}"), str::to_string)
+        })
+}
+
+/// AWS's third-party access pattern: a role in B trusts a user in A on
+/// condition of an external ID. Across accounts the trust policy must allow
+/// the request when it is authorized, not only in the STS handler.
+#[tokio::test]
+async fn sts_cross_account_assume_role_enforces_external_id() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let iam_a = aws_sdk_iam::Client::new(&config_with(&server, &a_akid, &a_secret).await);
+    let iam_b = aws_sdk_iam::Client::new(&config_with(&server, &b_akid, &b_secret).await);
+
+    let sts = StsClient::new(&user_config(&server, &iam_a, "integrator", true).await);
+    let trust = external_id_trust(
+        &format!("arn:aws:iam::{ACCOUNT_A}:user/integrator"),
+        "ext-1234",
+    );
+    let role_arn = create_role(&iam_b, "third-party", &trust).await;
+
+    let session = assume(&sts, &role_arn, Some("ext-1234")).await.unwrap();
+    assert!(
+        session.starts_with(&format!(
+            "arn:aws:sts::{ACCOUNT_B}:assumed-role/third-party/"
+        )),
+        "{session}"
+    );
+    assert_eq!(
+        assume(&sts, &role_arn, Some("ext-wrong")).await,
+        Err("AccessDenied".to_string())
+    );
+    assert_eq!(
+        assume(&sts, &role_arn, None).await,
+        Err("AccessDenied".to_string())
+    );
+}
+
+/// The same pattern from a role session, as a service running under a role
+/// (an instance profile, IRSA) chains into the other account's role.
+#[tokio::test]
+async fn sts_cross_account_role_chain_enforces_external_id() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let a_cfg = config_with(&server, &a_akid, &a_secret).await;
+    let iam_a = aws_sdk_iam::Client::new(&a_cfg);
+    let iam_b = aws_sdk_iam::Client::new(&config_with(&server, &b_akid, &b_secret).await);
+
+    let account_a_trust = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_A}:root"}},"Action":"sts:AssumeRole"}}]}}"#
+    );
+    let service_role = create_role(&iam_a, "service", &account_a_trust).await;
+    iam_a
+        .put_role_policy()
+        .role_name("service")
+        .policy_name("assume")
+        .policy_document(ASSUME_ANY_ROLE)
+        .send()
+        .await
+        .unwrap();
+    let service = StsClient::new(&a_cfg)
+        .assume_role()
+        .role_arn(&service_role)
+        .role_session_name("service")
+        .send()
+        .await
+        .unwrap();
+    let creds = service.credentials().unwrap();
+    let session_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            creds.access_key_id(),
+            creds.secret_access_key(),
+            Some(creds.session_token().to_string()),
+            None,
+            "multi-acct-session",
+        ))
+        .load()
+        .await;
+    let sts = StsClient::new(&session_cfg);
+
+    let role_arn = create_role(
+        &iam_b,
+        "third-party",
+        &external_id_trust(&service_role, "ext-1234"),
+    )
+    .await;
+
+    assert!(assume(&sts, &role_arn, Some("ext-1234")).await.is_ok());
+    assert_eq!(
+        assume(&sts, &role_arn, Some("ext-wrong")).await,
+        Err("AccessDenied".to_string())
+    );
+}
+
+/// Across accounts both sides must allow: a trust policy satisfied by the
+/// external ID is no grant without the caller's own `sts:AssumeRole`.
+#[tokio::test]
+async fn sts_cross_account_external_id_still_needs_identity_grant() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let iam_a = aws_sdk_iam::Client::new(&config_with(&server, &a_akid, &a_secret).await);
+    let iam_b = aws_sdk_iam::Client::new(&config_with(&server, &b_akid, &b_secret).await);
+
+    let sts = StsClient::new(&user_config(&server, &iam_a, "integrator", false).await);
+    let trust = external_id_trust(
+        &format!("arn:aws:iam::{ACCOUNT_A}:user/integrator"),
+        "ext-1234",
+    );
+    let role_arn = create_role(&iam_b, "third-party", &trust).await;
+
+    assert_eq!(
+        assume(&sts, &role_arn, Some("ext-1234")).await,
+        Err("AccessDenied".to_string())
+    );
+}
+
+/// Within one account a trust policy naming the caller is a grant on its own,
+/// conditions included: the caller needs no `sts:AssumeRole` of its own.
+#[tokio::test]
+async fn sts_same_account_conditioned_trust_grants_without_identity_policy() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let iam_a = aws_sdk_iam::Client::new(&config_with(&server, &a_akid, &a_secret).await);
+
+    let sts = StsClient::new(&user_config(&server, &iam_a, "integrator", false).await);
+    let trust = external_id_trust(
+        &format!("arn:aws:iam::{ACCOUNT_A}:user/integrator"),
+        "ext-1234",
+    );
+    let role_arn = create_role(&iam_a, "trusts-integrator", &trust).await;
+
+    let session = assume(&sts, &role_arn, Some("ext-1234")).await.unwrap();
+    assert!(
+        session.starts_with(&format!(
+            "arn:aws:sts::{ACCOUNT_A}:assumed-role/trusts-integrator/"
+        )),
+        "{session}"
+    );
+    assert_eq!(
+        assume(&sts, &role_arn, Some("ext-wrong")).await,
+        Err("AccessDenied".to_string())
+    );
+}
+
+// ======================================================================
 // IAM: every entity ARN carries the account it was created in
 // ======================================================================
 

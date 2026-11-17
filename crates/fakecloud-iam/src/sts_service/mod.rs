@@ -375,6 +375,21 @@ impl AwsService for StsService {
             resource,
         })
     }
+
+    /// IAM enforcement evaluates an `AssumeRole`'s trust policy as the role's
+    /// resource policy, which across accounts must allow on its own, so it
+    /// needs the keys trust policies condition on (`sts:ExternalId`).
+    fn iam_condition_keys_for(
+        &self,
+        request: &fakecloud_core::service::AwsRequest,
+        action: &fakecloud_core::auth::IamAction,
+    ) -> std::collections::BTreeMap<String, Vec<String>> {
+        if action.action == "AssumeRole" {
+            assume::assume_role_condition_keys(request)
+        } else {
+            std::collections::BTreeMap::new()
+        }
+    }
 }
 
 /// Partition-aware STS issuer URL for JWT `iss` claims. Mirrors the
@@ -3144,5 +3159,66 @@ mod tests {
         assert_eq!(decide("s3:GetBucketPolicy"), Decision::Allow);
         assert_eq!(decide("s3:GetObject"), Decision::ExplicitDeny);
         assert_eq!(decide("iam:CreateUser"), Decision::ExplicitDeny);
+    }
+
+    fn sts_iam_action(action: &'static str) -> fakecloud_core::auth::IamAction {
+        fakecloud_core::auth::IamAction {
+            service: "sts",
+            action,
+            resource: "arn:aws:iam::222222222222:role/third-party".to_string(),
+        }
+    }
+
+    #[test]
+    fn iam_condition_keys_for_assume_role_populates_sts_keys() {
+        let (sts, _state) = make_sts_service();
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", "arn:aws:iam::222222222222:role/third-party"),
+                ("RoleSessionName", "ingest"),
+                ("ExternalId", "ext-1234"),
+                ("SourceIdentity", "alice"),
+            ],
+        );
+        let keys = sts.iam_condition_keys_for(&req, &sts_iam_action("AssumeRole"));
+        assert_eq!(
+            keys.get("sts:externalid"),
+            Some(&vec!["ext-1234".to_string()])
+        );
+        assert_eq!(
+            keys.get("sts:rolesessionname"),
+            Some(&vec!["ingest".to_string()])
+        );
+        assert_eq!(
+            keys.get("sts:sourceidentity"),
+            Some(&vec!["alice".to_string()])
+        );
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn iam_condition_keys_for_assume_role_omits_missing_external_id() {
+        let (sts, _state) = make_sts_service();
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", "arn:aws:iam::222222222222:role/third-party"),
+                ("RoleSessionName", "ingest"),
+            ],
+        );
+        let keys = sts.iam_condition_keys_for(&req, &sts_iam_action("AssumeRole"));
+        assert!(!keys.contains_key("sts:externalid"));
+        assert!(!keys.contains_key("sts:sourceidentity"));
+        assert!(keys.contains_key("sts:rolesessionname"));
+    }
+
+    #[test]
+    fn iam_condition_keys_for_other_actions_is_empty() {
+        let (sts, _state) = make_sts_service();
+        let req = sts_request("GetSessionToken", vec![("ExternalId", "ext-1234")]);
+        assert!(sts
+            .iam_condition_keys_for(&req, &sts_iam_action("GetSessionToken"))
+            .is_empty());
     }
 }

@@ -2,6 +2,27 @@
 
 use super::*;
 
+/// The `sts:*` condition keys AWS sets on an `AssumeRole` request. The trust
+/// policy is evaluated with them twice: by IAM enforcement, where it must
+/// allow a cross-account request on its own, and by the handler for every
+/// request, so both build them here.
+pub(super) fn assume_role_condition_keys(
+    req: &AwsRequest,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    [
+        ("ExternalId", "sts:externalid"),
+        ("RoleSessionName", "sts:rolesessionname"),
+        ("SourceIdentity", "sts:sourceidentity"),
+    ]
+    .into_iter()
+    .filter_map(|(param, key)| {
+        req.query_params
+            .get(param)
+            .map(|value| (key.to_string(), vec![value.clone()]))
+    })
+    .collect()
+}
+
 impl StsService {
     pub(super) fn assume_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_arn = req.query_params.get("RoleArn").ok_or_else(|| {
@@ -182,22 +203,9 @@ impl StsService {
                 aws_principal_account: Some(caller_principal.account_id.clone()),
                 aws_principal_type: Some(caller_principal.principal_type.as_str().to_string()),
                 aws_mfa_present: Some(mfa_present),
+                service_keys: assume_role_condition_keys(req),
                 ..Default::default()
             };
-            if let Some(eid) = req.query_params.get("ExternalId") {
-                context
-                    .service_keys
-                    .insert("sts:externalid".to_string(), vec![eid.clone()]);
-            }
-            context.service_keys.insert(
-                "sts:rolesessionname".to_string(),
-                vec![role_session_name.clone()],
-            );
-            if let Some(src) = req.query_params.get("SourceIdentity") {
-                context
-                    .service_keys
-                    .insert("sts:sourceidentity".to_string(), vec![src.clone()]);
-            }
             // `aws:SourceAccount` — the calling account (cross-account
             // confused-deputy guard). Trust policies on third-party-
             // hosted roles commonly gate on this so a service running
