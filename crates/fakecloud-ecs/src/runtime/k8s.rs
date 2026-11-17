@@ -526,17 +526,27 @@ impl EcsRuntime {
         let mut fallback_reason: Option<String> = None;
         if creds_init.is_some() {
             match &create {
-                // A task that itself asks for privileged / hostPID / hostIPC
-                // is refused by the same Pod Security levels that refuse
-                // NET_ADMIN, so a relaunch without the credentials
-                // initContainer would be refused too: fail with admission's
-                // own reason instead of blaming the credentials route.
-                Err(e) if requests_host_access(&resolved) => {
+                // Pod Security refused the task's own privileged / hostPID /
+                // hostIPC: a relaunch without the credentials initContainer
+                // would be refused the same way, so fail with admission's
+                // reason instead of blaming the credentials route. Any other
+                // refusal (a policy aimed at the initContainer, a transient
+                // API error) keeps the full-URI fallback below.
+                Err(e)
+                    if requests_host_access(&resolved)
+                        && pod_security_refuses_host_access(&e.to_string()) =>
+                {
+                    let reason = format!("create task pod: {e}");
                     mark_pull_stopped(state, account_id, task_id);
-                    backend.pods.write().remove(task_id);
-                    return Err(RuntimeError::ContainerStart(format!(
-                        "create task pod: {e}"
-                    )));
+                    // The API server may have accepted the Pod despite the
+                    // error: make sure it's gone, as the fallback path does,
+                    // or keep owning it so StopTask / shutdown still reach it.
+                    if backend.delete_pod_and_wait(&pod_name).await {
+                        backend.pods.write().remove(task_id);
+                    } else {
+                        backend.keep_deleting(task_id, &pod_name);
+                    }
+                    return Err(RuntimeError::ContainerStart(reason));
                 }
                 // Admission refused the Pod (typically NET_ADMIN under a
                 // restrictive Pod Security level).
@@ -930,6 +940,22 @@ fn requests_host_access(resolved: &[(ContainerPlan, Vec<(String, String)>)]) -> 
             || p.host_namespaces.ipc
             || p.linux_parameters.as_ref().is_some_and(|lp| lp.privileged)
     })
+}
+
+/// Whether a Pod creation error is Pod Security admission refusing host
+/// access itself (`violates PodSecurity "...": host namespaces (hostPID=true)
+/// ... privileged (... securityContext.privileged=true)`), as opposed to the
+/// credentials initContainer's `NET_ADMIN`, another policy engine, or a
+/// transient API error.
+fn pod_security_refuses_host_access(error: &str) -> bool {
+    error.contains("violates PodSecurity")
+        && [
+            "hostPID=true",
+            "hostIPC=true",
+            "securityContext.privileged=true",
+        ]
+        .iter()
+        .any(|field| error.contains(field))
 }
 
 /// Build the Pod for a task. Returns the Pod and the container-name map.
@@ -1426,6 +1452,28 @@ mod tests {
         let (pod, _) = build(&[(a, vec![]), (b, vec![])]);
         let vols = pod.spec.unwrap().volumes.unwrap();
         assert_eq!(vols.len(), 1, "same source should share one volume");
+    }
+
+    #[test]
+    fn only_a_pod_security_refusal_of_host_access_short_circuits() {
+        // Pod Security refusing the task's own host access.
+        assert!(pod_security_refuses_host_access(
+            r#"pods "fakecloud-ecs-t" is forbidden: violates PodSecurity "baseline:latest": host namespaces (hostPID=true, hostIPC=true)"#
+        ));
+        assert!(pod_security_refuses_host_access(
+            r#"pods "p" is forbidden: violates PodSecurity "baseline:latest": privileged (container "agent" must not set securityContext.privileged=true)"#
+        ));
+        // Pod Security refusing only the credentials initContainer.
+        assert!(!pod_security_refuses_host_access(
+            r#"pods "p" is forbidden: violates PodSecurity "baseline:latest": non-default capabilities (container "fakecloud-ecs-creds" must not include "NET_ADMIN" in securityContext.capabilities.add)"#
+        ));
+        // Another policy engine, or a transient API error.
+        assert!(!pod_security_refuses_host_access(
+            r#"admission webhook "validation.gatekeeper.sh" denied the request: hostPID=true is not allowed"#
+        ));
+        assert!(!pod_security_refuses_host_access(
+            "connection reset by peer"
+        ));
     }
 
     #[test]

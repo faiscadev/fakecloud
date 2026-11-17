@@ -17,16 +17,21 @@ impl EcsRuntime {
         if !needs_engine {
             return Ok(plans);
         }
-        let docker_server = fakecloud_core::container_net::is_docker_server_async(&self.cli).await;
+        use fakecloud_core::container_net::{docker_server_async, EngineServer};
+        // An engine that didn't answer is asked once more before giving up.
+        let mut server = docker_server_async(&self.cli).await;
+        if server == EngineServer::Unknown {
+            server = docker_server_async(&self.cli).await;
+        }
         let mut log_dir: Option<String> = None;
         for plan in &mut plans {
-            plan.log_argv = log_driver_argv(plan.log_configuration.as_ref(), docker_server);
+            plan.log_argv = log_driver_argv(plan.log_configuration.as_ref(), server);
             for vm in &mut plan.volume_mounts {
                 if vm.log_driver.is_none() {
                     continue;
                 }
                 if log_dir.is_none() {
-                    log_dir = Some(self.json_file_log_dir(docker_server).await?);
+                    log_dir = Some(self.json_file_log_dir(server).await?);
                 }
                 vm.source = log_dir.clone().unwrap_or_default();
             }
@@ -40,7 +45,21 @@ impl EcsRuntime {
     /// `<GraphRoot>/<driver>-containers`. The engine resolves the path on
     /// its own host, so it is right when fakecloud itself runs in a
     /// container, or the engine in a VM.
-    async fn json_file_log_dir(&self, docker_server: bool) -> Result<String, RuntimeError> {
+    async fn json_file_log_dir(
+        &self,
+        server: fakecloud_core::container_net::EngineServer,
+    ) -> Result<String, RuntimeError> {
+        use fakecloud_core::container_net::EngineServer;
+        // Which layout the directory has depends on the engine; guessing
+        // wrong mounts an empty directory the daemon reads nothing from.
+        if server == EngineServer::Unknown {
+            return Err(RuntimeError::ContainerStart(
+                "could not determine the container engine (its server did not answer \
+                 `version`), so the log driver volume's directory is unknown"
+                    .into(),
+            ));
+        }
+        let docker_server = server == EngineServer::Docker;
         let native_podman =
             !docker_server && fakecloud_core::container_net::is_podman_async(&self.cli).await;
         let format = engine_log_dir_format(native_podman);

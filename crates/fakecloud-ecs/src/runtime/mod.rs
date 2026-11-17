@@ -389,11 +389,10 @@ const LOCAL_LOG_MAX_FILE: &str = "100";
 ///
 /// `log` is the container's `logConfiguration`, set on the plan only while a
 /// daemon with a log driver volume is active in the task's cluster; with no
-/// such daemon, and on any engine server that isn't Docker Engine (Podman,
-/// including a Docker CLI on Podman's compat socket, has no `local` driver
-/// and no separate json-file format), no flags are emitted and the container
-/// logs exactly as it otherwise would.
+/// such daemon (or an engine that didn't answer) no flags are emitted and the
+/// container logs exactly as it otherwise would.
 ///
+/// On Docker Engine:
 /// - `json-file`: the json-file driver and its options, so the container's
 ///   `<id>/<id>-json.log` is in the volume.
 /// - another driver: the `local` driver, so `docker logs` (which fakecloud
@@ -402,10 +401,30 @@ const LOCAL_LOG_MAX_FILE: &str = "100";
 ///   write to the volume.
 /// - no `logConfiguration`: the engine default, which on ECS (and on a
 ///   default Docker install) is json-file.
-pub(crate) fn log_driver_argv(log: Option<&LogConfiguration>, docker_server: bool) -> Vec<String> {
-    let Some(log) = log.filter(|_| docker_server) else {
+///
+/// On any other server (Podman, including a Docker CLI on its compat socket),
+/// which has no `local` driver and no separate json-file format, only an
+/// explicit `json-file` is passed through (Podman maps it to `k8s-file`, so
+/// the container doesn't fall back to a host default such as journald).
+pub(crate) fn log_driver_argv(
+    log: Option<&LogConfiguration>,
+    server: fakecloud_core::container_net::EngineServer,
+) -> Vec<String> {
+    use fakecloud_core::container_net::EngineServer;
+    let Some(log) = log else {
         return Vec::new();
     };
+    match server {
+        EngineServer::Unknown => return Vec::new(),
+        EngineServer::NotDocker => {
+            return if log.driver == JSON_FILE_LOG_DRIVER {
+                vec!["--log-driver".to_string(), JSON_FILE_LOG_DRIVER.to_string()]
+            } else {
+                Vec::new()
+            };
+        }
+        EngineServer::Docker => {}
+    }
     let mut argv = vec!["--log-driver".to_string()];
     if log.driver == JSON_FILE_LOG_DRIVER {
         argv.push(JSON_FILE_LOG_DRIVER.to_string());
@@ -4390,13 +4409,14 @@ mod tests {
             driver: "awslogs".into(),
             options: vec![("awslogs-group".into(), "/ecs/app".into())],
         };
+        use fakecloud_core::container_net::EngineServer;
         assert_eq!(
-            log_driver_argv(Some(&json_file), true),
+            log_driver_argv(Some(&json_file), EngineServer::Docker),
             vec!["--log-driver", "json-file", "--log-opt", "max-size=10m"]
         );
         // `local` keeps enough output for fakecloud's read at exit.
         assert_eq!(
-            log_driver_argv(Some(&awslogs), true),
+            log_driver_argv(Some(&awslogs), EngineServer::Docker),
             vec![
                 "--log-driver",
                 "local",
@@ -4406,14 +4426,20 @@ mod tests {
                 "max-file=100"
             ]
         );
-        // Not Docker Engine (Podman, or a Docker CLI on its compat socket):
-        // logging is left alone.
-        assert!(log_driver_argv(Some(&json_file), false).is_empty());
-        assert!(log_driver_argv(Some(&awslogs), false).is_empty());
-        assert!(log_driver_argv(None, true).is_empty());
+        // Podman (or a Docker CLI on its compat socket): an explicit
+        // json-file keeps its driver name; nothing else is touched.
+        assert_eq!(
+            log_driver_argv(Some(&json_file), EngineServer::NotDocker),
+            vec!["--log-driver", "json-file"]
+        );
+        assert!(log_driver_argv(Some(&awslogs), EngineServer::NotDocker).is_empty());
+        // An engine that didn't answer: left alone.
+        assert!(log_driver_argv(Some(&json_file), EngineServer::Unknown).is_empty());
+        assert!(log_driver_argv(Some(&awslogs), EngineServer::Unknown).is_empty());
+        assert!(log_driver_argv(None, EngineServer::Docker).is_empty());
 
         let mut plan = tests_support::minimal_plan();
-        plan.log_argv = log_driver_argv(Some(&json_file), true);
+        plan.log_argv = log_driver_argv(Some(&json_file), EngineServer::Docker);
         let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", OWN_NET, "img");
         let image_at = argv.iter().position(|a| a == "img").unwrap();
         let driver_at = argv.iter().position(|a| a == "--log-driver").unwrap();
