@@ -1,5 +1,6 @@
 pub mod alarm_actions;
 pub(crate) mod alarm_eval;
+pub mod alarm_mutes;
 pub(crate) mod anomaly_detectors;
 pub(crate) mod composite_alarms;
 pub(crate) mod datasets;
@@ -12,6 +13,7 @@ pub(crate) mod log_alarms;
 pub(crate) mod metric_math;
 pub(crate) mod metric_streams;
 pub(crate) mod mute_rules;
+pub(crate) mod mute_schedule;
 pub(crate) mod otel;
 pub(crate) mod resource_metrics;
 pub(crate) mod series_index;
@@ -22,7 +24,10 @@ pub(crate) mod tagging;
 #[cfg(test)]
 mod tests;
 
-pub use alarm_actions::{Ec2AlarmActionHook, Ec2InstanceAction};
+pub use alarm_actions::{
+    AlarmOpsItem, Ec2AlarmActionHook, Ec2InstanceAction, OpsItemAlarmActionHook, OPS_ITEM_SOURCE,
+};
+pub use alarm_mutes::alarm_muted;
 pub use delivery::CloudwatchDeliveryImpl;
 pub use service::CloudWatchService;
 pub use state::{

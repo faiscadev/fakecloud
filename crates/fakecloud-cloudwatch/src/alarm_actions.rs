@@ -13,9 +13,16 @@
 //!   acts on the instance named by the alarm's `InstanceId` dimension through
 //!   the EC2 service;
 //! - Application Auto Scaling policy ARNs are acted on by the scaling
-//!   watcher, which reads the alarm state itself.
+//!   watcher, which reads the alarm state itself;
+//! - a Systems Manager OpsItem action
+//!   (`arn:aws:ssm:<region>:<account>:opsitem:<severity>[#CATEGORY=<category>]`)
+//!   opens an OpsItem in OpsCenter (source `CloudWatch Alarm`, title
+//!   `CloudWatch alarm - '<name>' is in <STATE> state`, the alarm as related
+//!   resource), unless one the alarm opened is still unresolved.
 //!
 //! Each executed action is recorded in the alarm history as an `Action` item.
+//! While a mute rule mutes the alarm, its actions are held back instead (see
+//! [`crate::alarm_mutes`]).
 //! A composite alarm whose actions its `ActionsSuppressor` holds back performs
 //! them once the suppression ends, if it is still in ALARM.
 
@@ -66,6 +73,51 @@ pub trait Ec2AlarmActionHook: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
+/// The OpsItem a Systems Manager alarm action opens in OpsCenter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlarmOpsItem {
+    pub account_id: String,
+    pub region: String,
+    /// `CloudWatch alarm - '<name>' is in <STATE> state`.
+    pub title: String,
+    /// `CloudWatch Alarm`.
+    pub source: String,
+    pub description: String,
+    /// `1`-`4`, from the action ARN.
+    pub severity: String,
+    /// From the action ARN's `#CATEGORY=`.
+    pub category: Option<String>,
+    /// `OperationalData` (`/aws/resources`, `/aws/dedup`), in the
+    /// CreateOpsItem wire shape.
+    pub operational_data: Value,
+    /// While an OpsItem with this deduplication string isn't resolved, the
+    /// alarm opens no other.
+    pub dedup_string: String,
+}
+
+/// Opens OpsItems for Systems Manager alarm actions. The server implements
+/// it on top of the SSM service so this crate needn't depend on it.
+pub trait OpsItemAlarmActionHook: Send + Sync {
+    /// Open `item`, returning its ID, or `None` when an OpsItem with the
+    /// same deduplication string is still open.
+    fn create(
+        &self,
+        item: AlarmOpsItem,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send>>;
+}
+
+/// The OpsItem categories an action ARN can name.
+const OPS_ITEM_CATEGORIES: &[&str] = &[
+    "Availability",
+    "Cost",
+    "Performance",
+    "Recovery",
+    "Security",
+];
+
+/// The source of the OpsItems alarms open.
+pub const OPS_ITEM_SOURCE: &str = "CloudWatch Alarm";
+
 /// Who may perform an alarm action on its target, as the target's resource
 /// policy names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,9 +160,14 @@ pub(crate) enum ActionTarget {
     Ec2(Ec2InstanceAction),
     /// Application Auto Scaling policy, performed by the scaling watcher.
     AutoScaling,
+    /// Open a Systems Manager OpsItem with this severity (`1`-`4`) and
+    /// category.
+    OpsItem {
+        severity: u8,
+        category: Option<&'static str>,
+    },
     /// A valid action fakecloud doesn't perform (EC2 Auto Scaling group
-    /// policies, Systems Manager OpsItems, Incident Manager response plans,
-    /// Amazon Q investigations).
+    /// policies, Incident Manager response plans, Amazon Q investigations).
     NotPerformed,
     Unsupported,
 }
@@ -134,6 +191,7 @@ pub(crate) fn validate_action(arn: &str, region: &str, kind: AlarmKind) -> Resul
     let allowed = match (target, kind) {
         (ActionTarget::Sns | ActionTarget::Lambda, _) => true,
         (ActionTarget::Ec2(_) | ActionTarget::AutoScaling, AlarmKind::Metric) => true,
+        (ActionTarget::OpsItem { .. }, _) => true,
         (ActionTarget::NotPerformed, AlarmKind::Metric) => true,
         (ActionTarget::NotPerformed, AlarmKind::Composite) => {
             matches!(service, "ssm" | "aiops")
@@ -162,7 +220,10 @@ pub(crate) fn classify(arn: &str) -> ActionTarget {
     }
     match parts[2] {
         // arn:aws:ssm:<region>:<account>:opsitem:<severity>[#CATEGORY=<c>]
-        "ssm" if parts[5].starts_with("opsitem:") => return ActionTarget::NotPerformed,
+        "ssm" if parts[5].starts_with("opsitem:") => {
+            return parse_ops_item(&parts[5]["opsitem:".len()..])
+                .unwrap_or(ActionTarget::Unsupported)
+        }
         // arn:aws:ssm-incidents::<account>:responseplan/<name>
         "ssm-incidents" if parts[5].starts_with("responseplan/") => {
             return ActionTarget::NotPerformed
@@ -211,6 +272,95 @@ pub(crate) fn classify(arn: &str) -> ActionTarget {
     }
 }
 
+/// `<severity>[#CATEGORY=<category>]` of an OpsItem action: severity `1`-`4`,
+/// category one of OpsCenter's.
+fn parse_ops_item(rest: &str) -> Option<ActionTarget> {
+    let (severity, category) = match rest.split_once('#') {
+        Some((s, c)) => {
+            let c = c.strip_prefix("CATEGORY=")?;
+            (s, Some(*OPS_ITEM_CATEGORIES.iter().find(|k| **k == c)?))
+        }
+        None => (rest, None),
+    };
+    let severity = match severity {
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        _ => return None,
+    };
+    Some(ActionTarget::OpsItem { severity, category })
+}
+
+/// The OpsItem an alarm's OpsItem action opens for notification `n`.
+fn ops_item_for(
+    n: &AlarmNotification,
+    arn: &str,
+    severity: u8,
+    category: Option<&str>,
+) -> Result<AlarmOpsItem, String> {
+    let account = fakecloud_aws::arn::account_of(arn).unwrap_or_default();
+    let region = arn.split(':').nth(3).unwrap_or_default();
+    if account != n.account_id || region != n.region {
+        return Err(format!(
+            "The OpsItem action {arn} must name the alarm's own account and region"
+        ));
+    }
+    let mut resources = vec![json!({"arn": n.alarm_arn})];
+    if let Some(id) = &n.instance_id {
+        resources.push(json!({
+            "arn": format!(
+                "arn:{}:ec2:{}:{}:instance/{id}",
+                fakecloud_aws::arn::partition_of(&n.alarm_arn),
+                n.region,
+                n.account_id
+            )
+        }));
+    }
+    let dedup_string = n.alarm_arn.clone();
+    let description = n
+        .alarm_description
+        .clone()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| n.state_reason.clone());
+    let description = if description.is_empty() {
+        format!(
+            "CloudWatch alarm {} is in {} state",
+            n.alarm_name,
+            n.state.as_str()
+        )
+    } else {
+        description.chars().take(2048).collect()
+    };
+    Ok(AlarmOpsItem {
+        account_id: n.account_id.clone(),
+        region: n.region.clone(),
+        title: format!(
+            "CloudWatch alarm - '{}' is in {} state",
+            n.alarm_name,
+            n.state.as_str()
+        )
+        .chars()
+        .take(1024)
+        .collect(),
+        source: OPS_ITEM_SOURCE.to_string(),
+        description,
+        severity: severity.to_string(),
+        category: category.map(str::to_string),
+        operational_data: json!({
+            "/aws/resources": {
+                "Value": Value::Array(resources).to_string(),
+                "Type": "SearchableString",
+            },
+            "/aws/dedup": {
+                "Value": json!({"dedupString": dedup_string}).to_string(),
+                "Type": "SearchableString",
+            },
+        }),
+        dedup_string,
+    })
+}
+
 /// The actions an alarm owes for one state change, with the payloads each
 /// target type receives.
 #[derive(Debug, Clone)]
@@ -231,6 +381,10 @@ pub(crate) struct AlarmNotification {
     pub epoch: u64,
     /// The alarm's ARN (the `aws:SourceArn` its actions are authorized as).
     pub alarm_arn: String,
+    /// The state the alarm changed to, with its reason.
+    pub state: AlarmState,
+    pub state_reason: String,
+    pub alarm_description: Option<String>,
 }
 
 fn actions_for(
@@ -548,6 +702,9 @@ pub(crate) fn metric_alarm_notification(
         instance_id: alarm.dimensions.get("InstanceId").cloned(),
         epoch: 0,
         alarm_arn: alarm.alarm_arn.clone(),
+        state: alarm.state_value,
+        state_reason: alarm.state_reason.clone(),
+        alarm_description: alarm.alarm_description.clone(),
     })
 }
 
@@ -649,6 +806,9 @@ pub(crate) fn composite_alarm_notification(
         instance_id: None,
         epoch: 0,
         alarm_arn: alarm.alarm_arn.clone(),
+        state: alarm.state_value,
+        state_reason: alarm.state_reason.clone(),
+        alarm_description: alarm.alarm_description.clone(),
     })
 }
 
@@ -734,16 +894,18 @@ pub(crate) fn log_alarm_notification(
         instance_id: None,
         epoch: 0,
         alarm_arn: alarm.alarm_arn.clone(),
+        state: alarm.state_value,
+        state_reason: alarm.state_reason.clone(),
+        alarm_description: alarm.alarm_description.clone(),
     })
 }
 
-/// Run every action of `n` and return the `Action` history items recording
-/// the outcomes.
 /// Where alarm actions go.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ActionTargets<'a> {
     pub delivery: Option<&'a DeliveryBus>,
     pub ec2: Option<&'a dyn Ec2AlarmActionHook>,
+    pub ops_items: Option<&'a dyn OpsItemAlarmActionHook>,
     /// Checks targets' resource policies; without it they aren't checked.
     pub authorizer: Option<&'a dyn AlarmActionAuthorizer>,
 }
@@ -810,11 +972,18 @@ fn authorize(
     }
 }
 
+/// Run every action of `n` and return the `Action` history items recording
+/// the outcomes.
 pub(crate) async fn dispatch(
     n: &AlarmNotification,
     targets: ActionTargets<'_>,
 ) -> Vec<AlarmHistoryItem> {
-    let ActionTargets { delivery, ec2, .. } = targets;
+    let ActionTargets {
+        delivery,
+        ec2,
+        ops_items,
+        ..
+    } = targets;
     let mut items = Vec::new();
     for arn in &n.actions {
         let mut data = Map::new();
@@ -842,6 +1011,13 @@ pub(crate) async fn dispatch(
                 (Some(_), None) => Err("EC2 is not available".to_string()),
                 (Some(id), Some(hook)) => hook.perform(&n.account_id, &n.region, id, action).await,
             },
+            (ActionTarget::OpsItem { severity, category }, _) => {
+                match (ops_item_for(n, arn, severity, category), ops_items) {
+                    (Err(e), _) => Err(e),
+                    (Ok(_), None) => Err("Systems Manager is not available".to_string()),
+                    (Ok(item), Some(hook)) => hook.create(item).await.map(|_| ()),
+                }
+            }
             // The scaling watcher acts on the alarm state itself.
             (ActionTarget::AutoScaling, _) => continue,
             (ActionTarget::NotPerformed, _) => {
@@ -918,6 +1094,29 @@ mod tests {
         );
         assert_eq!(
             classify("arn:aws:ssm:us-east-1:123456789012:opsitem:3#CATEGORY=Security"),
+            ActionTarget::OpsItem {
+                severity: 3,
+                category: Some("Security")
+            }
+        );
+        assert_eq!(
+            classify("arn:aws:ssm:us-east-1:123456789012:opsitem:1"),
+            ActionTarget::OpsItem {
+                severity: 1,
+                category: None
+            }
+        );
+        for bad in [
+            "arn:aws:ssm:us-east-1:123456789012:opsitem:5",
+            "arn:aws:ssm:us-east-1:123456789012:opsitem:03",
+            "arn:aws:ssm:us-east-1:123456789012:opsitem:high",
+            "arn:aws:ssm:us-east-1:123456789012:opsitem:3#CATEGORY=Fun",
+            "arn:aws:ssm:us-east-1:123456789012:opsitem:3#Security",
+        ] {
+            assert_eq!(classify(bad), ActionTarget::Unsupported, "{bad}");
+        }
+        assert_eq!(
+            classify("arn:aws:ssm-incidents::123456789012:responseplan/plan"),
             ActionTarget::NotPerformed
         );
         assert_eq!(

@@ -179,6 +179,11 @@ pub(crate) fn evaluate_alarms_in(
     let mut out = Evaluated::default();
     let account_id = state.account_id.clone();
     let mut metric_transition = false;
+    // Mute windows starting or ending now (before this pass's transitions, so
+    // a window starting now records the state the alarm was in).
+    let mutes = crate::alarm_mutes::update_mutes(state, region, now);
+    out.changed |= mutes.changed;
+    out.notifications.extend(mutes.owed);
     // ---- Metric alarms ----
     let mut history: Vec<AlarmHistoryItem> = Vec::new();
     {
@@ -279,21 +284,24 @@ pub(crate) fn evaluate_alarms_in(
     // ---- Composite alarms ----
     // Composites follow their children, so a targeted or timed pass only
     // needs them when a child changed or a suppression is running out.
-    let composites_due = match scope {
-        Scope::All | Scope::Composites => true,
-        Scope::Series { .. } => metric_transition,
-        Scope::Due => {
-            metric_transition
-                || state.composite_alarms.get(region).is_some_and(|c| {
-                    c.values().any(|a| {
-                        a.actions_suppressed_by.is_some() || a.pending_action_from.is_some()
+    let composites_due = mutes.changed
+        || match scope {
+            Scope::All | Scope::Composites => true,
+            Scope::Series { .. } => metric_transition,
+            Scope::Due => {
+                metric_transition
+                    || state.composite_alarms.get(region).is_some_and(|c| {
+                        c.values().any(|a| {
+                            a.actions_suppressed_by.is_some() || a.pending_action_from.is_some()
+                        })
                     })
-                })
-        }
-    };
+            }
+        };
     if composites_due {
         evaluate_composite_alarms(state, region, now, &mut out);
     }
+    // Muted alarms' actions are held back (and recorded in their history).
+    crate::alarm_mutes::hold_muted(state, region, &mutes.muted, &mut out.notifications, now);
     let epoch = state.epoch;
     for n in &mut out.notifications {
         n.epoch = epoch;

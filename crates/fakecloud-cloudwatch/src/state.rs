@@ -86,6 +86,11 @@ pub struct CloudWatchState {
     /// region -> rule_name -> AlarmMuteRule
     #[serde(default)]
     pub mute_rules: BTreeMap<String, BTreeMap<String, AlarmMuteRule>>,
+    /// region -> alarm_name -> the alarm's state when its current mute
+    /// window started (present while a mute rule mutes the alarm). When the
+    /// window ends, the actions of the alarm's state then run if it differs.
+    #[serde(default)]
+    pub alarm_mutes: BTreeMap<String, BTreeMap<String, PreviousState>>,
     /// region -> dataset_identifier -> Dataset (KMS key association)
     #[serde(default)]
     pub datasets: BTreeMap<String, BTreeMap<String, Dataset>>,
@@ -767,4 +772,7 @@ pub struct AlarmMuteRule {
     pub start_date: Option<DateTime<Utc>>,
     pub expire_date: Option<DateTime<Utc>>,
     pub last_updated_timestamp: DateTime<Utc>,
+    /// When the rule was first created (kept across updates).
+    #[serde(default)]
+    pub created_timestamp: Option<DateTime<Utc>>,
 }
