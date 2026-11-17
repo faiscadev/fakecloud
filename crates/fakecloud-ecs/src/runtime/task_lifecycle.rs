@@ -556,6 +556,16 @@ impl EcsRuntime {
                     ..rc.clone()
                 })
                 .collect();
+            // Whatever stop was requested keeps its code and reason
+            // (UserInitiated for StopTask, ServiceSchedulerInitiated for a
+            // scale-down / deletion).
+            let (stop_code, reason) = match requested_stop(state, account_id, task_id) {
+                Some((code, reason)) => (
+                    code,
+                    reason.unwrap_or_else(|| "Task stopped during launch".into()),
+                ),
+                None => ("UserInitiated", "Task stopped during launch".into()),
+            };
             self.deprovision(state, account_id, &region, task_id);
             finalize_stopped_multi(
                 state,
@@ -564,15 +574,15 @@ impl EcsRuntime {
                 &stopped,
                 137,
                 "",
-                "UserInitiated",
-                Some("Task stopped during launch".into()),
+                stop_code,
+                Some(reason.clone()),
             );
             self.emit_state_change(
                 state,
                 account_id,
                 task_id,
                 "STOPPED",
-                Some(("UserInitiated", "Task stopped during launch".into())),
+                Some((stop_code, reason)),
             );
             self.persist_snapshot().await;
             return Ok(());

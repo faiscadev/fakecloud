@@ -1006,6 +1006,46 @@ pub(super) mod multi_container_tests {
     /// A stopping task (DEACTIVATING / STOPPING / DEPROVISIONING) is no
     /// longer in a service's runningCount, but still blocks DeleteCluster and
     /// keeps a deleted service draining, as on ECS.
+    /// A stack deletion scales the services it removes to zero before
+    /// stopping their tasks, so the scheduler can't backfill them; other
+    /// clusters' services are untouched.
+    #[test]
+    fn cfn_drain_scales_services_to_zero_before_their_tasks_stop() {
+        let svc = fresh_service();
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({"family": "web", "containerDefinitions": [{"name": "web", "image": "busybox"}]}),
+        ))
+        .expect("register");
+        for (cluster, name) in [("default", "a"), ("default", "b"), ("other", "c")] {
+            if cluster != "default" {
+                svc.create_cluster(&make_request(
+                    "CreateCluster",
+                    json!({"clusterName": cluster}),
+                ))
+                .expect("cluster");
+            }
+            svc.create_service(&make_request(
+                "CreateService",
+                json!({"cluster": cluster, "serviceName": name, "taskDefinition": "web",
+                       "desiredCount": 2}),
+            ))
+            .expect("create_service");
+        }
+        let desired = |cluster: &str, name: &str| {
+            let accounts = svc.state.read();
+            let s = &accounts.get("000000000000").unwrap().services
+                [&EcsState::service_key(cluster, name)];
+            (s.desired_count, s.status.clone())
+        };
+        crate::cfn_provision::cfn_drain_services(&svc.state, "000000000000", "default", Some("a"));
+        assert_eq!(desired("default", "a"), (0, "DRAINING".to_string()));
+        assert_eq!(desired("default", "b"), (2, "ACTIVE".to_string()));
+        crate::cfn_provision::cfn_drain_services(&svc.state, "000000000000", "default", None);
+        assert_eq!(desired("default", "b"), (0, "DRAINING".to_string()));
+        assert_eq!(desired("other", "c"), (2, "ACTIVE".to_string()));
+    }
+
     /// Scheduler-driven stops carry ServiceSchedulerInitiated and the
     /// "Scaling activity" reason naming the primary deployment.
     #[test]

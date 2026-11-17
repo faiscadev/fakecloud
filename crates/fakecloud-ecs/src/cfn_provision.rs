@@ -117,6 +117,27 @@ pub fn cfn_live_tasks(
         .collect()
 }
 
+/// Scale the services of `cluster_name` (just `service_name` when given) to
+/// zero and mark them DRAINING, so the service scheduler can't backfill the
+/// tasks a stack deletion is about to stop.
+pub fn cfn_drain_services(
+    state: &SharedEcsState,
+    account_id: &str,
+    cluster_name: &str,
+    service_name: Option<&str>,
+) {
+    let mut accounts = state.write();
+    let Some(st) = accounts.get_mut(account_id) else {
+        return;
+    };
+    for svc in st.services.values_mut().filter(|s| {
+        s.cluster_name == cluster_name && service_name.is_none_or(|n| s.service_name == n)
+    }) {
+        svc.desired_count = 0;
+        svc.status = "DRAINING".into();
+    }
+}
+
 /// Start stopping `task_ids` for a stack deletion, while the service and
 /// cluster records they belong to still exist: their load balancer targets
 /// (found through the service) are deregistered and their ENIs captured for

@@ -924,6 +924,22 @@ impl EcsRuntime {
                     .await;
             }
             if std::time::Instant::now() >= deadline && !marked_running {
+                if stopping {
+                    // Stopped before it ever ran: a clean stop with the
+                    // stop's own code, not a failure to start.
+                    backend.client.delete_pod(&pod_name).await;
+                    return self
+                        .k8s_finalize(
+                            state,
+                            account_id,
+                            task_id,
+                            &pod_name,
+                            &container_map,
+                            started.clone(),
+                            true,
+                        )
+                        .await;
+                }
                 backend.client.delete_pod(&pod_name).await;
                 backend.pods.write().remove(task_id);
                 return Err(RuntimeError::ContainerStart(format!(
@@ -974,24 +990,13 @@ impl EcsRuntime {
             }
         }
 
-        // A StopTask sets stopCode=UserInitiated + a reason before the
-        // runtime observes the Pod deletion. Preserve that user-initiated
-        // stop instead of overwriting it with EssentialContainerExited.
-        let (final_stop_code, final_reason): (&str, Option<String>) = if stopped_externally {
-            let existing = {
-                let accounts = state.read();
-                accounts
-                    .get(account_id)
-                    .and_then(|s| s.tasks.get(task_id))
-                    .map(|t| (t.stop_code.clone(), t.stopped_reason.clone()))
-            };
-            match existing {
-                Some((Some(sc), reason)) if sc == "UserInitiated" => ("UserInitiated", reason),
-                _ => (stop_code, None),
-            }
-        } else {
-            (stop_code, None)
-        };
+        // A StopTask (UserInitiated) or a scheduler stop (ServiceScheduler-
+        // Initiated) sets its stop code + reason before the runtime observes
+        // the Pod deletion. Preserve that requested stop instead of
+        // overwriting it with EssentialContainerExited, as the Docker
+        // backend does.
+        let (final_stop_code, final_reason): (&str, Option<String>) =
+            super::requested_stop(state, account_id, task_id).unwrap_or((stop_code, None));
 
         self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
         let region = super::task_region(state, account_id, task_id);

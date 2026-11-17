@@ -188,11 +188,10 @@ impl EcsRuntime {
         self.teardowns.lock().contains_key(task_id) || self.released.lock().contains(task_id)
     }
 
-    /// Release a stopped task's network: its load balancer targets (if
-    /// [`Self::begin_stopping`] didn't already), the data-plane route of its
-    /// awsvpc ports, and its ENI. Runs once per task; works from the
-    /// teardown captured when the task started stopping, so it completes
-    /// even when the task record is gone.
+    /// The task execution's own release of its network once its containers
+    /// are gone (see [`Self::release_network`]). Once per task: after it, a
+    /// late release could remove the route or ENI of a replacement that
+    /// reused the address, so nothing releases this task again.
     pub(crate) fn finish_teardown(
         &self,
         state: &SharedEcsState,
@@ -200,14 +199,56 @@ impl EcsRuntime {
         region: &str,
         task_id: &str,
     ) {
-        let captured = self.teardowns.lock().remove(task_id);
-        // Exactly once: a second release could remove the route or ENI of
-        // a replacement that reused the address.
         if !self.released.lock().insert(task_id.to_string()) {
+            self.teardowns.lock().remove(task_id);
             return;
         }
+        self.release_network(state, account_id, region, task_id);
+    }
+
+    /// Release for a task no live execution will finalize (it never started,
+    /// or it died): what it holds now is released, without closing the
+    /// execution's own release, which stays authoritative should the
+    /// execution still come to run. Every step is idempotent by id.
+    pub(crate) fn release_orphaned(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        region: &str,
+        task_id: &str,
+    ) {
+        if self.released.lock().contains(task_id) {
+            self.teardowns.lock().remove(task_id);
+            return;
+        }
+        self.release_network(state, account_id, region, task_id);
+    }
+
+    /// Release a stopping task's network: its load balancer targets (if
+    /// [`Self::begin_stopping`] didn't already), the data-plane route of its
+    /// awsvpc ports, and its ENI. Works from the teardown captured when the
+    /// task started stopping, so it completes even when the task record is
+    /// gone.
+    fn release_network(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        region: &str,
+        task_id: &str,
+    ) {
+        let captured = self.teardowns.lock().remove(task_id);
         let teardown = match captured {
-            Some(t) => t,
+            Some(mut t) => {
+                // The record, while it exists, is current: an ENI attached
+                // after the stop began (the task was still launching) is
+                // released too.
+                let accounts = state.read();
+                if let Some(task) = accounts.get(account_id).and_then(|s| s.tasks.get(task_id)) {
+                    t.eni_ip = super::eni::task_eni_ip(task).or(t.eni_ip);
+                    t.eni_id = super::eni::task_eni_id(task).or(t.eni_id);
+                }
+                t
+            }
             None => {
                 // Never went through `begin_stopping`: deregister now.
                 let accounts = state.read();
@@ -351,14 +392,25 @@ impl EcsRuntime {
 
     /// Kill every container behind a task at once (SIGKILL; on Kubernetes,
     /// the Pod deleted with no grace period) and wait, a few seconds at
-    /// most, for the execution to finalize it. For teardown and force paths
-    /// that must answer promptly (reset, force-stop), never waiting out a
-    /// `stopTimeout`.
+    /// most, for the execution to finalize it: for a reset, which must
+    /// answer promptly and never waits out a `stopTimeout`. An execution
+    /// still finalizing past that releases the task's network itself.
     pub async fn kill_task_and_wait(
         &self,
         state: &SharedEcsState,
         account_id: &str,
         task_id: &str,
+    ) {
+        self.kill_and_wait(state, account_id, task_id, KILL_FINALIZE_WAIT)
+            .await;
+    }
+
+    async fn kill_and_wait(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        wait: Duration,
     ) {
         let done = self.task_done.lock().get(task_id).cloned();
         self.begin_stopping(state, account_id, task_id);
@@ -383,7 +435,7 @@ impl EcsRuntime {
             }
             kills.join_all().await;
         }
-        self.await_finalize(state, account_id, task_id, done, KILL_FINALIZE_WAIT)
+        self.await_finalize(state, account_id, task_id, done, wait)
             .await;
     }
 
@@ -398,25 +450,29 @@ impl EcsRuntime {
         done: Option<tokio::sync::watch::Receiver<bool>>,
         budget: Duration,
     ) {
-        let finished = match done {
-            Some(mut done) => tokio::time::timeout(budget, done.wait_for(|finished| *finished))
-                .await
-                .is_ok_and(|r| r.is_ok()),
+        let orphaned = match done {
+            // A live execution sees the stop and releases the network itself
+            // when it finalizes, even past `budget`; only one that died
+            // (its signal dropped unset) leaves it to us.
+            Some(mut done) => matches!(
+                tokio::time::timeout(budget, done.wait_for(|finished| *finished)).await,
+                Ok(Err(_))
+            ),
             // No execution in flight: it is over (and released the network
             // already), or it never started (a reset before `run_task`),
             // in which case what `begin_stopping` captured is released now.
-            None => false,
+            None => true,
         };
-        if !finished {
+        if orphaned {
             let region = task_region(state, account_id, task_id);
-            self.finish_teardown(state, account_id, &region, task_id);
+            self.release_orphaned(state, account_id, &region, task_id);
         }
     }
 
     /// Introspection force-stop: request the stop as `StopTask` does (so a
     /// restart policy doesn't bring the containers back), kill the
-    /// containers, and answer once the task is STOPPED (bounded to a few
-    /// seconds). Returns false when no account has the task.
+    /// containers, and answer once the task is STOPPED (bounded by
+    /// [`FORCE_STOP_WAIT`]). Returns false when no account has the task.
     pub async fn force_stop_task(
         &self,
         state: &SharedEcsState,
@@ -434,7 +490,8 @@ impl EcsRuntime {
             request_task_stop(task, reason);
             account_id
         };
-        self.kill_task_and_wait(state, &account_id, task_id).await;
+        self.kill_and_wait(state, &account_id, task_id, FORCE_STOP_WAIT)
+            .await;
         true
     }
 }
@@ -447,6 +504,12 @@ const KILL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// `rm`, state) takes about a second more on a healthy daemon. Short enough
 /// for an SDK's request timeout (5 seconds in the Python SDK).
 const KILL_FINALIZE_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a force-stop waits, after the kill, for the task to be STOPPED:
+/// it answers only once the task is finalized, and the kill is fast, so this
+/// only covers the engine removing the containers and capturing their logs
+/// on a slow host (Podman, a loaded CI runner).
+const FORCE_STOP_WAIT: Duration = Duration::from_secs(60);
 
 #[cfg(test)]
 mod tests {
@@ -570,6 +633,64 @@ mod tests {
             "02:00:00:00:00:01",
         );
         task
+    }
+
+    /// A kill that gives up waiting while the execution is still alive (an
+    /// awsvpc task still pulling) releases nothing and leaves the release to
+    /// the execution, which by then holds the ENI and route it creates.
+    #[tokio::test]
+    async fn a_live_execution_keeps_its_own_release() {
+        use fakecloud_core::dataplane::{register_target, registered_target, Endpoint};
+        let acct = "000000000000";
+        let rt = EcsRuntime::bare_for_tests();
+        let mut task = crate::runtime::tests::make_task("t3");
+        task.last_status = "PENDING".into();
+        let state = state_with(task);
+        let done = rt.track_task_execution("t3");
+        let rx = rt.task_done.lock().get("t3").cloned();
+        rt.begin_stopping(&state, acct, "t3");
+        rt.await_finalize(&state, acct, "t3", rx, Duration::from_millis(50))
+            .await;
+        assert!(
+            !rt.released.lock().contains("t3"),
+            "fallback closed the release"
+        );
+        // The execution then attaches its ENI and publishes its ports...
+        {
+            let mut accounts = state.write();
+            let t = accounts.get_mut(acct).unwrap().tasks.get_mut("t3").unwrap();
+            super::super::eni::attach_eni(
+                t,
+                "att-3",
+                "eni-t3",
+                "subnet-1",
+                "10.9.0.11".parse().unwrap(),
+                "02:00:00:00:00:03",
+            );
+        }
+        register_target(acct, "10.9.0.11", 80, Endpoint::new("127.0.0.1", 40011));
+        // ...and its finalize releases them.
+        rt.deprovision(&state, acct, "us-east-1", "t3");
+        rt.task_execution_finished("t3", &done);
+        assert!(registered_target(acct, "10.9.0.11", 80).is_none());
+    }
+
+    /// An execution that died without finalizing leaves the release to the
+    /// waiter.
+    #[tokio::test]
+    async fn a_dead_execution_is_released_by_the_waiter() {
+        use fakecloud_core::dataplane::{register_target, registered_target, Endpoint};
+        let acct = "000000000000";
+        let rt = EcsRuntime::bare_for_tests();
+        let state = state_with(running_awsvpc_task("t4", "10.9.0.12"));
+        register_target(acct, "10.9.0.12", 80, Endpoint::new("127.0.0.1", 40012));
+        let done = rt.track_task_execution("t4");
+        let rx = rt.task_done.lock().get("t4").cloned();
+        rt.begin_stopping(&state, acct, "t4");
+        drop(done);
+        rt.await_finalize(&state, acct, "t4", rx, Duration::from_secs(5))
+            .await;
+        assert!(registered_target(acct, "10.9.0.12", 80).is_none());
     }
 
     /// A task's network is released once: a second release (a late

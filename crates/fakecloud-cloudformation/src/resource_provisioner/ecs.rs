@@ -61,7 +61,14 @@ impl ResourceProvisioner {
         // Tasks still running in the cluster (with a container runtime) are
         // stopped like a deleted service's: their stop begins while the
         // services that place them behind load balancers still exist, their
-        // records stay until the stack delete drain has stopped them.
+        // records stay until the stack delete drain has stopped them. Its
+        // services are scaled to zero first, so the scheduler can't backfill.
+        fakecloud_ecs::cfn_provision::cfn_drain_services(
+            &self.ecs_state,
+            &self.account_id,
+            physical_id,
+            None,
+        );
         let running = match &self.ecs_runtime {
             Some(runtime) => {
                 let ids = fakecloud_ecs::cfn_provision::cfn_live_tasks(
@@ -497,6 +504,14 @@ impl ResourceProvisioner {
             return Ok(());
         };
         let key = format!("{cluster}/{service}");
+        // Scale the service to zero first, so the scheduler can't backfill
+        // the tasks stopped below while the record still exists.
+        fakecloud_ecs::cfn_provision::cfn_drain_services(
+            &self.ecs_state,
+            &self.account_id,
+            &cluster,
+            Some(&service),
+        );
         // Start stopping the service's REAL tasks while the service record
         // still exists: their load balancer targets are found through it.
         let task_ids = match &self.ecs_runtime {
