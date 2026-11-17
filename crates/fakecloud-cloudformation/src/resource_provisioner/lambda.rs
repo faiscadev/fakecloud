@@ -654,6 +654,7 @@ impl ResourceProvisioner {
             provisioned_poller_config: source_configs.provisioned_poller,
             logging_config: source_configs.logging,
             tags: fakecloud_lambda::esm_config::tags(props),
+            last_processing_result: None,
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))

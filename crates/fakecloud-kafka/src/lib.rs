@@ -33,6 +33,7 @@
 
 pub mod builders;
 pub mod cfn_provision;
+pub mod client;
 pub mod persistence;
 pub mod runtime;
 pub(crate) mod service;

@@ -30,6 +30,13 @@ cluster reconciles on restart by re-attaching its persisted container (or
 respawning if it is gone). This is exactly the Docker-backed bar the Amazon MQ
 data plane meets.
 
+A Lambda event source mapping on a cluster (`EventSourceArn` the cluster ARN)
+consumes its topics from that broker as a member of the mapping's consumer
+group, invokes the function with Lambda's `aws:kafka` event and commits the
+group's offsets on the broker once a batch succeeded; see
+[Lambda](@/docs/services/lambda.md) for batching, starting positions, retries
+and authentication.
+
 The broker has two client listeners. The one `GetBootstrapBrokers` returns
 advertises `127.0.0.1:<port>` for clients on the host. Inside a container
 `127.0.0.1` is the container itself, and a Kafka client follows the advertised

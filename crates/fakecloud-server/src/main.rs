@@ -24,6 +24,7 @@ mod firehose_topology;
 mod glue_external;
 mod imds;
 mod introspection;
+mod kafka_lambda_poller;
 mod kinesis_lambda_firehose_poller;
 mod lambda_delivery;
 mod lambda_runtime_api;
@@ -488,6 +489,8 @@ async fn main() {
     // into their own SSM / Secrets Manager services below.
     let ssm_state_for_codebuild = ssm_state.clone();
     let secretsmanager_state_for_codebuild = secretsmanager_state.clone();
+    // The Kafka event source mapping poller reads SASL credentials.
+    let secretsmanager_state_for_kafka_poller = secretsmanager_state.clone();
     let s3_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -7724,6 +7727,17 @@ async fn main() {
     )));
     let kinesis_lambda_firehose_poller = Arc::new(kinesis_lambda_firehose_poller);
     tokio::spawn(kinesis_lambda_firehose_poller.clone().run());
+    let mut kafka_lambda_poller = kafka_lambda_poller::KafkaLambdaPoller::new(
+        lambda_invocations_state.clone(),
+        kafka_state.clone(),
+        secretsmanager_state_for_kafka_poller,
+    )
+    .with_kms_hook(kms_hook_for_services.clone())
+    .with_failure_destinations(stream_failure_destinations.clone());
+    if let Some(ref ld) = lambda_delivery {
+        kafka_lambda_poller = kafka_lambda_poller.with_lambda_delivery(ld.clone());
+    }
+    tokio::spawn(Arc::new(kafka_lambda_poller).run());
     let mut dynamodb_streams_poller =
         DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone())
             .with_failure_destinations(stream_failure_destinations);

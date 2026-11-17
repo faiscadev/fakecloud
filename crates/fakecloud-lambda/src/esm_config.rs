@@ -78,6 +78,15 @@ impl MappingSource {
     }
 }
 
+/// `BatchSize` when a mapping is created without one: 10 for Amazon SQS, 100
+/// for every other source (the `BatchSize` member's documented defaults).
+pub fn default_batch_size(event_source_arn: &str, self_managed_event_source: bool) -> i64 {
+    match MappingSource::of(event_source_arn, self_managed_event_source) {
+        MappingSource::Sqs => 10,
+        _ => 100,
+    }
+}
+
 fn invalid_parameter(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
